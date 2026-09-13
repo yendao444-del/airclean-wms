@@ -162,6 +162,7 @@ const DATA_SAFETY_ALLOWED_CHANNELS = new Set([
   "stockCheck:ensureDailySession",
   "stockCheck:createFullSession",
   "stockCheck:cancelSession",
+  "stockCheck:rejectSession",
   "stockCheck:createInspectionSession",
   "stockCheck:createRecheckSession",
   "stockCheck:updateCount",
@@ -1582,6 +1583,7 @@ const DATA_SAFETY_BLOCKED_CHANNELS = new Map([
   ["stockCheck:balanceItems", "Cân bằng nhiều mặt hàng làm thay đổi tồn kho"],
   ["stockCheck:ensureDailySession", "Tạo hoặc sửa phiên kiểm kho dùng chung"],
   ["stockCheck:cancelSession", "Hủy phiên kiểm kho đang thực hiện"],
+  ["stockCheck:rejectSession", "Từ chối phiên kiểm kho và ghi nhận phạt"],
   ["stockCheck:createInspectionSession", "Tạo phiếu kiểm kho độc lập"],
   ["stockCheck:createRecheckSession", "Tạo phiên kiểm lại làm thay đổi luồng kiểm kho"],
   ["stockCheck:adminSaveSessions", "Admin lưu toàn bộ phiên kiểm kho có thể ghi đè dữ liệu"],
@@ -28866,6 +28868,152 @@ ipcMain.handle(
 );
 
 ipcMain.handle(
+  "stockCheck:rejectSession",
+  async (_event, payload = {}) => {
+    try {
+      requireRole("admin");
+      const sessionId = String(payload.sessionId || "").trim();
+      const reason = String(payload.reason || "").trim();
+      if (!sessionId) throw new Error("Thiếu phiên kiểm cần từ chối.");
+      if (reason.length < 3) {
+        throw new Error("Vui lòng nhập lý do từ chối ít nhất 3 ký tự.");
+      }
+      if (reason.length > 500) {
+        throw new Error("Lý do từ chối không được vượt quá 500 ký tự.");
+      }
+
+      const result = await getPrismaDirectTx().$transaction(
+        async (tx) => {
+          await lockStockCheckSessions(tx);
+          await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('attendanceData'))`;
+          const [sessionRecord, attendanceRecord] = await Promise.all([
+            tx.appConfig.findUnique({ where: { key: "stockCheckSessionsV2" } }),
+            tx.appConfig.findUnique({ where: { key: "attendanceData" } }),
+          ]);
+          const sessions = parseStockCheckSessionsFromConfig(sessionRecord);
+          const storedSession = sessions.find(
+            (entry) => String(entry?.id) === sessionId,
+          );
+          if (!storedSession) throw new Error("Phiên kiểm hàng không tồn tại.");
+          if (storedSession.type !== "daily") {
+            throw new Error("Chỉ áp dụng từ chối và phạt cho phiên kiểm hàng ngày.");
+          }
+          if (!isStockCheckSessionCompleted(storedSession)) {
+            throw new Error("Chỉ được từ chối phiên kiểm hàng ngày đã hoàn thành.");
+          }
+          if (storedSession.reviewStatus === "rejected") {
+            return {
+              session: storedSession,
+              penaltyAmount: Number(storedSession.rejectionPenaltyAmount || 50000),
+              alreadyRejected: true,
+            };
+          }
+
+          let attendanceData = {};
+          try {
+            attendanceData = attendanceRecord?.value
+              ? JSON.parse(attendanceRecord.value)
+              : {};
+          } catch {}
+          const employees = Array.isArray(attendanceData.employees)
+            ? attendanceData.employees
+            : [];
+          const assigneeKeys = [storedSession.assignedTo, storedSession.assignedName]
+            .map(normalizeActorName)
+            .filter(Boolean);
+          const employee = employees.find((candidate) =>
+            [candidate?.username, candidate?.name, candidate?.displayName]
+              .map(normalizeActorName)
+              .some((value) => value && assigneeKeys.includes(value)),
+          );
+          if (!employee) {
+            throw new Error(
+              `Không tìm thấy người phụ trách "${storedSession.assignedName || storedSession.assignedTo}" trong Bảng công.`,
+            );
+          }
+
+          const rejectedAt = new Date().toISOString();
+          const penaltyAmount = 50000;
+          const fineId = `stock-check-rejected:${sessionId}`;
+          const extraFines = Array.isArray(attendanceData.extraFines)
+            ? [...attendanceData.extraFines]
+            : [];
+          if (!extraFines.some((fine) => String(fine?.id || "") === fineId)) {
+            const periodKey = getBangkokDateKey(rejectedAt).slice(0, 7);
+            if (periodKey && isAttendanceMonthLocked(attendanceData, periodKey)) {
+              throw new Error(
+                `Bảng lương ${periodKey} đã khóa; không thể ghi nhận khoản phạt.`,
+              );
+            }
+            extraFines.push({
+              id: fineId,
+              empId: employee.id,
+              type: "Kết quả kiểm hàng bị từ chối",
+              detail: `Phiên kiểm hàng ngày ${storedSession.date} bị ${currentSession.username} từ chối. Lý do: ${reason}`,
+              amount: penaltyAmount,
+              date: rejectedAt,
+              source: "stock_check_rejected",
+              sessionId,
+              rejectionReason: reason,
+            });
+          }
+
+          storedSession.reviewStatus = "rejected";
+          storedSession.rejectedAt = rejectedAt;
+          storedSession.rejectedBy = currentSession.username;
+          storedSession.rejectionReason = reason;
+          storedSession.rejectionPenaltyAmount = penaltyAmount;
+          await writeStockCheckSessions(sessions, tx);
+          await tx.appConfig.upsert({
+            where: { key: "attendanceData" },
+            update: { value: JSON.stringify({ ...attendanceData, extraFines }) },
+            create: {
+              key: "attendanceData",
+              value: JSON.stringify({ ...attendanceData, extraFines }),
+            },
+          });
+          await tx.activityLog.create({
+            data: {
+              module: "stock_check",
+              action: "REJECT_SESSION",
+              description: `Từ chối phiên kiểm ${sessionId} và phạt ${storedSession.assignedTo} ${penaltyAmount}đ. Lý do: ${reason}`,
+              recordName: sessionId,
+              changes: JSON.stringify({
+                sessionId,
+                assignedTo: storedSession.assignedTo,
+                rejectedAt,
+                rejectedBy: currentSession.username,
+                reason,
+                penaltyAmount,
+                fineId,
+              }),
+              userName: currentSession.username,
+              userId: currentSession.id || null,
+              severity: "WARNING",
+            },
+          });
+          return {
+            session: storedSession,
+            penaltyAmount,
+            alreadyRejected: false,
+          };
+        },
+        { isolationLevel: "Serializable", timeout: 20000, maxWait: 10000 },
+      );
+      attendanceReadCache = null;
+      return {
+        success: true,
+        session: sanitizeStockCheckSession(result.session, true),
+        penaltyAmount: result.penaltyAmount,
+        alreadyRejected: result.alreadyRejected,
+      };
+    } catch (error) {
+      return { success: false, error: error.message };
+    }
+  },
+);
+
+ipcMain.handle(
   "stockCheck:createInspectionSession",
   async (event, payload = {}) => {
     try {
@@ -34035,7 +34183,7 @@ function isFaceServicePortFree() {
   });
 }
 
-function killProcessOnFacePort(execSync) {
+function killProcessOnFacePort() {
   const killCommand = [
     "$targets = @(Get-NetTCPConnection -LocalPort 5001 -State Listen -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess -Unique)",
     "if ($targets.Count -gt 0) {",
@@ -34043,14 +34191,15 @@ function killProcessOnFacePort(execSync) {
     "}",
   ].join("; ");
 
-  execSync(
-    `powershell.exe -NoProfile -NonInteractive -Command "${killCommand}"`,
-    {
-      stdio: "ignore",
-      windowsHide: true,
-      timeout: 10000,
-    },
-  );
+  return new Promise((resolve, reject) => {
+    const { execFile } = require("child_process");
+    execFile(
+      "powershell.exe",
+      ["-NoProfile", "-NonInteractive", "-Command", killCommand],
+      { windowsHide: true, timeout: 10000 },
+      (error) => (error ? reject(error) : resolve()),
+    );
+  });
 }
 
 async function waitForFacePortFree(maxAttempts = 10, delayMs = 1000) {
@@ -34080,7 +34229,7 @@ function ensureFaceService() {
 
       // 2. Kiểm tra port 5001 đã có service sẵn chưa (zombie hoặc process từ lần trước)
       try {
-        const data = await faceServiceFetch("/status");
+        const data = await faceServiceFetch("/status", { timeoutMs: 750 });
         if (isValidFaceServiceStatus(data)) {
           console.log(
             "[Face] ✅ Phát hiện service đang chạy sẵn trên port 5001",
@@ -34105,18 +34254,19 @@ function ensureFaceService() {
       }
 
       // 4. Spawn má»›i
-      const { spawn, execSync } = require("child_process");
-
-      // Kill process đang giữ port 5001 rồi chờ Windows nhả port thật sự.
-      try {
-        killProcessOnFacePort(execSync);
-      } catch {
-        /* Bỏ qua nếu lệnh kill lỗi hoặc không có ai dùng port */
-      }
-      if (!(await waitForFacePortFree())) {
-        throw new Error(
-          `Port ${FACE_SERVICE_PORT} không giải phóng được sau 10s`,
-        );
+      // Port trống là tình huống bình thường khi mở tab lần đầu. Chỉ chạy
+      // PowerShell nếu thật sự có một tiến trình khác đang chiếm cổng.
+      if (!(await isFaceServicePortFree())) {
+        try {
+          await killProcessOnFacePort();
+        } catch {
+          /* Chờ bên dưới sẽ xác nhận cổng đã được giải phóng hay chưa. */
+        }
+        if (!(await waitForFacePortFree())) {
+          throw new Error(
+            `Port ${FACE_SERVICE_PORT} không giải phóng được sau 10s`,
+          );
+        }
       }
 
       // ── Xác định cách chạy: EXE (ưu tiên) hoặc Python (fallback) ──────
@@ -34381,13 +34531,15 @@ function faceServiceFetch(urlPath, options = {}) {
       });
     });
     // /register: 120s (50 ảnh × HOG + encoding), /recognize: 15s, /profile (delete+rebuild): 60s, còn lại: 5s
-    const timeout = urlPath.includes("/register")
-      ? 120000
-      : urlPath.includes("/recognize")
-        ? 15000
-        : urlPath.includes("/profile")
-          ? 60000
-          : 5000;
+    const timeout = Number.isFinite(options.timeoutMs)
+      ? options.timeoutMs
+      : urlPath.includes("/register")
+        ? 120000
+        : urlPath.includes("/recognize")
+          ? 15000
+          : urlPath.includes("/profile")
+            ? 60000
+            : 5000;
     req.setTimeout(timeout, () => {
       req.destroy();
       reject(new Error("Timeout"));
@@ -34851,7 +35003,7 @@ function validatePayslipQrUrl(value) {
   if (
     parsed.protocol !== "https:" ||
     parsed.hostname !== "img.vietqr.io" ||
-    !/^\/image\/[A-Za-z0-9_-]+-compact2\.png$/.test(parsed.pathname)
+    !/^\/image\/[A-Za-z0-9_-]+-(?:compact2|qr_only)\.png$/.test(parsed.pathname)
   ) {
     throw new Error("Chỉ cho phép tải ảnh từ dịch vụ VietQR chính thức.");
   }

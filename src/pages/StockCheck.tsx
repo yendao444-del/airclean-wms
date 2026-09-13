@@ -105,6 +105,11 @@ interface CheckSession {
     cancelledAt?: string;
     cancelledBy?: string;
     cancellationReason?: string;
+    reviewStatus?: 'rejected';
+    rejectedAt?: string;
+    rejectedBy?: string;
+    rejectionReason?: string;
+    rejectionPenaltyAmount?: number;
     rolledOverTo?: string;
     fullCheckExemptions?: Array<{
         sku: string;
@@ -258,7 +263,7 @@ interface ReconciliationLogPage {
 }
 
 type ProductTabKey = 'check' | 'ledger' | 'reconciliation' | 'conversion';
-type SkuHistoryTabKey = 'check-history' | 'ledger';
+type SkuHistoryTabKey = 'balance-history' | 'check-history' | 'ledger';
 
 const createStockCheckRunId = () =>
     globalThis.crypto?.randomUUID?.() || `stock-check-${Date.now()}-${Math.random().toString(36).slice(2)}`;
@@ -443,7 +448,7 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
     const [countingInputs, setCountingInputs] = useState<Record<string, { unitCounts: number[]; le: number; unitTouched?: boolean[]; leTouched?: boolean }>>({});
     const countingInputsRef = useRef<Record<string, { unitCounts: number[]; le: number; unitTouched?: boolean[]; leTouched?: boolean }>>({});
     const [balanceRecords, setBalanceRecords] = useState<BalanceHistoryRecord[]>([]);
-    const [skuHistoryTab, setSkuHistoryTab] = useState<SkuHistoryTabKey>('check-history');
+    const [skuHistoryTab, setSkuHistoryTab] = useState<SkuHistoryTabKey>('balance-history');
     const [skuLedgerLogs, setSkuLedgerLogs] = useState<Record<string, InventoryLogItem[]>>({});
     const [skuLedgerLoading, setSkuLedgerLoading] = useState<Record<string, boolean>>({});
     const [productTabs, setProductTabs] = useState<Record<string, ProductTabKey>>({});
@@ -911,6 +916,46 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
         });
     }, [todaySession, isAdmin, flushPendingCountUpdates]);
 
+    const handleRejectDailySession = useCallback(() => {
+        if (!todaySession || user?.role !== 'admin' || todaySession.type !== 'daily' || !isSessionSubmitted) return;
+        let reason = '';
+        Modal.confirm({
+            title: 'Từ chối phiên kiểm hàng ngày?',
+            width: 480,
+            content: (
+                <div>
+                    <p style={{ marginBottom: 8 }}>Hệ thống sẽ ghi nhận phạt <strong style={{ color: '#dc2626' }}>50.000đ</strong> cho {todaySession.assignedName || todaySession.assignedTo}.</p>
+                    <Input.TextArea
+                        autoFocus
+                        rows={3}
+                        maxLength={500}
+                        placeholder="Nhập lý do từ chối (bắt buộc)"
+                        onChange={event => { reason = event.target.value; }}
+                    />
+                </div>
+            ),
+            okText: 'Từ chối & ghi nhận phạt',
+            okType: 'danger',
+            cancelText: 'Quay lại',
+            onOk: async () => {
+                const normalizedReason = reason.trim();
+                if (normalizedReason.length < 3) {
+                    message.error('Vui lòng nhập lý do từ chối ít nhất 3 ký tự.');
+                    throw new Error('Thiếu lý do từ chối.');
+                }
+                const result = await window.electronAPI.stockCheck.rejectSession({
+                    sessionId: todaySession.id,
+                    reason: normalizedReason,
+                });
+                if (!result?.success || !result.session) {
+                    throw new Error(result?.error || 'Không thể từ chối phiên kiểm hàng.');
+                }
+                setSessions(current => current.map(session => session.id === todaySession.id ? { ...session, ...result.session } : session));
+                message.success(`Đã từ chối phiên và ghi nhận phạt ${(result.penaltyAmount || 50000).toLocaleString('vi-VN')}đ.`);
+            },
+        });
+    }, [todaySession, user?.role, isSessionSubmitted]);
+
     useEffect(() => {
         setHeaderExtra(
             <div style={{ display: 'flex', alignItems: 'center', width: '100%', gap: 12 }}>
@@ -1212,7 +1257,7 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
             </div>
         );
         return () => clearHeaderExtra();
-    }, [activeTab, todaySession, todayAssigneeInitial, todayAssigneeLabel, isAdmin, isToday, canManage, isSessionSubmitted, sessions, dailyDisabledByFull, dailyWindowOpen, fullWindowOpen, isActiveTimeLocked, setHeaderExtra, clearHeaderExtra, handleUndoSession, handleCancelSession]);
+    }, [activeTab, todaySession, todayAssigneeInitial, todayAssigneeLabel, isAdmin, isToday, canManage, isSessionSubmitted, sessions, dailyDisabledByFull, dailyWindowOpen, fullWindowOpen, isActiveTimeLocked, setHeaderExtra, clearHeaderExtra, handleUndoSession, handleCancelSession, handleRejectDailySession]);
 
     const fetchStaff = async () => {
         try {
@@ -2257,6 +2302,21 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
                 ),
             }))
     ), [selectedSku, sessionBalanceRecords]);
+    const allBalanceRows = useMemo(() => sessionBalanceRecords.flatMap(record =>
+        record.items
+            .filter(item => Number(item.difference || 0) !== 0)
+            .map((item, index) => ({
+                key: `${record.id || record.date}-${item.sku}-${index}`,
+                time: record.date,
+                adjustedBy: record.adjustedBy,
+                productName: item.productName || record.notes?.replace(/^Kiểm hàng:\s*/, '').trim() || '-',
+                sku: item.sku,
+                systemStock: item.systemStock,
+                actualStock: item.actualStock,
+                difference: item.difference,
+                reason: item.note?.trim() || record.notes?.replace(/^Kiểm hàng:\s*/, '').trim() || '',
+            }))
+    ).sort((a, b) => new Date(b.time).getTime() - new Date(a.time).getTime()), [sessionBalanceRecords]);
     const selectedSkuWithdrawalHistory = useMemo(() => {
         const skuByUnitCode = new Map(
             handlingUnits.map(unit => [normalizeSku(unit.id), normalizeSku(unit.skuName)])
@@ -2306,6 +2366,10 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
             void loadSkuLedger(selectedSku);
         }
     }, [loadSkuLedger, selectedSku, skuHistoryTab]);
+
+    useEffect(() => {
+        setSkuHistoryTab('balance-history');
+    }, [selectedSku]);
 
     const selectedSkuUnits = useMemo(() => handlingUnits.filter(unit =>
         normalizeSku(unit.skuName) === normalizeSku(selectedSku) && unit.status !== 'Đã hết'
@@ -3061,6 +3125,28 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
         );
     };
 
+    const renderBalanceHistory = () => {
+        const rows = allBalanceRows;
+        return (
+            <div style={{ paddingTop: 4 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
+                    <Tag color="orange" style={{ margin: 0, fontWeight: 800 }}>Cân bằng kho</Tag>
+                    <span style={{ color: '#64748b', fontSize: 12 }}>Toàn bộ sản phẩm/SKU có phát sinh điều chỉnh trong phiên</span>
+                </div>
+                {rows.length === 0 ? <Empty description="SKU này chưa có lần cân bằng làm thay đổi tồn kho" style={{ padding: 32 }} /> : (
+                    <Table<any> dataSource={rows} rowKey="key" size="small" pagination={{ pageSize: 30, showSizeChanger: false }} columns={[
+                        { title: 'Thời gian', dataIndex: 'time', width: 135, render: (value: string) => <div><b style={{ color: '#166534' }}>{dayjs(value).format('HH:mm')}</b><div style={{ color: '#64748b', fontSize: 11 }}>{dayjs(value).format('DD/MM/YYYY')}</div></div> },
+                        { title: 'Sản phẩm / SKU', width: 250, render: (_: unknown, row: any) => <div><b style={{ display: 'block', color: '#334155' }}>{row.productName}</b><code style={{ color: '#0958d9', fontSize: 11 }}>{row.sku}</code></div> },
+                        { title: 'Người thực hiện', dataIndex: 'adjustedBy', width: 165, render: (value: string) => <b>{value || 'Hệ thống'}</b> },
+                        { title: 'Tồn hệ thống', dataIndex: 'systemStock', width: 110, align: 'right' as const, render: (value: number) => canRevealSystemStock ? Number(value || 0).toLocaleString('vi-VN') : '***' },
+                        { title: 'Tồn thực tế', dataIndex: 'actualStock', width: 110, align: 'right' as const, render: (value: number) => <b style={{ color: '#166534' }}>{Number(value || 0).toLocaleString('vi-VN')}</b> },
+                        { title: 'Đã điều chỉnh', dataIndex: 'difference', width: 120, align: 'right' as const, render: (value: number) => <b style={{ color: value > 0 ? '#16a34a' : '#dc2626' }}>{value > 0 ? '+' : ''}{Number(value || 0).toLocaleString('vi-VN')}</b> },
+                        { title: 'Lý do', dataIndex: 'reason', ellipsis: true, render: (value: string) => value || <span style={{ color: '#cbd5e1' }}>—</span> },
+                    ]} />)}
+            </div>
+        );
+    };
+
     const renderSkuActivityHistory = (item: CheckItem) => {
         return (
             <div style={{ paddingTop: 4 }}>
@@ -3288,14 +3374,19 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
                                 Tạo phiếu kiểm
                             </Button>
                         )}
-                        {canCreateInspection && isPast && todaySession?.status === 'completed' && todaySession.type !== 'inspection' && todaySession.type !== 'recheck' && (
-                            <Button
-                                icon={<SyncOutlined />}
-                                onClick={() => openInspectionDrawer(todaySession)}
-                                style={{ borderColor: '#10b981', color: '#059669', fontWeight: 700 }}
-                            >
-                                Tạo phiếu kiểm từ phiên này
-                            </Button>
+                        {user?.role === 'admin' && activeTab === 'daily' && isSessionSubmitted && todaySession?.reviewStatus !== 'rejected' && (
+                            <Tooltip title="Từ chối phiên và ghi nhận phạt 50.000đ">
+                                <Button
+                                    danger
+                                    type="default"
+                                    size="small"
+                                    aria-label="Từ chối phiên và ghi nhận phạt 50.000đ"
+                                    onClick={handleRejectDailySession}
+                                    style={{ paddingInline: 10, fontWeight: 700, background: '#fff1f0', borderColor: '#ff7875', color: '#cf1322' }}
+                                >
+                                    Từ chối
+                                </Button>
+                            </Tooltip>
                         )}
                     </div>
                 </div>
@@ -3306,6 +3397,16 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
                         showIcon
                         style={{ marginBottom: 12, borderRadius: 8 }}
                         message={<span><strong>{todaySession.type === 'recheck' ? 'Phiếu kiểm cũ' : 'Phiếu kiểm'}</strong> · {todaySession.items.length} SKU · Lý do: {todaySession.notes}</span>}
+                    />
+                )}
+
+                {activeTab === 'daily' && todaySession?.reviewStatus === 'rejected' && (
+                    <Alert
+                        type="error"
+                        showIcon
+                        style={{ marginBottom: 12, borderRadius: 8 }}
+                        message={`Phiên đã bị từ chối · Đã ghi nhận phạt ${(todaySession.rejectionPenaltyAmount || 50000).toLocaleString('vi-VN')}đ`}
+                        description={`${todaySession.rejectionReason || 'Không có lý do'} · Người từ chối: ${todaySession.rejectedBy || 'Admin'}`}
                     />
                 )}
 
@@ -4019,6 +4120,11 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
                                         if (nextTab === 'ledger') void loadSkuLedger(selectedItem.sku);
                                     }}
                                     items={[
+                                        {
+                                            key: 'balance-history',
+                                            label: `Lịch sử cân bằng kho (${allBalanceRows.length})`,
+                                            children: renderBalanceHistory(),
+                                        },
                                         {
                                             key: 'check-history',
                                             label: `Lịch sử kiểm hàng (${selectedSkuActivityRows.length})`,

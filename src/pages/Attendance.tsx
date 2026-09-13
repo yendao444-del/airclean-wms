@@ -1,5 +1,6 @@
-import { useState, useMemo, useCallback, useRef, useEffect, forwardRef, useImperativeHandle, cloneElement, isValidElement } from 'react';
+import { useState, useMemo, useCallback, useRef, useEffect, useTransition, forwardRef, useImperativeHandle, cloneElement, isValidElement } from 'react';
 import { PieChart, Pie, Cell, Tooltip as ReTooltip, ResponsiveContainer, Legend } from 'recharts';
+import { Medal } from '@phosphor-icons/react';
 import { useCurrentUser } from '../lib/hooks/useCurrentUser';
 import { useAuth } from '../contexts/AuthContext';
 import { usePageHeader } from '../contexts/PageHeaderContext';
@@ -98,6 +99,7 @@ import packingRaceLeaderFox from '../assets/packing/race-leader-fox.png';
 import packingRaceRunnerPanda from '../assets/packing/race-runner-panda.png';
 import packingRaceWinnerHeader from '../assets/packing/race-previous-winner-header.png';
 import attendanceRulesBackground from '../assets/attendance/attendance-rules-calendar.png';
+import attendanceBadgeMinimalSeal from '../assets/attendance/attendance-badge-minimal-seal.webp';
 
 // Dùng chung Audio Context trong màn hình chấm công để phát âm báo Ting.
 let sharedAudioCtx: AudioContext | null = null;
@@ -572,6 +574,8 @@ const PACKING_WEEKLY_REWARD_START = dayjs('2026-08-31').startOf('day');
 
 const normalizePackingSku = (value: unknown) => String(value || '').trim().toUpperCase();
 
+const yieldToRenderer = () => new Promise<void>(resolve => window.setTimeout(resolve, 0));
+
 const parsePackingComboItems = (value: unknown): Array<{ sku: string; quantity: number }> => {
     try {
         const parsed = typeof value === 'string' ? JSON.parse(value || '[]') : value;
@@ -639,6 +643,37 @@ const normalizePackingCommission = (value?: Partial<PackingCommissionConfig> | n
         updatedAt: value?.updatedAt,
         updatedBy: value?.updatedBy,
     };
+};
+
+const LEGACY_PACKING_COMMISSION = normalizePackingCommission({
+    rates: { easy: LEGACY_PACKING_UNIT_PRICE, medium: LEGACY_PACKING_UNIT_PRICE, high: LEGACY_PACKING_UNIT_PRICE },
+    skuLevels: {},
+});
+
+const packingCommissionRuntimeCache = new WeakMap<object, {
+    current: PackingCommissionConfig;
+    history: Array<{ effectiveAt: number; commission: PackingCommissionConfig }>;
+}>();
+
+const getPackingCommissionRuntime = (rawCommission?: PackingCommissionConfig) => {
+    const source = rawCommission || DEFAULT_PACKING_COMMISSION;
+    const cached = packingCommissionRuntimeCache.get(source);
+    if (cached) return cached;
+
+    const current = normalizePackingCommission(source);
+    const runtime = {
+        current,
+        history: (current.history || []).map(version => ({
+            effectiveAt: dayjs(version.effectiveAt).valueOf(),
+            commission: normalizePackingCommission({
+                rates: version.rates,
+                skuLevels: version.skuLevels,
+                customLevels: version.customLevels,
+            }),
+        })),
+    };
+    packingCommissionRuntimeCache.set(source, runtime);
+    return runtime;
 };
 
 const getPackingLevelOptions = (commission: PackingCommissionConfig) => [
@@ -1041,8 +1076,8 @@ const getAssignmentDeadlineRecipients = (task: any): string[] => {
     return task?.assignee ? [String(task.assignee)] : [];
 };
 const usesLegacyPackingPolicy = (timestamp?: string) => {
-    const orderTime = dayjs(timestamp || '');
-    return orderTime.isValid() && orderTime.isBefore(PACKING_COMMISSION_POLICY_START, 'day');
+    const orderTime = Date.parse(timestamp || '');
+    return Number.isFinite(orderTime) && orderTime < PACKING_COMMISSION_POLICY_START.valueOf();
 };
 
 function calcLegacyPackingUnitsFromItem(item: PackingOrderItem): number {
@@ -1065,41 +1100,36 @@ function calcLegacyPackingUnitsFromItem(item: PackingOrderItem): number {
     return Math.max(0, Number(item.quantity || 1)) * packCount;
 }
 
-function calcPackingUnitsFromItem(item: PackingOrderItem, timestamp?: string): number {
-    if (usesLegacyPackingPolicy(timestamp)) return calcLegacyPackingUnitsFromItem(item);
+function calcPackingUnitsFromItem(item: PackingOrderItem, timestamp?: string, legacyPolicy = usesLegacyPackingPolicy(timestamp)): number {
+    if (legacyPolicy) return calcLegacyPackingUnitsFromItem(item);
     if (Number.isFinite(item.packingUnits)) return Math.max(0, Number(item.packingUnits));
     return Math.max(0, Number(item.quantity || 1));
 }
 
 function calcPacksFromItems(items: PackingOrderItem[], timestamp?: string): number {
-    return items.reduce((total, item) => total + calcPackingUnitsFromItem(item, timestamp), 0);
+    const legacyPolicy = usesLegacyPackingPolicy(timestamp);
+    return items.reduce((total, item) => total + calcPackingUnitsFromItem(item, timestamp, legacyPolicy), 0);
 }
 
 function getPackingLevel(item: PackingOrderItem, commission: PackingCommissionConfig): string {
-    if (item.packingLevel && getPackingLevelOptions(commission).some(option => option.key === item.packingLevel)) return item.packingLevel;
+    if (item.packingLevel && Object.prototype.hasOwnProperty.call(commission.rates, item.packingLevel)) return item.packingLevel;
     return commission.skuLevels[normalizePackingSku(item.packingSourceSku || item.sku)] || 'easy';
 }
 
 function getPackingCommissionAt(rawCommission?: PackingCommissionConfig, timestamp?: string): PackingCommissionConfig {
-    if (usesLegacyPackingPolicy(timestamp)) {
-        return normalizePackingCommission({
-            rates: { easy: LEGACY_PACKING_UNIT_PRICE, medium: LEGACY_PACKING_UNIT_PRICE, high: LEGACY_PACKING_UNIT_PRICE },
-            skuLevels: {},
-        });
+    if (usesLegacyPackingPolicy(timestamp)) return LEGACY_PACKING_COMMISSION;
+    const runtime = getPackingCommissionRuntime(rawCommission);
+    const orderTime = Date.parse(timestamp || '');
+    if (!Number.isFinite(orderTime)) return runtime.current;
+    for (let index = runtime.history.length - 1; index >= 0; index -= 1) {
+        if (runtime.history[index].effectiveAt <= orderTime) return runtime.history[index].commission;
     }
-    const commission = normalizePackingCommission(rawCommission);
-    if (!timestamp || !dayjs(timestamp).isValid()) return commission;
-    const orderTime = dayjs(timestamp).valueOf();
-    const version = [...(commission.history || [])]
-        .reverse()
-        .find(item => dayjs(item.effectiveAt).valueOf() <= orderTime);
-    if (!version) return normalizePackingCommission(DEFAULT_PACKING_COMMISSION);
-    return normalizePackingCommission({ rates: version.rates, skuLevels: version.skuLevels, customLevels: version.customLevels });
+    return getPackingCommissionRuntime(DEFAULT_PACKING_COMMISSION).current;
 }
 
 function calcPackingCommission(items: PackingOrderItem[], rawCommission?: PackingCommissionConfig, timestamp?: string) {
     const commission = getPackingCommissionAt(rawCommission, timestamp);
-    const isLegacyPolicy = usesLegacyPackingPolicy(timestamp);
+    const isLegacyPolicy = commission === LEGACY_PACKING_COMMISSION;
     const breakdown: Record<string, { units: number; income: number }> = Object.fromEntries(
         getPackingLevelOptions(commission).map(level => [level.key, { units: 0, income: 0 }])
     );
@@ -1107,7 +1137,7 @@ function calcPackingCommission(items: PackingOrderItem[], rawCommission?: Packin
     items.forEach(item => {
         const level = isLegacyPolicy ? 'easy' : getPackingLevel(item, commission);
         if (!breakdown[level]) breakdown[level] = { units: 0, income: 0 };
-        const units = calcPackingUnitsFromItem(item, timestamp);
+        const units = calcPackingUnitsFromItem(item, timestamp, isLegacyPolicy);
         const unitPrice = isLegacyPolicy
             ? LEGACY_PACKING_UNIT_PRICE
             : Number.isFinite(item.packingUnitPrice)
@@ -1132,13 +1162,13 @@ function calcPackingCommission(items: PackingOrderItem[], rawCommission?: Packin
 
 function snapshotPackingOrder(order: PackingOrderLog, rawCommission?: PackingCommissionConfig): PackingOrderLog {
     const commission = getPackingCommissionAt(rawCommission, order.timestamp);
-    const isLegacyPolicy = usesLegacyPackingPolicy(order.timestamp);
+    const isLegacyPolicy = commission === LEGACY_PACKING_COMMISSION;
     return {
         ...order,
         items: order.items.map(item => {
             const level = isLegacyPolicy ? 'easy' : getPackingLevel(item, commission);
             const levelOption = getPackingLevelOption(commission, level);
-            const packingUnits = calcPackingUnitsFromItem(item, order.timestamp);
+            const packingUnits = calcPackingUnitsFromItem(item, order.timestamp, isLegacyPolicy);
             const packingUnitPrice = isLegacyPolicy ? LEGACY_PACKING_UNIT_PRICE : commission.rates[level];
             return {
                 ...item,
@@ -1202,11 +1232,17 @@ const getPackingComparisonRange = (range: AttendancePeriod): AttendancePeriod =>
 
 function buildPackingWeeklyResults(orderLogs: PackingOrderLog[], employeesList: Employee[], asOf: dayjs.Dayjs): PackingWeeklyResult[] {
     const weeks = new Map<string, Map<number, { employee: Employee; units: number; orderCount: number }>>();
+    const employeeByPacker = new Map<string, Employee | null>();
 
     orderLogs.forEach(order => {
         const orderTime = dayjs(order.timestamp);
         if (!orderTime.isValid() || orderTime.isBefore(PACKING_WEEKLY_REWARD_START) || orderTime.isAfter(asOf)) return;
-        const employee = employeesList.find(item => matchPacker(order.packer, item));
+        const packerKey = String(order.packer || '');
+        let employee = employeeByPacker.get(packerKey);
+        if (employee === undefined) {
+            employee = employeesList.find(item => matchPacker(packerKey, item)) || null;
+            employeeByPacker.set(packerKey, employee);
+        }
         if (!employee) return;
         const weekStart = getPackingWeekStart(orderTime);
         const weekKey = weekStart.format('YYYY-MM-DD');
@@ -1284,10 +1320,55 @@ function calculatePayroll(
     const STANDARD_WORK_DAYS = 26;
     const HOURS_PER_SHIFT = 4;
     const normalizedPackingCommission = normalizePackingCommission(packingCommission);
-    const totalPackValue_100 = orderLogs.reduce(
-        (sum, order) => sum + calcPackingCommission(order.items, normalizedPackingCommission, order.timestamp).income,
-        0
-    );
+    const packingByEmployee = new Map<number, {
+        income: number;
+        orderCount: number;
+        units: number;
+        breakdown: Record<string, { units: number; income: number }>;
+    }>();
+    const matchedEmployeesByPacker = new Map<string, Employee[]>();
+    const employmentEndByEmployee = new Map<number, dayjs.Dayjs | null>();
+    employeesList.forEach(employee => {
+        const value = String(employmentEndDates[normalizeAttendanceText(employee.username)] || '').trim();
+        employmentEndByEmployee.set(employee.id, /^\d{4}-\d{2}-\d{2}$/.test(value) ? dayjs(value) : null);
+    });
+    const attendanceLogsByEmployee = new Map<number, any[]>();
+    liveLogs.forEach(log => {
+        const employee = findEmployeeForAttendanceLog(log, employeesList);
+        if (!employee) return;
+        const rows = attendanceLogsByEmployee.get(employee.id) || [];
+        rows.push(log);
+        attendanceLogsByEmployee.set(employee.id, rows);
+    });
+    let totalPackValue_100 = 0;
+
+    // Aggregate every order once. The old implementation rescanned the full
+    // order list for every employee and recalculated the same commission.
+    orderLogs.forEach(order => {
+        const packing = calcPackingCommission(order.items, normalizedPackingCommission, order.timestamp);
+        totalPackValue_100 += packing.income;
+        const packerKey = String(order.packer || '');
+        let matchedEmployees = matchedEmployeesByPacker.get(packerKey);
+        if (!matchedEmployees) {
+            matchedEmployees = employeesList.filter(employee => matchPacker(packerKey, employee));
+            matchedEmployeesByPacker.set(packerKey, matchedEmployees);
+        }
+        const orderDate = dayjs(order.timestamp);
+        matchedEmployees.forEach(employee => {
+            const employmentEnd = employmentEndByEmployee.get(employee.id);
+            if (employmentEnd?.isValid() && orderDate.isValid() && !orderDate.isBefore(employmentEnd, 'day')) return;
+            const aggregate = packingByEmployee.get(employee.id) || { income: 0, orderCount: 0, units: 0, breakdown: {} };
+            aggregate.income += packing.income;
+            aggregate.orderCount += 1;
+            aggregate.units += packing.units;
+            Object.entries(packing.breakdown).forEach(([key, row]) => {
+                if (!aggregate.breakdown[key]) aggregate.breakdown[key] = { units: 0, income: 0 };
+                aggregate.breakdown[key].units += row.units;
+                aggregate.breakdown[key].income += row.income;
+            });
+            packingByEmployee.set(employee.id, aggregate);
+        });
+    });
     const periodKey = `${yearNum}-${String(monthNum).padStart(2, '0')}`;
     const today = dayjs().startOf('day');
     const daysInPayrollMonth = dayjs(`${yearNum}-${monthNum}-01`).daysInMonth();
@@ -1329,15 +1410,11 @@ function calculatePayroll(
         if (emp.type === 'Seasonal') {
             // ========== NV THỜI VỤ: Lương theo ca từ điểm danh ==========
             // Match logs cho nhân viên này
-            const empLogs = liveLogs.filter((l: any) => {
-                const matched = findEmployeeForAttendanceLog(l, employeesList);
-                if (matched?.id === emp.id) {
-                    const logDate = l.date || (l.timestamp ? l.timestamp.substring(0, 10) : '');
-                    if (!logDate) return false;
-                    const d = new Date(logDate);
-                    return d.getMonth() + 1 === monthNum && d.getFullYear() === yearNum && isWithinEmployment(dayjs(logDate));
-                }
-                return false;
+            const empLogs = (attendanceLogsByEmployee.get(emp.id) || []).filter((l: any) => {
+                const logDate = l.date || (l.timestamp ? l.timestamp.substring(0, 10) : '');
+                if (!logDate) return false;
+                const d = new Date(logDate);
+                return d.getMonth() + 1 === monthNum && d.getFullYear() === yearNum && isWithinEmployment(dayjs(logDate));
             });
 
             // Đếm ca: Có ít nhất 1 check-in HOẶC check-out = tính 1 ca
@@ -1402,9 +1479,7 @@ function calculatePayroll(
             // ========== NV CHÍNH THỨC: Lương cố định ==========
             shifts = TOTAL_SHIFTS;
             salaryBase = emp.baseSalary;
-            const empLogs = liveLogs.filter((l: any) => {
-                const matched = findEmployeeForAttendanceLog(l, employeesList);
-                if (matched?.id !== emp.id) return false;
+            const empLogs = (attendanceLogsByEmployee.get(emp.id) || []).filter((l: any) => {
                 const logDate = l.date || (l.timestamp ? l.timestamp.substring(0, 10) : '');
                 if (!logDate) return false;
                 const d = new Date(logDate);
@@ -1461,26 +1536,11 @@ function calculatePayroll(
         const autoSalaryBase = salaryBase;
 
         // === Tính thu nhập đóng gói CÁ NHÂN bằng match linh hoạt ===
-        let packIncome = 0;
-        let packOrderCount = 0;
-        let packTotalUnits = 0;
-        const packBreakdown: Record<string, { units: number; income: number }> = {};
-
-        orderLogs.forEach(order => {
-            const orderDate = dayjs(order.timestamp);
-            if (employmentEnd && orderDate.isValid() && !isWithinEmployment(orderDate)) return;
-            if (matchPacker(order.packer || '', emp)) {
-                const packing = calcPackingCommission(order.items, normalizedPackingCommission, order.timestamp);
-                packIncome += packing.income;
-                packOrderCount += 1;
-                packTotalUnits += packing.units;
-                Object.entries(packing.breakdown).forEach(([key, row]) => {
-                    if (!packBreakdown[key]) packBreakdown[key] = { units: 0, income: 0 };
-                    packBreakdown[key].units += row.units;
-                    packBreakdown[key].income += row.income;
-                });
-            }
-        });
+        const packingAggregate = packingByEmployee.get(emp.id);
+        const packIncome = packingAggregate?.income || 0;
+        const packOrderCount = packingAggregate?.orderCount || 0;
+        const packTotalUnits = packingAggregate?.units || 0;
+        const packBreakdown = packingAggregate?.breakdown || {};
 
         const autoPackIncome = packIncome;
 
@@ -2004,12 +2064,14 @@ const FaceAttendanceTab = forwardRef<FaceAttendanceTabHandle, {
     const lastResultRef = useRef<any>(null);    // lưu result mới nhất để draw tên
 
     const [serviceOk, setServiceOk] = useState(false);
-    const [serviceStatus, setServiceStatus] = useState<'ready' | 'initializing' | 'error'>('error');
+    const [serviceStatus, setServiceStatus] = useState<'idle' | 'ready' | 'initializing' | 'error'>('idle');
+    const serviceCheckPromiseRef = useRef<Promise<boolean> | null>(null);
     const [deviceAccess, setDeviceAccess] = useState<{ allowed: boolean; status?: string; deviceCode?: string; machineName?: string } | null>(null);
     const [cameraOn, setCameraOn] = useState(false);
     const cameraOnRef = useRef(false);
     const [recognizing, setRecognizing] = useState(false);
     const [cameraExpanded, setCameraExpanded] = useState(false);
+    const [attendanceDetailsReady, setAttendanceDetailsReady] = useState(false);
     const [lastResult, setLastResult] = useState<any>(null);
     const [todayLogs, setTodayLogs] = useState<any[]>([]);
     const [profiles, setProfiles] = useState<any[]>([]);
@@ -2040,15 +2102,25 @@ const FaceAttendanceTab = forwardRef<FaceAttendanceTabHandle, {
 
     // Check service status
     const checkService = useCallback(async () => {
-        console.log('[Face:checkService] api=', !!api, '| electronAPI=', !!(window as any).electronAPI, '| attendance=', !!(window as any).electronAPI?.attendance);
-        if (!api) return;
-        const res = await api.status();
-        console.log('[Face:checkService] res=', JSON.stringify(res));
-        setServiceOk(res.success);
-        if (res.success && res.data?.status) {
-            setServiceStatus(res.data.status);
-        } else {
-            setServiceStatus('error');
+        if (serviceCheckPromiseRef.current) return serviceCheckPromiseRef.current;
+        const task = (async () => {
+            if (!api) return false;
+            setServiceStatus('initializing');
+            const res = await api.status();
+            setServiceOk(res.success);
+            if (res.success && res.data?.status) {
+                setServiceStatus(res.data.status);
+                return res.data.status === 'ready';
+            } else {
+                setServiceStatus('error');
+                return false;
+            }
+        })();
+        serviceCheckPromiseRef.current = task;
+        try {
+            await task;
+        } finally {
+            if (serviceCheckPromiseRef.current === task) serviceCheckPromiseRef.current = null;
         }
     }, [api]);
 
@@ -2065,21 +2137,15 @@ const FaceAttendanceTab = forwardRef<FaceAttendanceTabHandle, {
 
     useEffect(() => {
         console.log('[Face:mount] Attendance component mounted. api=', !!api);
-        // Gọi lần đầu ngay khi mở tab
-        checkService();
+        // Danh sách log/profile dùng DB và không cần khởi động engine khuôn mặt.
         loadData();
+    }, [api, loadData]);
 
-        // Vòng lặp ngầm: Cứ 10 giây tự động gọi checkService() 1 lần.
-        // Tác dụng:
-        // 1. Tự recover nếu kết nối rớt giữa chừng (User không cần tự bấm "Làm mới").
-        // 2. Chống chết yểu: Giúp backend biết tab Điểm danh vẫn đang mở (reset Idle Timer liên tục).
-        const healthCheckInterval = setInterval(async () => {
-            await checkService();
-        }, 10000);
-
-        // Hủy vòng lặp khi user chuyển sang tab khác
-        return () => clearInterval(healthCheckInterval);
-    }, [checkService, loadData]);
+    useEffect(() => {
+        if (!serviceOk) return;
+        const healthCheckInterval = window.setInterval(() => { void checkService(); }, 30000);
+        return () => window.clearInterval(healthCheckInterval);
+    }, [checkService, serviceOk]);
 
     const checkDeviceAccess = useCallback(async () => {
         const deviceApi = (window as any).electronAPI?.attendanceDevices;
@@ -2097,6 +2163,17 @@ const FaceAttendanceTab = forwardRef<FaceAttendanceTabHandle, {
         const interval = window.setInterval(checkDeviceAccess, 30000);
         return () => window.clearInterval(interval);
     }, [checkDeviceAccess]);
+
+    useEffect(() => {
+        let secondFrame = 0;
+        const firstFrame = window.requestAnimationFrame(() => {
+            secondFrame = window.requestAnimationFrame(() => setAttendanceDetailsReady(true));
+        });
+        return () => {
+            window.cancelAnimationFrame(firstFrame);
+            if (secondFrame) window.cancelAnimationFrame(secondFrame);
+        };
+    }, []);
 
     // Camera start/stop
     const startCamera = useCallback((): Promise<boolean> => {
@@ -2531,8 +2608,13 @@ const FaceAttendanceTab = forwardRef<FaceAttendanceTabHandle, {
             return;
         }
         if (!cameraExpanded && serviceStatus !== 'ready') {
-            message.warning('Dịch vụ nhận diện khuôn mặt chưa sẵn sàng. Vui lòng thử lại sau.');
-            return;
+            const hide = message.loading('Đang khởi động nhận diện khuôn mặt...', 0);
+            const ready = await checkService().catch(() => false);
+            hide();
+            if (!ready) {
+                message.warning('Dịch vụ nhận diện khuôn mặt chưa sẵn sàng. Vui lòng thử lại sau.');
+                return;
+            }
         }
         if (cameraExpanded) {
             if (idleTimerRef.current) clearTimeout(idleTimerRef.current);
@@ -2561,7 +2643,7 @@ const FaceAttendanceTab = forwardRef<FaceAttendanceTabHandle, {
         }
         startRecognizing();
         resetIdleTimer();
-    }, [cameraExpanded, deviceAccess, resetIdleTimer, serviceStatus, startCamera, startRecognizing, stopCamera, stopRecognizing]);
+    }, [cameraExpanded, checkService, deviceAccess, resetIdleTimer, serviceStatus, startCamera, startRecognizing, stopCamera, stopRecognizing]);
 
     useEffect(() => {
         if (deviceAccess && !deviceAccess.allowed && cameraExpanded) closeAttendanceRef.current?.();
@@ -2872,11 +2954,16 @@ const FaceAttendanceTab = forwardRef<FaceAttendanceTabHandle, {
     const rewardTargetDays = rewardSummary?.monthly.targetDays || reward?.requiredDays || 24;
     const rewardOnTimeDays = rewardSummary?.monthly.onTimeDays || 0;
     const rewardStreak = rewardSummary?.currentStreak || 0;
-    const rewardPercent = Math.min(100, Math.round((rewardOnTimeDays / Math.max(1, rewardTargetDays)) * 100));
     const rewardValue = reward?.rewardAmount || 200000;
-    const rewardRate = rewardSummary?.monthly.onTimeRate || 0;
-    const requiredRewardRate = rewardSummary?.monthly.requiredRate || (24 / 26);
     const monthlyRewardEligible = rewardSummary?.monthly.eligibleEmployee ?? reward?.employeeType === 'Official';
+    const waiverTargetDays = rewardSummary?.waiver.streakDays || 7;
+    const waiverMarkerPercent = Math.min(82, Math.max(18, (waiverTargetDays / Math.max(1, rewardTargetDays)) * 100));
+    const rewardRoadmapPercent = rewardStreak < waiverTargetDays
+        ? (rewardStreak / Math.max(1, waiverTargetDays)) * waiverMarkerPercent
+        : waiverMarkerPercent + (
+            Math.max(0, rewardOnTimeDays - waiverTargetDays)
+            / Math.max(1, rewardTargetDays - waiverTargetDays)
+        ) * (100 - waiverMarkerPercent);
     const resolvedToolbarActions = useMemo(() => {
         if (!toolbarActions || !isValidElement(toolbarActions)) return toolbarActions;
         const action = toolbarActions as React.ReactElement<any>;
@@ -2896,10 +2983,11 @@ const FaceAttendanceTab = forwardRef<FaceAttendanceTabHandle, {
             <div className="att-face-toolbar">
                 <Space className="att-face-toolbar__service" size={8} wrap>
                     <Badge
-                        status={serviceStatus === 'ready' ? 'success' : serviceStatus === 'initializing' ? 'processing' : 'error'}
+                        status={serviceStatus === 'ready' ? 'success' : serviceStatus === 'initializing' ? 'processing' : serviceStatus === 'idle' ? 'default' : 'error'}
                         text={<Text style={{ fontWeight: 700 }}>{
                             serviceStatus === 'ready' ? 'Python service: Sẵn sàng'
                             : serviceStatus === 'initializing' ? 'Python service: Đang khởi tạo...'
+                            : serviceStatus === 'idle' ? 'Python service: Chờ chấm công'
                             : 'Python service: Không kết nối được'
                         }</Text>}
                     />
@@ -3102,24 +3190,42 @@ const FaceAttendanceTab = forwardRef<FaceAttendanceTabHandle, {
                         <div className="att-attendance-achievement__streak">Đúng giờ <strong>{rewardStreak} ngày</strong> liên tiếp</div>
                     </div>
                 </div>
-                <Tag className="att-attendance-achievement__badge" icon={<SafetyCertificateOutlined />}>
+                <Tag className="att-attendance-achievement__badge" icon={<Medal weight="fill" />}>
                     {rewardSummary?.badgeUnlocked ? `Đúng giờ +${rewardStreak} ngày` : `Mục tiêu huy hiệu: ${rewardSummary?.badgeStreakDays || 3} ngày`}
                 </Tag>
-                <div className="att-attendance-achievement__progress">
-                    <div className="att-attendance-achievement__progress-copy">
-                        <strong>{rewardOnTimeDays}/{rewardTargetDays} ngày đúng giờ</strong>
-                        <span>{monthlyRewardEligible
-                            ? `Từ ${(requiredRewardRate * 100).toLocaleString('vi-VN', { maximumFractionDigits: 1 })}% (24/26) để nhận ${rewardValue.toLocaleString('vi-VN')}đ`
-                            : 'Thưởng chuyên cần tháng không áp dụng cho thời vụ'}</span>
+                <div className="att-attendance-achievement__roadmap" aria-label="Lộ trình thưởng chuyên cần">
+                    <div className="att-attendance-roadmap__track">
+                        <i style={{ width: `${Math.min(100, Math.max(0, rewardRoadmapPercent))}%` }} />
+                        <span
+                            className={`att-attendance-roadmap__marker is-waiver ${rewardSummary?.waiver.eligible ? 'is-achieved' : ''}`}
+                            style={{ left: `${waiverMarkerPercent}%` }}
+                            aria-hidden="true"
+                        ><ClockCircleOutlined /></span>
+                        <span className={`att-attendance-roadmap__marker is-reward ${rewardSummary?.monthly.qualified ? 'is-achieved' : ''}`} aria-hidden="true"><TrophyOutlined /></span>
                     </div>
-                    <div className="att-attendance-achievement__progress-track"><i style={{ width: `${rewardPercent}%` }} /></div>
-                    <small>{monthlyRewardEligible
-                        ? (rewardSummary?.monthly.qualified ? 'Đã đủ điều kiện thưởng tháng.' : `Tỷ lệ đúng giờ hiện tại: ${(rewardRate * 100).toLocaleString('vi-VN', { maximumFractionDigits: 1 })}%.`)
-                        : 'Huy hiệu và lượt miễn phạt nhẹ vẫn áp dụng theo chuỗi đúng giờ.'}</small>
+                    <div className="att-attendance-roadmap__labels" style={{ '--att-waiver-marker': `${waiverMarkerPercent}%` } as React.CSSProperties}>
+                        <div className={`att-attendance-roadmap__label is-waiver ${rewardSummary?.waiver.eligible ? 'is-achieved' : ''}`}>
+                            <strong>{waiverTargetDays} ngày liên tiếp</strong>
+                            <span>Nhận 1 lượt miễn phạt nhẹ</span>
+                            <b>{rewardSummary?.waiver.eligible ? 'Đã đạt' : `${Math.min(rewardStreak, waiverTargetDays)}/${waiverTargetDays}`}</b>
+                        </div>
+                        <div className={`att-attendance-roadmap__label is-reward ${rewardSummary?.monthly.qualified ? 'is-achieved' : ''} ${!monthlyRewardEligible ? 'is-disabled' : ''}`}>
+                            <strong>{rewardTargetDays}/{reward?.standardWorkDays || 26} ngày đúng giờ</strong>
+                            <span>{monthlyRewardEligible ? `Nhận ${rewardValue.toLocaleString('vi-VN')}đ chuyên cần` : 'Không áp dụng cho thời vụ'}</span>
+                            <b>{rewardSummary?.monthly.qualified ? 'Đã đạt' : `${rewardOnTimeDays}/${rewardTargetDays}`}</b>
+                        </div>
+                    </div>
                 </div>
             </section>
 
-            {children}
+            {attendanceDetailsReady ? children : (
+                <div style={{ minHeight: 180, display: 'grid', placeItems: 'center' }}>
+                    <Space direction="vertical" align="center">
+                        <Spin />
+                        <Text type="secondary">Đang hiển thị dữ liệu điểm danh...</Text>
+                    </Space>
+                </div>
+            )}
 
             {/* Today Logs đẩy xuống tận cùng dưới Dashboard (Ma trận, Thống kê) */}
             <Card
@@ -3359,6 +3465,7 @@ export default function Attendance() {
     const { user } = useAuth();
     const { setHeaderExtra, clearHeaderExtra } = usePageHeader();
     const currentUser = useCurrentUser();
+    const [, startBackgroundTransition] = useTransition();
     const isAdmin = currentUser === 'admin' || user?.role === 'admin';
     const isManager = user?.role === 'manager';
     const canManageBonuses = isAdmin;
@@ -3477,9 +3584,9 @@ export default function Attendance() {
             'position:fixed',
             'top:-100000px',
             'left:0',
-            'width:820px',
+            'width:1320px',
             'background:#eef2f5',
-            'padding:24px 0',
+            'padding:12px',
             'visibility:visible',
             'pointer-events:none',
             'z-index:-1',
@@ -3535,7 +3642,7 @@ export default function Attendance() {
                 backgroundColor: '#ffffff',
                 logging: false,
             });
-            const pdf = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
+            const pdf = new jsPDF({ orientation: source.classList.contains('ps-audit-ledger-view') ? 'landscape' : 'portrait', unit: 'mm', format: 'a4' });
             const pageW = pdf.internal.pageSize.getWidth();
             const pageH = pdf.internal.pageSize.getHeight();
             const margin = 10;
@@ -3759,18 +3866,11 @@ export default function Attendance() {
         });
     };
 
-    const attendanceTabStorageKey = `attendance-active-tab:${String(user?.username || currentUser || (isAdmin ? 'admin' : 'staff')).toLowerCase()}`;
     const [activeTab, setActiveTab] = useState(() => {
         if (isAttendanceUiTest) return 'attendance';
-        const fallbackTab = isAdmin ? 'overview' : 'attendance';
-        try {
-            const savedTab = localStorage.getItem(attendanceTabStorageKey);
-            return ['overview', 'packaging', 'bonuses', 'fines', 'attendance', 'fund'].includes(savedTab || '')
-                ? savedTab as string
-                : fallbackTab;
-        } catch {
-            return fallbackTab;
-        }
+        // Bảng công luôn bắt đầu từ Tổng quát; không khôi phục tab cũ vì tab
+        // Điểm danh còn phải khởi động dịch vụ nhận diện khuôn mặt.
+        return 'overview';
     });
     const [bonusView, setBonusView] = useState<'personal' | 'manage'>(() => isAdmin ? 'manage' : 'personal');
     const [bonusSearch, setBonusSearch] = useState('');
@@ -3907,9 +4007,6 @@ export default function Attendance() {
     const [packingCatalogAttempt, setPackingCatalogAttempt] = useState(0);
     const packingComponentsRequestRef = useRef<Promise<any> | null>(null);
 
-    useEffect(() => {
-        if (!isAttendanceUiTest) localStorage.setItem(attendanceTabStorageKey, activeTab);
-    }, [activeTab, attendanceTabStorageKey, isAttendanceUiTest]);
     const loadPackingComponents = useCallback(() => {
         if (packingComponentsRequestRef.current) return packingComponentsRequestRef.current;
         const api = (window as any).electronAPI;
@@ -3985,17 +4082,22 @@ export default function Attendance() {
                         if (parent && !parent.memberSkus.includes(comboSku)) parent.memberSkus.push(comboSku);
                     });
                 }
-                setPackingCatalog([...catalogBySku.values()].sort((a, b) => a.sku.localeCompare(b.sku)));
-                setPackingCatalogReady(true);
+                startBackgroundTransition(() => {
+                    setPackingCatalog([...catalogBySku.values()].sort((a, b) => a.sku.localeCompare(b.sku)));
+                    setPackingCatalogReady(true);
+                });
                 console.info('[Attendance:load] catalog ms:', Math.round(performance.now() - startedAt));
             } catch (error) {
                 console.error('Không thể tải danh mục đóng gói:', error);
                 if (!cancelled) setPackingCatalogError('Chưa tải đủ danh mục đóng gói. Chưa thể chốt hoặc gửi lương kỳ đang mở.');
             }
         };
-        void loadCatalog();
-        return () => { cancelled = true; };
-    }, [activeTab, isAttendanceUiTest, isDbLoaded, loadPackingComponents, packingCatalogAttempt, packingCatalogReady]);
+        const timer = window.setTimeout(loadCatalog, activeTab === 'packaging' ? 0 : 500);
+        return () => {
+            cancelled = true;
+            window.clearTimeout(timer);
+        };
+    }, [activeTab, isAttendanceUiTest, isDbLoaded, loadPackingComponents, packingCatalogAttempt, packingCatalogReady, startBackgroundTransition]);
 
     // 1. Tải dữ liệu từ DB lúc mở component
     useEffect(() => {
@@ -4263,8 +4365,10 @@ export default function Attendance() {
                     dbAuditLog,
                     localAuditLog,
                 );
-                setFineAuditLog(mergedAuditLog);
-                setExtraFines(mergedFines);
+                startBackgroundTransition(() => {
+                    setFineAuditLog(mergedAuditLog);
+                    setExtraFines(mergedFines);
+                });
             } catch (error) {
                 console.error('Không thể làm mới danh sách phạt:', error);
             }
@@ -4284,6 +4388,10 @@ export default function Attendance() {
         let cancelled = false;
         setIsBackgroundSyncComplete(false);
         const syncTask = (async () => {
+            // Let the primary attendance screen become interactive before
+            // starting maintenance queries and fine reconciliation.
+            await new Promise<void>(resolve => window.setTimeout(resolve, 700));
+            if (cancelled) return;
             const api = (window as any).electronAPI;
             try {
                 let dbFines = extraFinesRef.current;
@@ -4315,8 +4423,10 @@ export default function Attendance() {
                     dbAuditLog,
                     localAuditLog,
                 );
-                setFineAuditLog(mergedAuditLog);
-                setExtraFines(mergedFines);
+                startBackgroundTransition(() => {
+                    setFineAuditLog(mergedAuditLog);
+                    setExtraFines(mergedFines);
+                });
             } catch (err) {
                 console.error('Lỗi đồng bộ nền dữ liệu chấm công:', err);
             } finally {
@@ -4463,6 +4573,7 @@ export default function Attendance() {
     const fineSourcesRangeKeyRef = useRef('');
 
     const packingOrderLogsRef = useRef<PackingOrderLog[]>([]);
+    const packingOrderCacheRef = useRef<Map<string, PackingOrderLog[]>>(new Map());
     const packingRequestKeyRef = useRef('');
     const packingLoadCountRef = useRef(0);
     const loadPackingPromiseRef = useRef<{ key: string; promise: Promise<PackingOrderLog[]> } | null>(null);
@@ -4471,17 +4582,24 @@ export default function Attendance() {
     const [packingOrdersLoading, setPackingOrdersLoading] = useState(false);
 
     useEffect(() => {
+        if (activeTab !== 'packaging') return;
+        setPackingRewardNow(dayjs());
         const timer = window.setInterval(() => setPackingRewardNow(dayjs()), 60_000);
         return () => window.clearInterval(timer);
-    }, []);
+    }, [activeTab]);
 
-    const loadPackingOrders = async (since?: string, options?: { strict?: boolean; range?: AttendancePeriod; includeComparison?: boolean; silent?: boolean }): Promise<PackingOrderLog[]> => {
+    const loadPackingOrders = async (since?: string, options?: { strict?: boolean; range?: AttendancePeriod; includeComparison?: boolean; silent?: boolean; force?: boolean }): Promise<PackingOrderLog[]> => {
         const requestedRange = options?.range || (activeTab === 'packaging' ? packingDateRange : overviewDateRange);
         const comparisonRange = getPackingComparisonRange(requestedRange);
         const sinceVal = since || getPackingLoadStart(options?.includeComparison ? comparisonRange[0] : requestedRange[0]).toISOString();
         const untilVal = requestedRange[1].endOf('day').toISOString();
         const requestKey = `${dayjs(sinceVal).startOf('day').valueOf()}-${dayjs(untilVal).endOf('day').valueOf()}`;
-        packingRequestKeyRef.current = requestKey;
+        // A stale background refresh must never replace the range the user is
+        // currently viewing.
+        if (options?.silent && packingRequestKeyRef.current !== requestKey) {
+            return packingOrderLogsRef.current;
+        }
+        if (!options?.silent) packingRequestKeyRef.current = requestKey;
 
         if (loadPackingPromiseRef.current?.key === requestKey) {
             console.log('[PACKING] Await existing loading promise');
@@ -4493,9 +4611,40 @@ export default function Attendance() {
             }
         }
 
+        // Reopening the same period should not parse thousands of orders again.
+        // Silent revision refreshes intentionally bypass this cache below.
+        if (!options?.silent && !options?.strict && !options?.force) {
+            const cached = packingOrderCacheRef.current.get(requestKey);
+            if (cached) {
+                packingOrderLogsRef.current = cached;
+                startBackgroundTransition(() => {
+                    setPackingOrderLogsData(cached);
+                    setPackingReadyKey(requestKey);
+                    setPackingLoadError('');
+                });
+                // Show cached data immediately, then validate it in the background.
+                window.setTimeout(() => {
+                    void loadPackingOrders(since, { ...options, silent: true, force: true });
+                }, 0);
+                return cached;
+            }
+        }
+
         const task = (async () => {
         try {
             const api = (window as any).electronAPI;
+            if (!api?.ecommerceExports?.getAll) {
+                if (isAttendanceUiTest) {
+                    packingOrderLogsRef.current = [];
+                    startBackgroundTransition(() => {
+                        setPackingOrderLogsData([]);
+                        setPackingReadyKey(requestKey);
+                        setPackingLoadError('');
+                    });
+                    return [];
+                }
+                throw new Error('Ứng dụng chưa có API dữ liệu đóng gói. Vui lòng khởi động lại app.');
+            }
             const rangeDays = Math.max(requestedRange[1].endOf('day').diff(dayjs(sinceVal).startOf('day'), 'day') + 1, 1);
             const packingFetchLimit = Math.min(Math.max(rangeDays * 800, 2000), 10000);
 
@@ -4619,17 +4768,28 @@ export default function Attendance() {
                 });
             };
 
-            // Chỉ tính TMDT completed
-            ecommerceRows.forEach((o: any) => processOrder(o, 'tmdt'));
+            // Chia nhỏ việc parse hàng nghìn đơn để không khóa renderer trên máy yếu.
+            for (let index = 0; index < ecommerceRows.length; index += 1) {
+                processOrder(ecommerceRows[index], 'tmdt');
+                if (index > 0 && index % 150 === 0) await yieldToRenderer();
+            }
 
             console.log('[PACKING] Done. Ecom:', ecommerceRows.length, '| Unified:', unified.length);
 
-            const sorted = unified.sort((a, b) => dayjs(b.timestamp).unix() - dayjs(a.timestamp).unix());
+            const sortTimes = new Map(unified.map(order => [order.id, Date.parse(order.timestamp) || 0]));
+            const sorted = unified.sort((a, b) => (sortTimes.get(b.id) || 0) - (sortTimes.get(a.id) || 0));
             if (packingRequestKeyRef.current === requestKey) {
                 packingOrderLogsRef.current = sorted;
-                setPackingOrderLogsData(sorted);
-                setPackingReadyKey(requestKey);
-                setPackingLoadError('');
+                packingOrderCacheRef.current.set(requestKey, sorted);
+                if (packingOrderCacheRef.current.size > 6) {
+                    const oldestKey = packingOrderCacheRef.current.keys().next().value;
+                    if (oldestKey) packingOrderCacheRef.current.delete(oldestKey);
+                }
+                startBackgroundTransition(() => {
+                    setPackingOrderLogsData(sorted);
+                    setPackingReadyKey(requestKey);
+                    setPackingLoadError('');
+                });
             }
             return sorted;
         } catch (error) {
@@ -4666,7 +4826,7 @@ export default function Attendance() {
             const api = (window as any).electronAPI;
             const result = await api.purchases.getAll({ since, limit: 10000 });
             if (!requestKey || fineSourcesRangeKeyRef.current === requestKey) {
-                setPurchaseVatTracking(result?.success && Array.isArray(result.data) ? result.data : []);
+                startBackgroundTransition(() => setPurchaseVatTracking(result?.success && Array.isArray(result.data) ? result.data : []));
             }
         } catch (error) {
             console.error('Lỗi tải dữ liệu VAT nhập hàng:', error);
@@ -4679,7 +4839,7 @@ export default function Attendance() {
             const api = (window as any).electronAPI;
             const result = await api.returns.getAll();
             if (!requestKey || fineSourcesRangeKeyRef.current === requestKey) {
-                setReturnOverdueTracking(result?.success && Array.isArray(result.data) ? result.data : []);
+                startBackgroundTransition(() => setReturnOverdueTracking(result?.success && Array.isArray(result.data) ? result.data : []));
             }
         } catch (error) {
             console.error('Lỗi tải dữ liệu trả hàng quá hạn:', error);
@@ -4692,7 +4852,7 @@ export default function Attendance() {
             const api = (window as any).electronAPI;
             const result = await api.refunds.getAll();
             if (!requestKey || fineSourcesRangeKeyRef.current === requestKey) {
-                setRefundOverdueTracking(result?.success && Array.isArray(result.data) ? result.data : []);
+                startBackgroundTransition(() => setRefundOverdueTracking(result?.success && Array.isArray(result.data) ? result.data : []));
             }
         } catch (error) {
             console.error('Lỗi tải dữ liệu hàng hoàn quá hạn:', error);
@@ -4714,12 +4874,14 @@ export default function Attendance() {
                 isAdmin ? Promise.resolve(api.stockCheck.getSessions({ maintenance: false })).catch(() => null) : Promise.resolve(null),
             ]);
             if (!isCurrentRequest()) return;
-            setDailyTaskTracking(result?.success && Array.isArray(result.data) ? result.data : []);
-            setEvidencePenaltyRecords(penaltyResult?.success && Array.isArray(penaltyResult.data) ? penaltyResult.data : []);
-            setStockBalanceRecords(balanceResult?.success && Array.isArray(balanceResult.data) ? balanceResult.data : []);
-            setStockCheckSessions(isAdmin && stockCheckResult?.success && Array.isArray(stockCheckResult.data)
-                ? stockCheckResult.data
-                : []);
+            startBackgroundTransition(() => {
+                setDailyTaskTracking(result?.success && Array.isArray(result.data) ? result.data : []);
+                setEvidencePenaltyRecords(penaltyResult?.success && Array.isArray(penaltyResult.data) ? penaltyResult.data : []);
+                setStockBalanceRecords(balanceResult?.success && Array.isArray(balanceResult.data) ? balanceResult.data : []);
+                setStockCheckSessions(isAdmin && stockCheckResult?.success && Array.isArray(stockCheckResult.data)
+                    ? stockCheckResult.data
+                    : []);
+            });
         } catch (error) {
             console.error('Lỗi tải dữ liệu deadline công việc:', error);
             if (isCurrentRequest()) {
@@ -4737,14 +4899,6 @@ export default function Attendance() {
     const attendanceMatrixWrapRef = useRef<HTMLDivElement | null>(null);
 
     // === State cho đóng gói + lịch sử ===
-    const warehousePacking = useMemo(() => {
-        let totalUnits = 0;
-        packingOrderLogsData.forEach(order => {
-            totalUnits += calcPacksFromItems(order.items, order.timestamp);
-        });
-        return { level1Units: totalUnits, level10Units: 0 };
-    }, [packingOrderLogsData]);
-
     const [expandedPackingKeys, setExpandedPackingKeys] = useState<string[]>([]);
 
     // State cho chọn tháng (dùng cho tab Vân tay)
@@ -4758,6 +4912,39 @@ export default function Attendance() {
         const loadAttendanceRewardSummary = async () => {
             const api = (window as any).electronAPI;
             if (!api?.attendance?.getRewardSummary) {
+                if (!cancelled && isAttendanceUiTest) {
+                    const previewMonthly = (employeeId: number) => ({
+                        periodKey: attendanceRewardPeriodKey,
+                        scheduledDays: 26,
+                        completedDays: employeeId === 1 ? 6 : 0,
+                        onTimeDays: employeeId === 1 ? 6 : 0,
+                        lateDays: 0,
+                        absentDays: 0,
+                        targetDays: 24,
+                        requiredRate: 24 / 26,
+                        onTimeRate: employeeId === 1 ? 6 / 26 : 0,
+                        eligibleEmployee: true,
+                        qualified: false,
+                        rewardAmount: 200000,
+                        qualifiedAt: null,
+                        complete: false,
+                    });
+                    setAttendanceRewardSummaries([1, 2, 3].map(employeeId => ({
+                        employeeId,
+                        periodKey: attendanceRewardPeriodKey,
+                        enabled: true,
+                        currentStreak: employeeId === 1 ? 6 : 0,
+                        currentStreakStartDate: employeeId === 1 ? `${attendanceRewardPeriodKey}-01` : null,
+                        bestStreak: employeeId === 1 ? 6 : 0,
+                        badgeUnlocked: employeeId === 1,
+                        badgeStreakDays: 3,
+                        waiver: { eligible: false, earnedAt: null, streakDays: 7, lateMaxMinutes: 15, maxPerPeriod: 1 },
+                        monthly: previewMonthly(employeeId),
+                        statuses: {},
+                        evaluatedAt: new Date().toISOString(),
+                    })));
+                    setAttendanceRewardConfig({ enabled: true, badgeStreakDays: 3, waiverStreakDays: 7, waiverLateMaxMinutes: 15, waiverMaxPerPeriod: 1, monthlyRequiredDays: 24, standardWorkDays: 26, monthlyRewardAmount: 200000, graceMinutes: 5 });
+                }
                 if (!cancelled) setAttendanceRewardReadyKey(attendanceRewardPeriodKey);
                 return;
             }
@@ -4782,7 +4969,7 @@ export default function Attendance() {
         setAttendanceRewardReadyKey('');
         void loadAttendanceRewardSummary();
         return () => { cancelled = true; };
-    }, [attendanceRewardPeriodKey, attendanceRewardRefreshKey, isDbLoaded]);
+    }, [attendanceRewardPeriodKey, attendanceRewardRefreshKey, isAttendanceUiTest, isDbLoaded]);
 
     const fineSourcesRangeKey = `${overviewDateRange[0].startOf('day').valueOf()}-${overviewDateRange[1].endOf('day').valueOf()}-${isAdmin ? 'admin' : 'user'}`;
     const areFineSourcesReady = isBackgroundSyncComplete && fineSourcesReadyKey === fineSourcesRangeKey;
@@ -4791,9 +4978,6 @@ export default function Attendance() {
     useEffect(() => {
         if (!isDbLoaded) return;
         if (activeTab !== 'overview' && activeTab !== 'fines') return;
-        if (activeTab === 'overview') {
-            void loadPackingOrders(getPackingLoadStart(overviewDateRange[0]).toISOString(), { range: overviewDateRange });
-        }
         fineSourcesRangeKeyRef.current = fineSourcesRangeKey;
         // Supporting indicators are not needed for the first overview paint.
         // Yield once so the shell and primary attendance data render first.
@@ -4818,10 +5002,38 @@ export default function Attendance() {
         };
     }, [isDbLoaded, overviewDateRange, activeTab, fineSourcesRangeKey]);
 
+    // Overview tải tuần tự: hoàn tất nguồn phạt + danh mục trước, sau đó mới
+    // đọc hàng nghìn đơn đóng gói vào lúc renderer rảnh.
+    useEffect(() => {
+        if (!isDbLoaded || activeTab !== 'overview' || !areFineSourcesReady || !packingCatalogReady) return;
+        let cancelled = false;
+        let timeoutId: number | null = null;
+        let idleId: number | null = null;
+        const run = () => {
+            if (cancelled) return;
+            void loadPackingOrders(getPackingLoadStart(overviewDateRange[0]).toISOString(), { range: overviewDateRange });
+        };
+        if (typeof (window as any).requestIdleCallback === 'function') {
+            idleId = (window as any).requestIdleCallback(run, { timeout: 1200 });
+        } else {
+            timeoutId = window.setTimeout(run, 250);
+        }
+        return () => {
+            cancelled = true;
+            if (timeoutId !== null) window.clearTimeout(timeoutId);
+            if (idleId !== null && typeof (window as any).cancelIdleCallback === 'function') {
+                (window as any).cancelIdleCallback(idleId);
+            }
+        };
+    }, [activeTab, areFineSourcesReady, isDbLoaded, overviewDateRange, packingCatalogReady]);
+
     // Đóng gói dùng khoảng tuần riêng; không thay đổi kỳ tháng của các tab còn lại.
     useEffect(() => {
         if (!isDbLoaded || activeTab !== 'packaging') return;
-        void loadPackingOrders(undefined, { range: packingDateRange, includeComparison: true });
+        const timer = window.setTimeout(() => {
+            void loadPackingOrders(undefined, { range: packingDateRange, includeComparison: true });
+        }, 900);
+        return () => window.clearTimeout(timer);
     }, [isDbLoaded, activeTab, packingDateRange]);
 
     // Local stock events update immediately; the lightweight revision poll
@@ -5439,20 +5651,23 @@ export default function Attendance() {
     );
     const liveOverviewBonuses = useMemo(() => extraBonuses.filter(b => inOverviewRange(b.date)), [extraBonuses, overviewDateRange]);
     const liveOverviewPackingLogs = useMemo(() => packingOrderLogsData.filter(o => inOverviewRange(o.timestamp)), [packingOrderLogsData, overviewDateRange]);
-    const livePackingLogs = useMemo(() => packingOrderLogsData.filter(o => inPackingRange(o.timestamp)), [packingOrderLogsData, packingDateRange]);
+    const livePackingLogs = useMemo(() => activeTab === 'packaging'
+        ? packingOrderLogsData.filter(o => inPackingRange(o.timestamp))
+        : [], [activeTab, packingOrderLogsData, packingDateRange]);
     const packingComparisonRange = useMemo(() => getPackingComparisonRange(packingDateRange), [packingDateRange, packingRewardNow]);
     const livePackingTrendLogs = useMemo(() => packingOrderLogsData.filter(order => {
+        if (activeTab !== 'packaging') return false;
         const timestamp = dayjs(order.timestamp);
         return timestamp.isAfter(packingComparisonRange[0].startOf('day').subtract(1, 'ms'))
             && timestamp.isBefore(packingComparisonRange[1].endOf('day').add(1, 'ms'));
-    }), [packingOrderLogsData, packingComparisonRange]);
+    }), [activeTab, packingOrderLogsData, packingComparisonRange]);
     const liveWeeklyPackingResults = useMemo(
         () => buildPackingWeeklyResults(packingOrderLogsData, employees, packingRewardNow),
         [packingOrderLogsData, employees, packingRewardNow]
     );
     const packingWeeklyResults = useMemo(
-        () => buildPackingWeeklyResults(livePackingLogs, employees, packingRewardNow),
-        [livePackingLogs, employees, packingRewardNow]
+        () => activeTab === 'packaging' ? buildPackingWeeklyResults(livePackingLogs, employees, packingRewardNow) : [],
+        [activeTab, livePackingLogs, employees, packingRewardNow]
     );
     const liveOverviewWeeklyBonuses = useMemo(() => liveWeeklyPackingResults
         .map(packingWeeklyResultToBonus)
@@ -5508,6 +5723,9 @@ export default function Attendance() {
     const overviewBonuses = lockedPayrollSnapshot?.bonuses || liveOverviewBonusesWithWeekly;
     const overviewPackingLogs = lockedPayrollSnapshot?.packingLogs || liveOverviewPackingLogs;
     const packingDashboardData = useMemo(() => {
+        if (activeTab !== 'packaging') {
+            return { orderLogs: [], tableRows: [], leaderboard: [], totalOrders: 0, totalUnits: 0, totalIncome: 0 };
+        }
         const employeeScores = new Map(employees.map(employee => [employee.id, {
             employee,
             orderCount: 0,
@@ -5557,13 +5775,13 @@ export default function Attendance() {
 
         return {
             orderLogs: livePackingLogs,
-            tableRows: livePackingLogs.map(order => ({ ...order, key: order.id })),
+            tableRows: livePackingLogs,
             leaderboard,
             totalOrders: livePackingLogs.length,
             totalUnits: leaderboard.reduce((sum, entry) => sum + entry.units, 0),
             totalIncome: leaderboard.reduce((sum, entry) => sum + entry.income, 0),
         };
-    }, [employees, packingDateRange, livePackingLogs, livePackingTrendLogs, packingCommission]);
+    }, [activeTab, employees, packingDateRange, livePackingLogs, livePackingTrendLogs, packingCommission]);
     const overviewWareHousePacking = useMemo(() => {
         let totalUnits = 0;
         overviewPackingLogs.forEach(order => {
@@ -5590,10 +5808,44 @@ export default function Attendance() {
         !employmentEndDates[normalizeAttendanceText(emp.username)]
     ), [employees, employmentEndDates]);
 
-    const payrollData = useMemo(() => lockedPayrollSnapshot?.rows || calculatePayroll(
-        overviewFines, leaveRecords, workSchedules, overviewWareHousePacking, employees, overviewBonuses,
-        overviewAttendanceLogs, overviewDateRange[0].month() + 1, overviewDateRange[0].year(), overviewPackingLogs, packingCommission, employmentEndDates, payrollOverrides, overviewAttendanceReady
-    ), [lockedPayrollSnapshot, overviewFines, leaveRecords, workSchedules, overviewWareHousePacking, employees, overviewBonuses, overviewAttendanceLogs, overviewDateRange, overviewPackingLogs, packingCommission, employmentEndDates, payrollOverrides, overviewAttendanceReady]);
+    const payrollData = useMemo(() => {
+        if (lockedPayrollSnapshot?.rows) return lockedPayrollSnapshot.rows;
+        if (!isPayrollDataReady) {
+            return employees.map(employee => ({
+                ...employee,
+                shifts: 0,
+                absentDays: 0,
+                salaryBase: 0,
+                packIncome: 0,
+                totalPackValue_100: 0,
+                fineShare: 0,
+                mBonus: 0,
+                myFines: 0,
+                totalBonus: 0,
+                finalSalary: 0,
+                leaveDeduction: 0,
+                packOrderCount: 0,
+                packTotalUnits: 0,
+                packBreakdown: {},
+                autoShifts: 0,
+                autoSalaryBase: 0,
+                autoPackIncome: 0,
+                extraShifts: 0,
+                extraAdjust: 0,
+                adjustNote: '',
+                hasOverride: false,
+                salaryPerShift: 0,
+                employmentEndDate: employmentEndDates[normalizeAttendanceText(employee.username)] || null,
+            }));
+        }
+        const startedAt = performance.now();
+        const rows = calculatePayroll(
+            overviewFines, leaveRecords, workSchedules, overviewWareHousePacking, employees, overviewBonuses,
+            overviewAttendanceLogs, overviewDateRange[0].month() + 1, overviewDateRange[0].year(), overviewPackingLogs, packingCommission, employmentEndDates, payrollOverrides, overviewAttendanceReady
+        );
+        console.info('[Attendance:compute] payroll ms:', Math.round(performance.now() - startedAt));
+        return rows;
+    }, [lockedPayrollSnapshot, isPayrollDataReady, overviewFines, leaveRecords, workSchedules, overviewWareHousePacking, employees, overviewBonuses, overviewAttendanceLogs, overviewDateRange, overviewPackingLogs, packingCommission, employmentEndDates, payrollOverrides, overviewAttendanceReady]);
 
     function buildPayrollDataFromPackingLogs(orderLogs: PackingOrderLog[]) {
         const freshOverviewPackingLogs = orderLogs.filter(o => inOverviewRange(o.timestamp));
@@ -5628,11 +5880,15 @@ export default function Attendance() {
         const loginFullName = normalizeAttendanceText(user?.fullName || '');
         const rowName = normalizeAttendanceText(row.name || '');
 
+        if (isAttendanceUiTest && loginUsername === 'preview-staff') {
+            return rowUsername === 'toan';
+        }
+
         return Boolean(
             (rowUsername && loginUsername && rowUsername === loginUsername) ||
             (rowName && loginFullName && rowName === loginFullName)
         );
-    }, [currentUser, user?.fullName, user?.username]);
+    }, [currentUser, isAttendanceUiTest, user?.fullName, user?.username]);
     const isCurrentUserPayrollRow = useCallback((row: { username?: string; name?: string }) => {
         return canViewAllPayroll || matchesCurrentUserPayrollRow(row);
     }, [canViewAllPayroll, matchesCurrentUserPayrollRow]);
@@ -5708,24 +5964,37 @@ export default function Attendance() {
 
     // Thay thế array mock thành data mix thật sự
     const liveAttendanceMatrix = useMemo(() => {
+        if (activeTab !== 'attendance') return [] as Array<Array<any>>;
+        const startedAt = performance.now();
         const grace = config.graceMinutes || 0;
         const [amH, amM] = config.morningStart.split(':').map(Number);
         const amThreshold = amH * 60 + amM + grace;
         const [pmH, pmM] = config.afternoonStart.split(':').map(Number);
         const pmThreshold = pmH * 60 + pmM + grace;
 
-        return employees.map(emp => {
+        const scheduleBySlot = new Map(workSchedules.map(schedule => [
+            `${schedule.empId}|${schedule.date}|${schedule.session}`,
+            schedule,
+        ]));
+        const leaveBySlot = new Map(leaveRecords.map(leave => [
+            `${leave.empId}|${leave.date}|${leave.session}`,
+            leave,
+        ]));
+        const logsByEmployee = new Map<number, any[]>();
+        liveAttendanceLogs.forEach(log => {
+            const matchedEmployee = findEmployeeForAttendanceLog(log, employees);
+            if (!matchedEmployee) return;
+            const logDate = dayjs(log.date);
+            if (logDate.month() + 1 !== selectedMonth || logDate.year() !== selectedYear) return;
+            const rows = logsByEmployee.get(matchedEmployee.id) || [];
+            rows.push(log);
+            logsByEmployee.set(matchedEmployee.id, rows);
+        });
+
+        const matrix = employees.map(emp => {
             const monthData = Array.from({ length: daysInMonth }).map((_, i) => {
                 const currentDay = dayjs(`${selectedYear}-${selectedMonth}-${i + 1}`, 'YYYY-M-D');
                 const dateStr = currentDay.format('YYYY-MM-DD');
-
-                // Tìm lịch làm việc (Seasonal)
-                const amSchedule = workSchedules.find(s => s.empId === emp.id && s.date === dateStr && s.session === 'morning');
-                const pmSchedule = workSchedules.find(s => s.empId === emp.id && s.date === dateStr && s.session === 'afternoon');
-
-                // Tìm lịch nghỉ
-                const amLeave = leaveRecords.find(l => l.empId === emp.id && l.date === dateStr && l.session === 'morning');
-                const pmLeave = leaveRecords.find(l => l.empId === emp.id && l.date === dateStr && l.session === 'afternoon');
 
                 return {
                     am: 0 as 0 | 1 | 2,
@@ -5734,21 +6003,14 @@ export default function Attendance() {
                     pmTime: '',
                     amOutTime: '',
                     pmOutTime: '',
-                    amLeave,
-                    pmLeave,
-                    amSchedule,
-                    pmSchedule
+                    amLeave: leaveBySlot.get(`${emp.id}|${dateStr}|morning`),
+                    pmLeave: leaveBySlot.get(`${emp.id}|${dateStr}|afternoon`),
+                    amSchedule: scheduleBySlot.get(`${emp.id}|${dateStr}|morning`),
+                    pmSchedule: scheduleBySlot.get(`${emp.id}|${dateStr}|afternoon`),
                 };
             });
 
-            const logs = liveAttendanceLogs.filter(l => {
-                const matchedEmployee = findEmployeeForAttendanceLog(l, employees);
-                return matchedEmployee?.id === emp.id &&
-                    dayjs(l.date).month() + 1 === selectedMonth &&
-                    dayjs(l.date).year() === selectedYear;
-            });
-
-            logs.forEach(log => {
+            (logsByEmployee.get(emp.id) || []).forEach(log => {
                 const dayIdx = dayjs(log.date).date() - 1;
                 if (dayIdx < 0 || dayIdx >= daysInMonth) return;
                 const logTime = formatAttendanceTime(log.timestamp);
@@ -5775,10 +6037,13 @@ export default function Attendance() {
 
             return monthData;
         });
-    }, [employees, liveAttendanceLogs, daysInMonth, selectedMonth, selectedYear, config, workSchedules, leaveRecords]);
+        console.info('[Attendance:compute] matrix ms:', Math.round(performance.now() - startedAt));
+        return matrix;
+    }, [activeTab, employees, liveAttendanceLogs, daysInMonth, selectedMonth, selectedYear, config, workSchedules, leaveRecords]);
 
     // Employee attendance stats
     const employeeStats = useMemo(() => {
+        if (activeTab !== 'attendance') return [];
         return employees.map((emp, idx) => {
             let lateCount = 0, absentCount = 0, shiftCount = 0;
             if (liveAttendanceMatrix[idx]) {
@@ -5798,7 +6063,7 @@ export default function Attendance() {
             }
             return { ...emp, lateCount, absentCount, shiftCount };
         });
-    }, [employees, liveAttendanceMatrix, selectedMonth, selectedYear, isAttendanceSessionDue]);
+    }, [activeTab, employees, liveAttendanceMatrix, selectedMonth, selectedYear, isAttendanceSessionDue]);
 
     // Fund totals
     const fundTotals = useMemo(() => {
@@ -6643,6 +6908,17 @@ export default function Attendance() {
                 .filter(bonus => bonus.empId === employee.id)
                 .sort((a, b) => dayjs(a.date || 0).valueOf() - dayjs(b.date || 0).valueOf());
             const attendanceReward = attendanceRewardSummaries.find(summary => summary.employeeId === employee.id);
+            const attendanceWaiverTarget = attendanceReward?.waiver.streakDays || attendanceRewardConfig?.waiverStreakDays || 7;
+            const attendanceMonthlyTarget = attendanceReward?.monthly.targetDays || 24;
+            const attendanceWaiverMarkerPercent = Math.min(70, (attendanceWaiverTarget / Math.max(1, attendanceMonthlyTarget)) * 100);
+            const attendanceStreak = attendanceReward?.currentStreak || 0;
+            const attendanceOnTimeDays = attendanceReward?.monthly.onTimeDays || 0;
+            const attendanceRoadmapPercent = attendanceStreak < attendanceWaiverTarget
+                ? (attendanceStreak / Math.max(1, attendanceWaiverTarget)) * attendanceWaiverMarkerPercent
+                : attendanceWaiverMarkerPercent + (
+                    Math.max(0, attendanceOnTimeDays - attendanceWaiverTarget)
+                    / Math.max(1, attendanceMonthlyTarget - attendanceWaiverTarget)
+                ) * (100 - attendanceWaiverMarkerPercent);
             const periodLabel = overviewDateRange[0].isSame(overviewDateRange[1], 'month')
                 ? `Tháng ${overviewDateRange[0].format('MM/YYYY')}`
                 : `${overviewDateRange[0].format('DD/MM/YYYY')} — ${overviewDateRange[1].format('DD/MM/YYYY')}`;
@@ -6732,14 +7008,17 @@ export default function Attendance() {
                             </div>
 
                             <div className={`att-reward-progress ${attendanceReward?.badgeUnlocked ? 'is-unlocked' : ''}`}>
-                                <div className="att-reward-progress-head">
-                                    <span><GiftOutlined /> Chuyên cần</span>
-                                    <strong>{attendanceReward?.currentStreak || 0} ngày</strong>
+                                <div className="att-reward-compact-roadmap" aria-label="Các mốc thưởng chuyên cần">
+                                    <div className="att-reward-compact-roadmap__track">
+                                        <i style={{ width: `${Math.min(100, Math.max(0, attendanceRoadmapPercent))}%` }} />
+                                        <span className={`is-waiver ${attendanceReward?.waiver?.eligible ? 'is-achieved' : ''}`} style={{ left: `${attendanceWaiverMarkerPercent}%` }}><ClockCircleOutlined /></span>
+                                        <span className={`is-reward ${attendanceReward?.monthly.qualified ? 'is-achieved' : ''}`}><TrophyOutlined /></span>
+                                    </div>
+                                    <div className="att-reward-compact-roadmap__labels">
+                                        <span><strong>{attendanceWaiverTarget} ngày</strong><small>Miễn 1 phạt nhẹ</small></span>
+                                        <span><strong>{attendanceMonthlyTarget}/{attendanceReward?.monthly.scheduledDays || 26}</strong><small>Thưởng {fmt(attendanceRewardConfig?.monthlyRewardAmount || 200000)}</small></span>
+                                    </div>
                                 </div>
-                                <div className="att-reward-progress-badge">
-                                    {attendanceReward?.badgeUnlocked ? 'Đã mở huy hiệu đúng giờ' : `Mục tiêu huy hiệu: ${attendanceReward?.badgeStreakDays || 3} ngày`}
-                                </div>
-                                <div className="att-reward-progress-track"><i style={{ width: `${Math.min(100, Math.round(((attendanceReward?.monthly.onTimeDays || 0) / Math.max(1, attendanceReward?.monthly.targetDays || 24)) * 100))}%` }} /></div>
                                 <small>{attendanceReward?.monthly.eligibleEmployee === false
                                     ? 'Không áp dụng thưởng tháng cho nhân viên thời vụ'
                                     : `${attendanceReward?.monthly.onTimeDays || 0}/${attendanceReward?.monthly.targetDays || 24} ngày đúng giờ · ${attendanceReward?.monthly.qualified ? `Đủ điều kiện +${fmt(attendanceReward.monthly.rewardAmount)}` : `Mục tiêu +${fmt(attendanceRewardConfig?.monthlyRewardAmount || 200000)}`}`}</small>
@@ -6750,8 +7029,29 @@ export default function Attendance() {
 
                         <main className="att-staff-main">
                             <div className="att-staff-net-pay">
-                                <span>Thực nhận</span>
-                                <strong>{isPayrollDataReady ? fmt(employee.finalSalary || 0) : 'Đang tổng hợp...'}</strong>
+                                <div className="att-staff-net-pay__amount">
+                                    <span>Thực nhận</span>
+                                    <strong>{isPayrollDataReady ? fmt(employee.finalSalary || 0) : 'Đang tổng hợp...'}</strong>
+                                </div>
+                                <div className={`att-staff-achievement-chip ${attendanceReward?.badgeUnlocked ? 'is-unlocked is-image' : 'is-locked'}`} aria-label={attendanceReward?.badgeUnlocked ? `Huy hiệu đúng giờ đã đạt với ${attendanceReward.currentStreak} ngày liên tiếp` : 'Tiến độ mở huy hiệu đúng giờ'}>
+                                    {attendanceReward?.badgeUnlocked ? (
+                                        <>
+                                            <img className="att-staff-achievement-chip__asset" src={attendanceBadgeMinimalSeal} alt="" aria-hidden="true" />
+                                            <span className="att-staff-achievement-chip__copy att-staff-achievement-chip__copy--image">
+                                                <strong>Đúng giờ</strong>
+                                                <small>{attendanceReward.currentStreak} ngày liên tiếp</small>
+                                            </span>
+                                        </>
+                                    ) : (
+                                        <>
+                                            <span className="att-staff-achievement-chip__icon" aria-hidden="true"><Medal weight="fill" /></span>
+                                            <span className="att-staff-achievement-chip__copy">
+                                                <strong>Đúng giờ</strong>
+                                                <small>{`${attendanceReward?.currentStreak || 0}/${attendanceReward?.badgeStreakDays || 3} ngày`}</small>
+                                            </span>
+                                        </>
+                                    )}
+                                </div>
                             </div>
 
                             <div className="att-staff-breakdown">
@@ -6776,7 +7076,7 @@ export default function Attendance() {
                                 <div className="att-staff-equation">
                                     <span>{fmt(employee.salaryBase || 0)}</span><i>+</i><span className="is-positive">{fmt(employee.packIncome || 0)}</span><i>+</i><span className="is-positive">{fmt(employee.totalBonus || 0)}</span><i>−</i><span className="is-negative">{fmt((employee.myFines || 0) + (employee.leaveDeduction || 0))}</span><i>=</i><strong>{fmt(employee.finalSalary || 0)}</strong>
                                 </div>
-                                <Button type="primary" icon={<FileTextOutlined />} disabled={!isPayrollDataReady} onClick={() => { setPayslipPdfDetailOpen(false); setPayslipModal(employee); }}>Xem phiếu lương</Button>
+                                <Button type="primary" icon={<FileTextOutlined />} disabled={!isPayrollDataReady} onClick={() => { setPayslipPdfDetailOpen(true); setPayslipModal(employee); }}>Xem phiếu lương</Button>
                             </div>
                         </main>
                     </div>
@@ -6927,7 +7227,7 @@ export default function Attendance() {
                     {
                         title: 'Chi tiết', key: 'detail', align: 'center' as const, width: '15%', className: 'att-overview-cell att-overview-cell--action',
                         render: (_: any, record: any) => (
-                            <Button size="small" disabled={!isPayrollDataReady} icon={<EyeOutlined />} onClick={() => { setPayslipPdfDetailOpen(false); setPayslipModal(record); }}>
+                            <Button size="small" disabled={!isPayrollDataReady} icon={<EyeOutlined />} onClick={() => { setPayslipPdfDetailOpen(true); setPayslipModal(record); }}>
                                 Xem chi tiết
                             </Button>
                         ),
@@ -7007,7 +7307,7 @@ export default function Attendance() {
             awards.set(employeeId, employeeAwards);
             return awards;
         }, new Map<number, PackingWeeklyResult[]>());
-        const reloadPacking = () => loadPackingOrders(undefined, { range: packingDateRange, includeComparison: true });
+        const reloadPacking = () => loadPackingOrders(undefined, { range: packingDateRange, includeComparison: true, force: true });
         const renderOdometer = (value: number) => String(value || 0).padStart(3, '0').split('').map((digit, index) => (
             <span className="packing-odometer-digit" key={`${digit}-${index}`}>{digit}</span>
         ));
@@ -7121,6 +7421,7 @@ export default function Attendance() {
                             <Table
                                 className="packing-log-table"
                                 dataSource={tableRows}
+                                rowKey="id"
                                 pagination={orderLogs.length > 8 ? { pageSize: 8, size: 'small' } : false}
                                 size="small"
                                 tableLayout="fixed"
@@ -8728,31 +9029,50 @@ export default function Attendance() {
     // TAB 5: ĐIỂM DANH & LỊCH SỬ
     // ============================================
     const matrixColumns = useMemo(() => {
+        if (activeTab !== 'attendance') return [];
         const columns: any[] = [
             {
                 title: 'Nhân viên', dataIndex: 'name', key: 'name', width: 126, fixed: 'left' as const,
                 onHeaderCell: () => ({ className: 'att-matrix-name-header' }),
-                render: (name: string, record: any) => (
-                    <div className="att-matrix-name-cell">
-                        <div className="att-matrix-name-cell__headline">
-                            <Text strong>{name}</Text>
-                            {(() => {
-                                const achievement = attendanceRewardSummaries.find(summary => (
-                                    summary.employeeId === Number(record.key)
-                                    && summary.periodKey === attendanceRewardPeriodKey
-                                ));
-                                return achievement?.badgeUnlocked ? (
-                                    <Tooltip title={`Huy hiệu đúng giờ: ${achievement.currentStreak} ngày liên tiếp`}>
-                                        <span className="att-matrix-achievement-badge" aria-label={`Huy hiệu đúng giờ ${achievement.currentStreak} ngày`}>
-                                            <SafetyCertificateOutlined />
-                                        </span>
-                                    </Tooltip>
-                                ) : null;
-                            })()}
+                render: (name: string, record: any) => {
+                    const achievement = attendanceRewardSummaries.find(summary => (
+                        summary.employeeId === Number(record.key)
+                        && summary.periodKey === attendanceRewardPeriodKey
+                    ));
+                    const hasAchievement = Boolean(achievement?.badgeUnlocked);
+
+                    return (
+                        <div className={`att-matrix-name-cell${hasAchievement ? ' has-achievement' : ''}`}>
+                            {hasAchievement ? (
+                                <Tooltip title={`Huy hiệu đúng giờ: ${achievement?.currentStreak || 0} ngày liên tiếp`}>
+                                    <div
+                                        className="att-matrix-achievement-frame"
+                                        aria-label={`Huy hiệu đúng giờ ${achievement?.currentStreak || 0} ngày của ${name}`}
+                                    >
+                                        <div className="att-matrix-achievement-frame__identity">
+                                            <Text strong>{name}</Text>
+                                            <span>{record.username}</span>
+                                        </div>
+                                        <div className="att-matrix-achievement-frame__reward">
+                                            <span className="att-matrix-achievement-frame__icon" aria-hidden="true"><Medal weight="fill" /></span>
+                                            <span className="att-matrix-achievement-frame__copy">
+                                                <strong>Đúng giờ</strong>
+                                                <small>{achievement?.currentStreak || 0} ngày liên tiếp</small>
+                                            </span>
+                                        </div>
+                                    </div>
+                                </Tooltip>
+                            ) : (
+                                <>
+                                    <div className="att-matrix-name-cell__headline">
+                                        <Text strong>{name}</Text>
+                                    </div>
+                                    <span>{record.username}</span>
+                                </>
+                            )}
                         </div>
-                        <span>{record.username}</span>
-                    </div>
-                ),
+                    );
+                },
             }
         ];
 
@@ -8917,7 +9237,7 @@ export default function Attendance() {
             },
         });
         return columns;
-    }, [employeeStats, liveAttendanceMatrix, daysInMonth, selectedMonth, selectedYear, saveWorkScheduleInline, saveLeaveRequestInline, canManageAttendance, canManageAttendanceEmployee, canEditAttendanceDate, isCurrentPeriodLocked, employees, isAttendanceSessionDue, config.morningStart, config.afternoonStart, showShiftDetails, attendanceRewardSummaries, attendanceRewardPeriodKey]);
+    }, [activeTab, employeeStats, liveAttendanceMatrix, daysInMonth, selectedMonth, selectedYear, saveWorkScheduleInline, saveLeaveRequestInline, canManageAttendance, canManageAttendanceEmployee, canEditAttendanceDate, isCurrentPeriodLocked, employees, isAttendanceSessionDue, config.morningStart, config.afternoonStart, showShiftDetails, attendanceRewardSummaries, attendanceRewardPeriodKey]);
 
     useEffect(() => {
         const isCurrentMonth = selectedMonth === dayjs().month() + 1 && selectedYear === dayjs().year();
@@ -9480,12 +9800,12 @@ export default function Attendance() {
 
             {/* ===== MODAL: Phiếu Lương ===== */}
             <Modal
-                title={<div style={{ textAlign: 'center', fontWeight: 900, fontSize: 18, textTransform: 'uppercase' }}>Phiếu Lương Chi Tiết</div>}
+                title={null}
                 open={!!payslipModal}
                 onCancel={() => { setPayslipModal(null); setPayslipPdfDetailOpen(false); }}
                 footer={null}
-                width={payslipPdfDetailOpen ? 920 : 520}
-                className="att-payslip-modal"
+                width={payslipPdfDetailOpen ? 'calc(100vw - 32px)' : 1180}
+                className={`att-payslip-modal${payslipPdfDetailOpen ? ' att-payslip-modal-detail' : ''}`}
             >
                 {payslipModal && (() => {
                     const p = payslipModal;
@@ -9524,6 +9844,70 @@ export default function Attendance() {
                     const totalDeductions = (p.myFines || 0) + (p.leaveDeduction || 0) + negativeAdjust;
                     const issueDate = dayjs().format('DD/MM/YYYY');
                     const periodLabel = `Tháng ${overviewDateRange[0].format('MM/YYYY')} (${overviewDateRange[0].format('DD/MM')} - ${overviewDateRange[1].format('DD/MM/YYYY')})`;
+                    const payslipEmployee = employees.find(employee => employee.id === p.id);
+                    const bankAccount = String(payslipEmployee?.bankAccount || '').replace(/[^A-Za-z0-9]/g, '');
+                    const bankId = String(payslipEmployee?.bankId || '').trim();
+                    const bankAccountName = String(payslipEmployee?.bankAccountName || p.name || '').trim().toUpperCase();
+                    const bankLabel = VIET_QR_BANKS.find(bank => bank.value === bankId)?.label || bankId;
+                    const hasBankQr = Boolean(bankId && bankAccount);
+                    const payslipVietQrUrl = hasBankQr
+                        ? `https://img.vietqr.io/image/${bankId}-${bankAccount}-qr_only.png?amount=${Math.round(p.finalSalary)}&addInfo=${encodeURIComponent(`Luong ${overviewDateRange[0].format('MM/YYYY')} ${p.name}`)}&accountName=${encodeURIComponent(bankAccountName)}`
+                        : '';
+                    let runningBalance = 0;
+                    const summaryLedgerRows: Array<{
+                        key: string;
+                        label: string;
+                        note: string;
+                        delta: number;
+                        balance: number;
+                        tone: 'neutral' | 'positive' | 'negative';
+                    }> = [];
+                    const addLedgerRow = (key: string, label: string, note: string, delta: number, tone: 'neutral' | 'positive' | 'negative') => {
+                        runningBalance += delta;
+                        summaryLedgerRows.push({ key, label, note, delta, balance: runningBalance, tone });
+                    };
+                    addLedgerRow(
+                        'base',
+                        p.isHourly ? 'Lương theo ca' : 'Lương cơ bản',
+                        p.isHourly ? `${p.shifts} ca × ${fmt(p.salaryPerShift)}/ca` : 'Theo hợp đồng lao động',
+                        p.salaryBase,
+                        'neutral'
+                    );
+                    if ((p.packIncome || 0) !== 0) {
+                        addLedgerRow('packing', 'Lương năng suất (Đóng gói)', `${p.packTotalUnits || 0} gói theo mức độ · ${p.packOrderCount || 0} đơn`, p.packIncome || 0, 'positive');
+                    }
+                    if ((p.totalBonus || 0) !== 0) {
+                        addLedgerRow('bonus', 'Thưởng', empBonuses.length ? `${empBonuses.length} khoản thưởng` : 'Thưởng bổ sung', p.totalBonus || 0, 'positive');
+                    }
+                    if ((p.myFines || 0) !== 0) {
+                        addLedgerRow('fine', 'Khấu trừ vi phạm', empFines.length ? `${empFines.length} khoản phạt` : 'Phạt vi phạm nội quy', -(p.myFines || 0), 'negative');
+                    }
+                    if ((p.leaveDeduction || 0) !== 0) {
+                        addLedgerRow('leave', 'Khấu trừ nghỉ', `${p.absentDays || 0} ngày/ca nghỉ đã tính`, -(p.leaveDeduction || 0), 'negative');
+                    }
+                    if ((p.extraAdjust || 0) !== 0) {
+                        addLedgerRow('adjust', 'Điều chỉnh khác', p.adjustNote || 'Điều chỉnh thủ công', p.extraAdjust || 0, (p.extraAdjust || 0) > 0 ? 'positive' : 'negative');
+                    }
+                    let auditBalance = 0;
+                    const auditLedgerRows: Array<{ key: string; label: string; note: string; effectiveAt: string; delta: number; balance: number; tone: 'neutral' | 'positive' | 'negative' }> = [];
+                    const addAuditRow = (key: string, label: string, note: string, effectiveAt: string, delta: number, tone: 'neutral' | 'positive' | 'negative') => {
+                        auditBalance += delta;
+                        auditLedgerRows.push({ key, label, note, effectiveAt, delta, balance: auditBalance, tone });
+                    };
+                    addAuditRow('base', p.isHourly ? 'Lương theo ca' : 'Lương cơ bản', p.isHourly ? `${p.shifts} ca × ${fmt(p.salaryPerShift)}/ca` : 'Theo hợp đồng lao động', overviewDateRange[0].format('DD/MM/YYYY'), p.salaryBase, 'neutral');
+                    if ((p.packIncome || 0) !== 0) addAuditRow('packing', 'Lương năng suất (Đóng gói)', `${(p.packTotalUnits || 0).toLocaleString('vi-VN')} gói · ${(p.packOrderCount || 0).toLocaleString('vi-VN')} đơn`, overviewDateRange[0].format('MM/YYYY'), p.packIncome || 0, 'positive');
+                    if (empBonuses.length) {
+                        empBonuses.forEach((bonus: any, index: number) => addAuditRow(`bonus-${index}`, bonus.type || 'Thưởng bổ sung', bonus.detail || 'Khen thưởng / Phụ cấp', bonus.date ? dayjs(bonus.date).format('DD/MM/YYYY') : '—', bonus.amount || 0, 'positive'));
+                    } else if ((p.mBonus || 0) > 0) {
+                        addAuditRow('bonus', 'Thưởng khác', 'Theo quy định công ty', overviewDateRange[1].format('DD/MM/YYYY'), p.mBonus, 'positive');
+                    }
+                    if (empFines.length) {
+                        empFines.forEach((fine: any, index: number) => addAuditRow(`fine-${index}`, fine.type || 'Phạt vi phạm', fineDescription(fine), fineTime(fine) || '—', -(fine.amount || 0), 'negative'));
+                    } else if ((p.myFines || 0) > 0) {
+                        addAuditRow('fine', 'Phạt vi phạm nội quy', 'Kỷ luật / Lỗi nghiệp vụ', '—', -(p.myFines || 0), 'negative');
+                    }
+                    if ((p.leaveDeduction || 0) > 0) addAuditRow('leave', 'Khấu trừ nghỉ', `${p.absentDays || 0} ngày/ca nghỉ đã tính`, overviewDateRange[1].format('DD/MM/YYYY'), -(p.leaveDeduction || 0), 'negative');
+                    if ((p.extraAdjust || 0) !== 0) addAuditRow('adjust', p.adjustNote || 'Điều chỉnh thủ công', 'Ghi nhận bởi quản trị viên', overviewDateRange[1].format('DD/MM/YYYY'), p.extraAdjust || 0, (p.extraAdjust || 0) > 0 ? 'positive' : 'negative');
 
                     // Helper: Lưu override cho NV này
                     const saveOverride = (patch: Partial<PayrollOverride>) => {
@@ -9663,215 +10047,105 @@ export default function Attendance() {
                     );
 
                     return (
-                        <div style={{ fontSize: 13, paddingTop: 0 }}>
+                        <div className={payslipPdfDetailOpen ? 'ps-modal-detail-mode' : ''} style={{ fontSize: 13, paddingTop: 0 }}>
                             {!payslipPdfDetailOpen && (<>
-                                <div className="ps-summary-card">
-                                    <div className="ps-summary-brand">
-                                        <div className="ps-summary-brand-left">
-                                            <BankOutlined className="ps-summary-brand-icon" />
-                                            <div>
-                                                <div className="ps-summary-brand-name">DBY Software</div>
-                                                <div className="ps-summary-brand-sub">Phiếu lương nội bộ</div>
-                                            </div>
+                                <div className="ps-ledger">
+                                    <header className="ps-ledger-brandbar">
+                                        <div className="ps-ledger-brand">
+                                            <BankOutlined />
+                                            <div><strong>DBY SOFTWARE</strong><span>Phiếu lương nội bộ</span></div>
                                         </div>
-                                        <div className="ps-summary-period">{periodLabel}</div>
-                                    </div>
+                                    </header>
+                                    <div className="ps-ledger-layout">
+                                        <aside className="ps-ledger-sidebar">
+                                            <div className="ps-ledger-eyebrow">Phiếu lương</div>
+                                            <h2>Phiếu lương chi tiết</h2>
+                                            <section className="ps-ledger-side-section">
+                                                <span>Kỳ lương</span>
+                                                <strong><CalendarOutlined /> Tháng {overviewDateRange[0].format('MM/YYYY')}</strong>
+                                                <small>{overviewDateRange[0].format('DD/MM')} - {overviewDateRange[1].format('DD/MM/YYYY')}</small>
+                                            </section>
+                                            <section className="ps-ledger-side-section">
+                                                <span>Nhân viên</span>
+                                                <div className="ps-ledger-person">
+                                                    <div className="ps-ledger-avatar">{p.name.split(' ').map((word: string) => word[0]).slice(-2).join('').toUpperCase()}</div>
+                                                    <div><strong>{p.name}</strong><small>{p.type === 'Official' ? 'Chính thức' : 'Thời vụ'}</small></div>
+                                                </div>
+                                            </section>
+                                            <section className="ps-ledger-side-section ps-ledger-side-meta">
+                                                <span>Thời gian tính lương</span>
+                                                <strong><CalendarOutlined /> {overviewDateRange[0].format('DD/MM')} - {overviewDateRange[1].format('DD/MM/YYYY')}</strong>
+                                                {isAdmin && <small><LockOutlined /> Chế độ quản trị</small>}
+                                            </section>
+                                        </aside>
 
-                                    <div className="ps-summary-employee">
-                                        <div className="ps-summary-avatar">
-                                            {p.name.split(' ').map((w: string) => w[0]).slice(-2).join('').toUpperCase()}
-                                        </div>
-                                        <div className="ps-summary-emp-main">
-                                            <div className="ps-summary-name">{p.name}</div>
-                                            <div className="ps-summary-tags">
-                                                <span className="ps-summary-tag">{p.type === 'Official' ? 'Chính thức' : 'Thời vụ'}</span>
-                                                <span className="ps-summary-tag"><CalendarOutlined /> {overviewDateRange[0].format('DD/MM')} - {overviewDateRange[1].format('DD/MM/YYYY')}</span>
-                                                {isAdmin && <span className="ps-summary-tag ps-summary-tag-dark"><LockOutlined /> Admin</span>}
+                                        <main className="ps-ledger-main">
+                                            <div className="ps-ledger-heading">
+                                                <div><h3>Diễn biến lương</h3><p>Các khoản mục được hạch toán theo trình tự</p></div>
+                                                <span>{periodLabel}</span>
                                             </div>
-                                        </div>
-                                    </div>
-
-                                    <div className="ps-summary-table-wrap">
-                                        <table className="ps-summary-table">
-                                            <tbody>
-                                                <tr>
-                                                    <td>
-                                                        <span className="ps-summary-row-label">Lương cơ bản</span>
-                                                        <span className="ps-summary-row-note" style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
-                                                            {p.isHourly ? (
-                                                                <>
-                                                                    <span>{p.shifts} ca × {fmt(p.salaryPerShift)}/ca</span>
-                                                                    {isAdmin && !isCurrentPeriodLocked && (
-                                                                        <Button
-                                                                            type="text"
-                                                                            size="small"
-                                                                            icon={<EditOutlined />}
-                                                                            style={{ color: '#1890ff', padding: '0 2px', height: 18, lineHeight: '18px' }}
-                                                                            onClick={() => {
-                                                                                let newTotalShifts = p.shifts;
-                                                                                Modal.confirm({
-                                                                                    title: 'Sửa số ca làm việc',
-                                                                                    icon: <ExclamationCircleOutlined style={{ color: '#1890ff' }} />,
-                                                                                    width: 400,
-                                                                                    content: (
-                                                                                        <div style={{ padding: '12px 0' }}>
-                                                                                            <div style={{ background: '#e6f7ff', border: '1px solid #91d5ff', borderRadius: 8, padding: '10px 14px', marginBottom: 14, fontSize: 12, color: '#0050b3' }}>
-                                                                                                Ca tự động (điểm danh): <b>{p.autoShifts} ca</b>
-                                                                                                {p.autoShifts !== p.shifts && (
-                                                                                                    <span style={{ marginLeft: 8, color: '#fa8c16' }}>
-                                                                                                        + {p.shifts - p.autoShifts} ca thủ công
-                                                                                                    </span>
-                                                                                                )}
-                                                                                            </div>
-                                                                                            <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6 }}>Tổng số ca làm việc:</div>
-                                                                                            <InputNumber
-                                                                                                autoFocus
-                                                                                                size="large"
-                                                                                                min={0}
-                                                                                                defaultValue={p.shifts}
-                                                                                                style={{ width: '100%', fontWeight: 700 }}
-                                                                                                onChange={(v) => { newTotalShifts = v ?? 0; }}
-                                                                                                addonAfter="ca"
-                                                                                            />
-                                                                                            <div style={{ fontSize: 12, color: '#888', marginTop: 8 }}>
-                                                                                                Mỗi ca = {fmt(p.salaryPerShift)}đ
-                                                                                            </div>
-                                                                                        </div>
-                                                                                    ),
-                                                                                    okText: 'Xác nhận',
-                                                                                    okType: 'primary',
-                                                                                    cancelText: 'Hủy',
-                                                                                    onOk: () => {
-                                                                                        saveOverride({ extraShifts: newTotalShifts - p.autoShifts });
-                                                                                        setTimeout(() => {
-                                                                                            const updated = payrollData.find((pd: any) => pd.id === p.id);
-                                                                                            if (updated) setPayslipModal(updated);
-                                                                                        }, 100);
-                                                                                    },
-                                                                                });
-                                                                            }}
-                                                                        />
-                                                                    )}
-                                                                </>
-                                                            ) : 'Theo hợp đồng lao động'}
-                                                        </span>
-                                                    </td>
-                                                    <td>{fmt(p.salaryBase)}</td>
-                                                </tr>
-                                                <tr>
-                                                    <td>
-                                                        <span className="ps-summary-row-label">Lương năng suất (Đóng gói)</span>
-                                                        <span className="ps-summary-row-note">{p.packTotalUnits || 0} gói theo mức độ · {p.packOrderCount || 0} đơn</span>
-                                                    </td>
-                                                    <td className="ps-summary-green">+ {fmt(p.packIncome || 0)}</td>
-                                                </tr>
-                                                {(p.totalBonus || 0) > 0 && (
-                                                    <tr>
-                                                        <td>
-                                                            <span className="ps-summary-row-label">Thưởng</span>
-                                                            <span className="ps-summary-row-note">{empBonuses.length ? `${empBonuses.length} khoản thưởng` : 'Thưởng bổ sung'}</span>
-                                                        </td>
-                                                        <td className="ps-summary-green">+ {fmt(p.totalBonus || 0)}</td>
-                                                    </tr>
-                                                )}
-                                                {(p.myFines || 0) > 0 && (
-                                                    <tr>
-                                                        <td>
-                                                            <span className="ps-summary-row-label ps-summary-red">Khấu trừ vi phạm</span>
-                                                            <span className="ps-summary-row-note">{empFines.length ? `${empFines.length} khoản phạt` : 'Phạt vi phạm nội quy'}</span>
-                                                        </td>
-                                                        <td className="ps-summary-red">- {fmt(p.myFines || 0)}</td>
-                                                    </tr>
-                                                )}
-                                                {(p.leaveDeduction || 0) > 0 && (
-                                                    <tr>
-                                                        <td>
-                                                            <span className="ps-summary-row-label ps-summary-red">Khấu trừ nghỉ</span>
-                                                            <span className="ps-summary-row-note">{p.absentDays || 0} ngày/ca nghỉ đã tính</span>
-                                                        </td>
-                                                        <td className="ps-summary-red">- {fmt(p.leaveDeduction || 0)}</td>
-                                                    </tr>
-                                                )}
-                                            </tbody>
-                                        </table>
-                                    </div>
-
-                                    {(isAdmin || p.extraAdjust !== 0) && (
-                                        <div className="ps-summary-adjust">
-                                            <div>
-                                                <div className="ps-summary-adjust-title">Điều chỉnh</div>
-                                                <div className="ps-summary-adjust-note">{currentOverride.adjustNote || p.adjustNote || 'Chưa có điều chỉnh'}</div>
+                                            <div className="ps-ledger-table-wrap">
+                                                <table className="ps-ledger-table">
+                                                    <thead><tr><th>#</th><th>Khoản mục</th><th>Biến động</th><th>Số dư sau tính</th></tr></thead>
+                                                    <tbody>
+                                                        {summaryLedgerRows.map((item, index) => (
+                                                            <tr key={item.key}>
+                                                                <td><span className={`ps-ledger-step ps-ledger-step-${item.tone}`}>{index + 1}</span></td>
+                                                                <td><strong>{item.label}</strong><small>{item.note}</small></td>
+                                                                <td className={`ps-ledger-money ps-ledger-money-${item.tone}`}>
+                                                                    {item.delta > 0 && index > 0 ? '+' : item.delta < 0 ? '-' : ''} {fmt(Math.abs(item.delta))}
+                                                                </td>
+                                                                <td className="ps-ledger-balance">{fmt(item.balance)}</td>
+                                                            </tr>
+                                                        ))}
+                                                        <tr className="ps-ledger-final">
+                                                            <td><CheckCircleOutlined /></td><td><strong>Thực lĩnh cuối kỳ</strong></td><td>—</td><td>{fmt(p.finalSalary)}</td>
+                                                        </tr>
+                                                    </tbody>
+                                                </table>
                                             </div>
-                                            <div className="ps-summary-adjust-actions">
-                                                <span>{(currentOverride.extraAdjust || 0) > 0 ? '+' : ''}{fmt(currentOverride.extraAdjust || 0)}</span>
-                                                {isAdmin && !isCurrentPeriodLocked && (
-                                                    <Button type="text" size="small" icon={<EditOutlined />}
-                                                        onClick={() => {
-                                                            let newAdjust = currentOverride.extraAdjust ?? 0;
-                                                            let newNote = currentOverride.adjustNote || '';
-                                                            Modal.confirm({
-                                                                title: 'Điều chỉnh lương thủ công',
-                                                                icon: <ExclamationCircleOutlined style={{ color: '#fa8c16' }} />,
-                                                                width: 420,
-                                                                content: (
-                                                                    <div style={{ padding: '12px 0' }}>
-                                                                        <div style={{ background: '#fffbe6', border: '1px solid #ffe58f', borderRadius: 8, padding: '12px 16px', marginBottom: 12 }}>
-                                                                            <div style={{ fontSize: 12, fontWeight: 700, color: '#ad6800', marginBottom: 4 }}>Lưu ý quan trọng</div>
-                                                                            <div style={{ fontSize: 12, color: '#8c6d1f' }}>
-                                                                                Số dương = <b>cộng thêm tiền</b>, số âm = <b>trừ bớt tiền</b>. Thao tác này ảnh hưởng trực tiếp đến lương thực lĩnh.
-                                                                            </div>
-                                                                        </div>
-                                                                        <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6 }}>Số tiền điều chỉnh:</div>
-                                                                        <InputNumber
-                                                                            autoFocus
-                                                                            size="large"
-                                                                            defaultValue={currentOverride.extraAdjust ?? 0}
-                                                                            step={10000}
-                                                                            style={{ width: '100%', fontWeight: 700 }}
-                                                                            onChange={(v) => { newAdjust = v ?? 0; }}
-                                                                            formatter={v => `${v}`.replace(/\B(?=(\d{3})+(?!\d))/g, ',')}
-                                                                            parser={(v: any) => v.replace(/,/g, '')}
-                                                                            addonAfter="đ"
-                                                                        />
-                                                                        <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6, marginTop: 12 }}>Ghi chú lý do:</div>
-                                                                        <Input
-                                                                            placeholder="VD: Bù ca thiếu, thưởng thêm..."
-                                                                            defaultValue={currentOverride.adjustNote || ''}
-                                                                            onChange={e => { newNote = e.target.value; }}
-                                                                        />
-                                                                    </div>
-                                                                ),
-                                                                okText: 'Xác nhận điều chỉnh',
-                                                                okType: 'primary',
-                                                                cancelText: 'Hủy',
-                                                                onOk: () => { saveOverride({ extraAdjust: newAdjust, adjustNote: newNote }); },
-                                                            });
-                                                        }}
-                                                    />
-                                                )}
-                                            </div>
-                                        </div>
-                                    )}
-
-                                    <div className="ps-summary-total">
-                                        <div>
-                                            <div className="ps-summary-total-label"><WalletOutlined /> Thực lĩnh cuối kỳ</div>
-                                            <div className="ps-summary-total-formula">
-                                                {fmt(p.salaryBase)} + {fmt(p.packIncome || 0)}
-                                                {(p.totalBonus || 0) > 0 ? ` + ${fmt(p.totalBonus || 0)}` : ''}
-                                                {(p.myFines || 0) > 0 ? ` - ${fmt(p.myFines || 0)}` : ''}
-                                                {(p.leaveDeduction || 0) > 0 ? ` - ${fmt(p.leaveDeduction || 0)}` : ''}
-                                                {!!p.extraAdjust ? ` ${p.extraAdjust > 0 ? '+' : '-'} ${fmt(Math.abs(p.extraAdjust))}` : ''}
-                                            </div>
-                                        </div>
-                                        <div className="ps-summary-total-amount">{fmt(p.finalSalary)}</div>
+                                        </main>
                                     </div>
                                 </div>
                             </>)}
 
+                            {/* ===== DETAIL VIEW: audit ledger (phương án 1) ===== */}
+                            {payslipPdfDetailOpen && (
+                                <div
+                                    className="ps-print-view ps-print-view-detail ps-audit-ledger-view"
+                                    data-employee-id={String(p.id)}
+                                    data-period-key={overviewDateRange[0].format('YYYY-MM')}
+                                >
+                                    <div className="ps-audit-ledger-shell">
+                                        <aside className="ps-audit-ledger-rail">
+                                            <div className="ps-audit-brand">
+                                                <img src="/logo-ngang.png" alt="DBY Software" />
+                                                <span>PHIẾU LƯƠNG NỘI BỘ</span>
+                                            </div>
+                                            <div className="ps-audit-rail-block"><span>Kỳ lương</span><strong><CalendarOutlined /> Tháng {overviewDateRange[0].format('MM/YYYY')}</strong><small>({overviewDateRange[0].format('DD/MM')} - {overviewDateRange[1].format('DD/MM/YYYY')})</small></div>
+                                            <div className="ps-audit-rail-block ps-audit-employee-compact"><div><span>Nhân viên:</span><strong>{p.name}</strong></div><small>{p.name.split(' ').map((word: string) => word[0]).slice(-2).join('').toUpperCase()} - {p.type === 'Official' ? 'Chính thức' : 'Thời vụ'}</small></div>
+                                            {hasBankQr ? <div className="ps-audit-bank-stack"><div className="ps-audit-rail-qr"><img data-payslip-qr="true" src={payslipVietQrUrl} alt={`VietQR chuyển lương cho ${p.name}`} /></div><div className="ps-audit-bank-info"><strong>{bankLabel || 'Tài khoản nhận lương'}</strong><div><span>STK <b>{payslipEmployee?.bankAccount}</b></span><span>Người thụ hưởng <b>{bankAccountName}</b></span></div></div></div> : <div className="ps-audit-bank-missing"><BankOutlined /><div><strong>Chưa có tài khoản nhận lương</strong><span>Bổ sung ngân hàng và số tài khoản trong hồ sơ nhân viên.</span></div></div>}
+                                        </aside>
+                                        <main className="ps-audit-ledger-main">
+                                            <div className="ps-audit-heading"><div><span>PHIẾU LƯƠNG CHI TIẾT</span><h1>DIỄN BIẾN LƯƠNG</h1><p>Chi tiết các khoản mục theo trình tự thời gian</p></div><div className="ps-audit-heading-meta"><b>DBY SOFTWARE</b><small>{periodLabel}</small><small>Ngày kết xuất: {issueDate}</small></div></div>
+                                            <div className="ps-audit-ledger-table-wrap">
+                                                <table className="ps-audit-ledger-table"><thead><tr><th>#</th><th>Khoản mục</th><th>Diễn giải</th><th>Ngày / giờ hiệu lực</th><th>Biến động</th><th>Số dư sau tính</th></tr></thead><tbody>
+                                                    {auditLedgerRows.filter(item => item.tone !== 'negative').map((item, index) => (
+                                                        <tr key={item.key}><td><span className={`ps-audit-step ps-audit-step-${item.tone}`}>{index + 1}</span></td><td><strong>{item.label}</strong></td><td><span>{item.note}</span></td><td>{item.effectiveAt}</td><td className={`ps-audit-money ps-audit-money-${item.tone}`}>{item.delta > 0 && index > 0 ? '+' : ''} {fmt(Math.abs(item.delta))}</td><td className="ps-audit-balance">{fmt(item.balance)}</td></tr>
+                                                    ))}
+                                                    {auditLedgerRows.some(item => item.tone === 'negative') && <tr className="ps-audit-section"><td colSpan={6}><div><strong>CÁC KHOẢN KHẤU TRỪ</strong><span>Tổng khấu trừ: <b>-{fmt(totalDeductions)}</b> ({auditLedgerRows.filter(item => item.tone === 'negative').length} khoản)</span></div></td></tr>}
+                                                    {auditLedgerRows.filter(item => item.tone === 'negative').map((item, index) => <tr key={item.key}><td><span className="ps-audit-step ps-audit-step-negative">{auditLedgerRows.filter(row => row.tone !== 'negative').length + index + 1}</span></td><td><strong>{item.label}</strong></td><td><span>{item.note}</span></td><td>{item.effectiveAt}</td><td className="ps-audit-money ps-audit-money-negative">- {fmt(Math.abs(item.delta))}</td><td className="ps-audit-balance">{fmt(item.balance)}</td></tr>)}
+                                                    <tr className="ps-audit-final"><td><CheckCircleOutlined /></td><td colSpan={4}><strong>THỰC LĨNH CUỐI KỲ</strong></td><td>{fmt(p.finalSalary)}</td></tr>
+                                                </tbody></table>
+                                            </div>
+                                        </main>
+                                    </div>
+                                </div>
+                            )}
+
                             {/* ===== PRINT / DETAIL VIEW ===== */}
                             <div
-                                className={payslipPdfDetailOpen ? 'ps-print-view ps-print-view-detail ps-inv-redesign' : 'ps-print-view ps-inv-redesign'}
+                                className={`${payslipPdfDetailOpen ? 'ps-print-view-legacy' : 'ps-print-view'} ps-inv-redesign`}
                                 data-employee-id={String(p.id)}
                                 data-period-key={overviewDateRange[0].format('YYYY-MM')}
                             >
@@ -10079,8 +10353,9 @@ export default function Attendance() {
                             </div>
 
                             {/* Footer actions */}
-                            <div style={{ marginTop: 12, display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, position: 'sticky', bottom: 0, background: '#fff', paddingTop: 8, paddingBottom: 4, zIndex: 10, borderTop: '1px solid #f0f0f0' }}>
+                            <div className="ps-ledger-actions">
                                 <div>
+                                    {payslipPdfDetailOpen && <span className="ps-action-verification"><SafetyCertificateOutlined /> Xác nhận bởi: Bộ phận Tài chính &amp; Nhân sự DBY Software</span>}
                                     {isAdmin && !isCurrentPeriodLocked && p.hasOverride && (
                                         <Button size="small" danger type="text" icon={<DeleteOutlined />} onClick={clearOverride}>
                                             Xóa điều chỉnh
@@ -10090,8 +10365,7 @@ export default function Attendance() {
                                 <div style={{ display: 'flex', gap: 8 }}>
                                     {payslipPdfDetailOpen ? (
                                         <>
-                                            <Button onClick={() => setPayslipPdfDetailOpen(false)}>Quay lại</Button>
-                                            {isCurrentPeriodLocked ? (() => {
+                                            {isAdmin && (isCurrentPeriodLocked ? (() => {
                                                 const periodKey = `${overviewDateRange[0].year()}-${String(overviewDateRange[0].month() + 1).padStart(2, '0')}`;
                                                 const sentAt = gmailSentLog[`${p.id}_${periodKey}`];
                                                 const sentTime = sentAt ? dayjs(sentAt).format('DD/MM HH:mm') : null;
@@ -10119,14 +10393,14 @@ export default function Attendance() {
                                                 <Tooltip title="Cần Chốt & Khóa bảng lương trước khi gửi Gmail">
                                                     <Button disabled>Gửi Gmail</Button>
                                                 </Tooltip>
-                                            )}
-                                            {isCurrentPeriodLocked ? (
+                                            ))}
+                                            {isAdmin && (isCurrentPeriodLocked ? (
                                                 <Button icon={<FileTextOutlined />} disabled={!isPayrollDataReady} loading={pdfExporting} onClick={handleExportPayslipPDF}>Xuất PDF</Button>
                                             ) : (
                                                 <Tooltip title="Cần Chốt & Khóa bảng lương trước khi xuất PDF">
                                                     <Button icon={<FileTextOutlined />} disabled>Xuất PDF</Button>
                                                 </Tooltip>
-                                            )}
+                                            ))}
                                         </>
                                     ) : (
                                         <Button icon={<EyeOutlined />} onClick={() => setPayslipPdfDetailOpen(true)}>Xem phiếu</Button>
