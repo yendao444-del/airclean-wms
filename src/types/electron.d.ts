@@ -1575,6 +1575,12 @@ export interface ElectronAPI {
       rememberToken?: string | null;
       error?: string;
     }>;
+    requestPasswordReset: (email: string) => Promise<{ success: boolean; error?: string }>;
+    completePasswordReset: (
+      email: string,
+      code: string,
+      newPassword: string,
+    ) => Promise<{ success: boolean; error?: string }>;
     logout: (rememberToken?: string) => Promise<{ success: boolean }>;
     restoreSession: (
       rememberToken?: string,
