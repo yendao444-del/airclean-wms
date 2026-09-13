@@ -176,6 +176,31 @@
     margin-bottom: 0;
 }
 
+.login-forgot-password {
+    display: block;
+    margin: -12px 0 20px auto;
+    padding: 2px 0;
+    border: 0;
+    background: transparent;
+    color: var(--login-forest);
+    font: inherit;
+    font-size: 14px;
+    font-weight: 700;
+    cursor: pointer;
+}
+
+.login-forgot-password:hover,
+.login-forgot-password:focus-visible { text-decoration: underline; }
+
+.password-reset-modal .ant-modal-content { border-radius: 18px; padding: 28px; }
+.password-reset-modal .ant-modal-title { color: var(--login-forest, #075439); font-size: 22px; }
+.password-reset-modal .ant-alert { margin-bottom: 18px; }
+.password-reset-intro { margin: 4px 0 20px; color: #65645f; line-height: 1.65; }
+.password-reset-sent { line-height: 1.5; }
+.password-reset-success { padding-top: 8px; text-align: center; }
+.password-reset-success p { margin: 16px 0 24px; color: #4f514f; line-height: 1.6; }
+.password-reset-success-icon { display: grid; width: 64px; height: 64px; margin: 0 auto; place-items: center; border-radius: 50%; background: #dff2e8; color: #075439; font-size: 34px; font-weight: 800; }
+
 .login-submit.ant-btn-primary {
     width: 100%;
     height: 76px;

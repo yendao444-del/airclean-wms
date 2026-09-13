@@ -400,6 +400,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
         forcePasswordChange: (userId) => ipcRenderer.invoke('users:forcePasswordChange', userId),
         delete: (id) => ipcRenderer.invoke('users:delete', id),
         login: (username, password, rememberMe) => ipcRenderer.invoke('users:login', username, password, rememberMe),
+        requestPasswordReset: (email) => ipcRenderer.invoke('users:requestPasswordReset', email),
+        completePasswordReset: (email, code, newPassword) => ipcRenderer.invoke('users:completePasswordReset', email, code, newPassword),
         logout: (rememberToken) => ipcRenderer.invoke('users:logout', rememberToken),
         restoreSession: (rememberToken) => ipcRenderer.invoke('users:restoreSession', rememberToken),
         getCurrentSession: () => ipcRenderer.invoke('users:getCurrentSession'),

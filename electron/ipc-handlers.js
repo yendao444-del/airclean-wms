@@ -1447,10 +1447,21 @@ const PASSWORD_CHANGE_ALLOWED_CHANNELS = new Set([
 ]);
 const PUBLIC_IPC_CHANNELS = new Set([
   "users:login",
+  "users:requestPasswordReset",
+  "users:completePasswordReset",
   "users:logout",
   "users:getCurrentSession",
   "users:restoreSession",
 ]);
+
+// Password recovery challenges are short-lived, one-time and process-local.
+// Only a hash is retained so a crash/log inspection cannot reveal active codes.
+const passwordResetChallenges = new Map();
+const passwordResetLastSentAt = new Map();
+const passwordResetInFlight = new Set();
+const PASSWORD_RESET_TTL_MS = 10 * 60 * 1000;
+const PASSWORD_RESET_MAX_ATTEMPTS = 5;
+const PASSWORD_RESET_RESEND_MS = 60 * 1000;
 const DATA_SAFETY_BLOCKED_CHANNELS = new Map([
   ["products:delete", "Xóa sản phẩm"],
   ["products:update", "Sửa sản phẩm có thể ghi đè thay đổi từ máy khác"],
@@ -1670,6 +1681,7 @@ function cacheSessionStatus(user) {
   sessionStatusCache = {
     userId: user?.id || null,
     status: user?.status || null,
+    passwordChangedAt: user?.passwordChangedAt ? new Date(user.passwordChangedAt).getTime() : null,
     checkedAt: user?.id ? Date.now() : 0,
   };
 }
@@ -1706,7 +1718,7 @@ async function findSessionStatusUserWithRetry(userId) {
     try {
       return await prisma.user.findUnique({
         where: { id: userId },
-        select: { id: true, status: true },
+        select: { id: true, status: true, passwordChangedAt: true },
       });
     } catch (error) {
       if (!isTransientPrismaConnectionError(error) || attempt === 1) throw error;
@@ -1722,7 +1734,7 @@ async function getSessionStatusUser(userId) {
     sessionStatusCache.userId === userId &&
     now - sessionStatusCache.checkedAt < SESSION_STATUS_CACHE_TTL_MS
   ) {
-    return { id: userId, status: sessionStatusCache.status };
+    return { id: userId, status: sessionStatusCache.status, passwordChangedAt: sessionStatusCache.passwordChangedAt };
   }
   if (sessionStatusCheckInFlight?.userId === userId) {
     return sessionStatusCheckInFlight.promise;
@@ -1801,6 +1813,16 @@ ipcMain.handle = (channel, listener) =>
             ? "Tài khoản đã nghỉ việc và không còn quyền sử dụng hệ thống."
             : "Tài khoản đã bị vô hiệu hóa. Vui lòng liên hệ quản trị viên.",
         );
+      }
+      const sessionPasswordChangedAt = Number(currentSession.passwordChangedAt || 0);
+      const databasePasswordChangedAt = sessionUser.passwordChangedAt
+        ? new Date(sessionUser.passwordChangedAt).getTime()
+        : 0;
+      if (sessionPasswordChangedAt && databasePasswordChangedAt !== sessionPasswordChangedAt) {
+        currentSession = null;
+        cacheSessionStatus(null);
+        clearSecureRememberToken();
+        throw new Error("Mật khẩu tài khoản đã được thay đổi. Vui lòng đăng nhập lại.");
       }
     }
     if (
@@ -16552,7 +16574,9 @@ ipcMain.handle(
       );
       await revokeRememberTokensForUser(user.id);
       currentSession.mustChangePassword = false;
+      currentSession.passwordChangedAt = new Date(user.passwordChangedAt).getTime();
       delete currentSession.temporaryPasswordGrant;
+      cacheSessionStatus(user);
 
       console.log(`✅ Changed password for user: ${user.username}`);
       void logActivity({
@@ -30508,6 +30532,119 @@ ipcMain.handle("users:delete", async (event, id) => {
   }
 });
 
+async function sendPasswordResetEmail(to, code) {
+  const tokenPath = ensureGoogleTokenPath();
+  if (!fs.existsSync(tokenPath) || !OAUTH_CLIENT_ID || !OAUTH_CLIENT_SECRET) {
+    throw new Error("Hệ thống email chưa được cấu hình. Vui lòng liên hệ quản trị viên.");
+  }
+  const tokens = readGoogleTokens(tokenPath);
+  if (!String(tokens.scope || "").includes("https://www.googleapis.com/auth/gmail.send")) {
+    throw new Error("Tài khoản Google chưa được cấp quyền gửi Gmail.");
+  }
+  const { gmail, sender } = getPayslipGmailClient(tokenPath, tokens);
+  const raw = [
+    `From: ${encodeMailHeader("DBY POS")} <${sender}>`,
+    `To: ${to}`,
+    `Subject: ${encodeMailHeader("Mã xác minh khôi phục mật khẩu DBY POS")}`,
+    "MIME-Version: 1.0",
+    'Content-Type: text/html; charset="UTF-8"',
+    "Content-Transfer-Encoding: base64",
+    "",
+    Buffer.from(`<p>Xin chào,</p><p>Mã xác minh khôi phục mật khẩu DBY POS của bạn là:</p><p style="font-size:28px;font-weight:700;letter-spacing:8px">${code}</p><p>Mã có hiệu lực trong 10 phút và chỉ dùng được một lần. Nếu bạn không yêu cầu, hãy bỏ qua email này.</p>`, "utf8").toString("base64"),
+  ].join("\r\n");
+  await gmail.users.messages.send({ userId: "me", requestBody: { raw: toBase64Url(raw) } }, { timeout: 30000 });
+}
+
+ipcMain.handle("users:requestPasswordReset", async (_event, email) => {
+  try {
+    if (!prisma) throw new Error("Prisma not available");
+    const normalizedEmail = typeof email === "string" ? email.trim().toLowerCase() : "";
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)) throw new Error("Vui lòng nhập địa chỉ email hợp lệ.");
+    const lastSentAt = passwordResetLastSentAt.get(normalizedEmail) || 0;
+    if (Date.now() - lastSentAt < PASSWORD_RESET_RESEND_MS) {
+      throw new Error("Vui lòng chờ 60 giây trước khi gửi lại mã xác minh.");
+    }
+    passwordResetLastSentAt.set(normalizedEmail, Date.now());
+    const users = await prisma.user.findMany({
+      where: { email: { equals: normalizedEmail, mode: "insensitive" }, status: "active" },
+      take: 2,
+    });
+    if (users.length === 0) {
+      passwordResetLastSentAt.delete(normalizedEmail);
+      return { success: false, error: "Email này không thuộc tài khoản đang hoạt động trong hệ thống." };
+    }
+    if (users.length > 1) {
+      passwordResetLastSentAt.delete(normalizedEmail);
+      return { success: false, error: "Email này đang được dùng cho nhiều tài khoản. Vui lòng liên hệ quản trị viên." };
+    }
+    const user = users[0];
+    const code = String(crypto.randomInt(100000, 1000000));
+    passwordResetChallenges.set(normalizedEmail, { userId: user.id, codeHash: crypto.createHash("sha256").update(code).digest("hex"), expiresAt: Date.now() + PASSWORD_RESET_TTL_MS, attempts: 0 });
+    try {
+      await sendPasswordResetEmail(normalizedEmail, code);
+    } catch (error) {
+      passwordResetChallenges.delete(normalizedEmail);
+      passwordResetLastSentAt.delete(normalizedEmail);
+      console.error("Password reset email delivery error:", error);
+      throw new Error("Không thể gửi email xác minh lúc này. Vui lòng thử lại hoặc liên hệ quản trị viên.");
+    }
+    return { success: true };
+  } catch (error) {
+    console.error("Password reset request error:", error);
+    return { success: false, error: error?.message || "Không thể gửi mã xác minh." };
+  }
+});
+
+ipcMain.handle("users:completePasswordReset", async (_event, email, code, newPassword) => {
+  try {
+    if (!prisma) throw new Error("Prisma not available");
+    const normalizedEmail = typeof email === "string" ? email.trim().toLowerCase() : "";
+    const normalizedCode = typeof code === "string" ? code.trim() : "";
+    if (!/^\d{6}$/.test(normalizedCode)) throw new Error("Mã xác minh phải gồm 6 chữ số.");
+    if (typeof newPassword !== "string") throw new Error("Mật khẩu mới không hợp lệ.");
+    assertStrongPassword(newPassword);
+    if (passwordResetInFlight.has(normalizedEmail)) throw new Error("Yêu cầu đang được xử lý. Vui lòng chờ.");
+    passwordResetInFlight.add(normalizedEmail);
+    const challenge = passwordResetChallenges.get(normalizedEmail);
+    try {
+      if (!challenge || challenge.expiresAt <= Date.now()) { passwordResetChallenges.delete(normalizedEmail); throw new Error("Mã xác minh đã hết hạn. Vui lòng gửi lại yêu cầu."); }
+      challenge.attempts += 1;
+      const codeHash = crypto.createHash("sha256").update(normalizedCode).digest("hex");
+      if (challenge.attempts > PASSWORD_RESET_MAX_ATTEMPTS || !crypto.timingSafeEqual(Buffer.from(codeHash), Buffer.from(challenge.codeHash))) {
+        if (challenge.attempts >= PASSWORD_RESET_MAX_ATTEMPTS) passwordResetChallenges.delete(normalizedEmail);
+        throw new Error("Mã xác minh không đúng hoặc đã hết hạn.");
+      }
+      const currentUser = await prisma.user.findFirst({ where: { id: challenge.userId, status: "active", email: { equals: normalizedEmail, mode: "insensitive" } } });
+      if (!currentUser) { passwordResetChallenges.delete(normalizedEmail); throw new Error("Tài khoản không còn hoạt động. Vui lòng liên hệ quản trị viên."); }
+      const isSamePassword = currentUser.password?.startsWith("$2")
+        ? await bcrypt.compare(newPassword, currentUser.password)
+        : currentUser.password === newPassword;
+      if (isSamePassword) throw new Error("Mật khẩu mới phải khác mật khẩu hiện tại.");
+      const password = await bcrypt.hash(newPassword, 12);
+      const user = await prisma.user.update({ where: { id: challenge.userId }, data: { password, passwordChangedAt: new Date(), forcePasswordChange: false, loginFailedAttempts: 0, loginLockedUntil: null } });
+      // Token revocation is best-effort: the password update must not be reported as failed after commit.
+      await mutateRememberTokens((tokens) => tokens.filter((token) => token?.userId !== user.id)).catch((error) => console.warn("Remember-token revocation after password reset failed:", error?.message || error));
+      passwordResetChallenges.delete(normalizedEmail);
+      passwordResetLastSentAt.delete(normalizedEmail);
+      void logActivity({
+        module: "users",
+        action: "PASSWORD_RESET",
+        description: `Khôi phục mật khẩu qua email: ${user.username}`,
+        recordId: user.id,
+        recordName: user.username,
+        changes: { method: "email_otp" },
+        userName: "Password Recovery",
+      });
+      return { success: true };
+    } finally {
+      passwordResetInFlight.delete(normalizedEmail);
+    }
+  } catch (error) {
+    console.error("Password reset completion error:", error);
+    return { success: false, error: error?.message || "Không thể đặt lại mật khẩu." };
+  }
+});
+
 ipcMain.handle(
   "users:login",
   async (event, username, password, rememberMe = false) => {
@@ -30623,6 +30760,7 @@ ipcMain.handle(
         id: authenticatedUser.id,
         username: authenticatedUser.username,
         role: authenticatedUser.role,
+        passwordChangedAt: new Date(authenticatedUser.passwordChangedAt).getTime(),
         mustChangePassword: isPasswordRotationRequired(authenticatedUser),
         ...(temporaryPasswordGrant ? { temporaryPasswordGrant } : {}),
       };
@@ -30686,6 +30824,15 @@ ipcMain.handle("users:getCurrentSession", async () => {
       currentSession = null;
       return { success: false };
     }
+    if (
+      currentSession.passwordChangedAt &&
+      new Date(user.passwordChangedAt).getTime() !== currentSession.passwordChangedAt
+    ) {
+      currentSession = null;
+      cacheSessionStatus(null);
+      clearSecureRememberToken();
+      return { success: false };
+    }
     const existingGrant = hasValidTemporaryPasswordGrant(user)
       ? currentSession.temporaryPasswordGrant
       : null;
@@ -30693,6 +30840,7 @@ ipcMain.handle("users:getCurrentSession", async () => {
       id: user.id,
       username: user.username,
       role: user.role,
+      passwordChangedAt: new Date(user.passwordChangedAt).getTime(),
       mustChangePassword: isPasswordRotationRequired(user),
       ...(existingGrant ? { temporaryPasswordGrant: existingGrant } : {}),
     };
@@ -30740,10 +30888,22 @@ ipcMain.handle("users:restoreSession", async (event, rememberToken) => {
       );
     const user = await prisma.user.findUnique({ where: { id: record.userId } });
     if (!user || user.status !== "active") return { success: false };
+    const tokenCreatedAt = new Date(record.createdAt).getTime();
+    const passwordChangedAt = new Date(user.passwordChangedAt).getTime();
+    if (
+      !Number.isFinite(tokenCreatedAt) ||
+      !Number.isFinite(passwordChangedAt) ||
+      tokenCreatedAt < passwordChangedAt
+    ) {
+      await revokeRememberToken(tokenToRestore).catch(() => {});
+      clearSecureRememberToken();
+      return { success: false };
+    }
     currentSession = {
       id: user.id,
       username: user.username,
       role: user.role,
+      passwordChangedAt: new Date(user.passwordChangedAt).getTime(),
       mustChangePassword: isPasswordRotationRequired(user),
     };
     cacheSessionStatus(user);
