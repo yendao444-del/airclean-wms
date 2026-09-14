@@ -1,6 +1,6 @@
 {
   "name": "quan-ly-ban-hang-desktop",
-  "version": "1.0.435",
+  "version": "1.0.436",
   "description": "Hệ thống quản lý bán hàng - Desktop App",
   "main": "electron/main.js",
   "scripts": {
@@ -66,7 +66,11 @@
       "!electron/gdrive-credentials.json",
       "node_modules/@prisma/**/*",
       "node_modules/.prisma/**/*",
+      "!node_modules/.prisma/**/*.tmp*",
       "node_modules/@supabase/**/*",
+      "node_modules/@zxing/**/*",
+      "node_modules/ws/**/*",
+      "node_modules/cloudflared/**/*",
       "node_modules/iceberg-js/**/*",
       "node_modules/tslib/**/*",
       "node_modules/dotenv/**/*",
@@ -93,7 +97,11 @@
     "extraResources": [
       {
         "from": "node_modules/.prisma",
-        "to": "app/node_modules/.prisma"
+        "to": "app/node_modules/.prisma",
+        "filter": [
+          "**/*",
+          "!**/*.tmp*"
+        ]
       },
       {
         "from": ".runtime-build/runtime.env",
@@ -125,9 +133,11 @@
     "@phosphor-icons/react": "^2.1.10",
     "@prisma/client": "5.22.0",
     "@supabase/supabase-js": "^2.110.8",
+    "@zxing/browser": "^0.2.1",
     "adm-zip": "^0.6.0",
     "archiver": "^7.0.1",
     "bcryptjs": "^3.0.3",
+    "cloudflared": "^0.7.3",
     "dotenv": "^17.2.3",
     "glob": "^13.0.1",
     "googleapis": "^171.4.0",
@@ -135,8 +145,10 @@
     "jspdf": "^4.2.1",
     "nodemailer": "^7.0.6",
     "pdfjs-dist": "^6.2.108",
+    "qrcode.react": "^4.2.0",
     "uuid": "^11.1.0",
     "winax": "^3.6.8",
+    "ws": "^8.21.3",
     "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz"
   }
 }
