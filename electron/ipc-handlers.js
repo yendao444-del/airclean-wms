@@ -26481,6 +26481,26 @@ ipcMain.handle("policies:getCurrent", async () => {
     const config = attendanceData?.config || {};
     const attendanceReward = normalizeAttendanceRewardConfig(config);
     const packingCommission = config?.packingCommission || {};
+    const scheduleVersions = (Array.isArray(config.scheduleHistory) ? config.scheduleHistory : [])
+      .filter((version) => Number.isFinite(new Date(version?.effectiveAt).getTime()))
+      .sort((left, right) => new Date(left.effectiveAt).getTime() - new Date(right.effectiveAt).getTime());
+    const scheduleForEmployeeType = (employeeType) => {
+      let selected = {
+        morningStart: String(config.morningStart || "08:00"),
+        afternoonStart: String(config.afternoonStart || "13:30"),
+      };
+      const now = Date.now();
+      for (const version of scheduleVersions) {
+        if (new Date(version.effectiveAt).getTime() > now) break;
+        if (Array.isArray(version.employeeTypes)
+          && version.employeeTypes.length > 0
+          && !version.employeeTypes.includes(employeeType)) continue;
+        selected = { ...selected, ...version };
+      }
+      return selected;
+    };
+    const officialSchedule = scheduleForEmployeeType("Official");
+    const seasonalSchedule = scheduleForEmployeeType("Seasonal");
     const attendanceLateFine = {
       graceMinutes: Number(config.graceMinutes ?? 5),
       official: [
@@ -26493,8 +26513,11 @@ ipcMain.handle("policies:getCurrent", async () => {
         Number(config.seasonalFineLevel2 ?? 30000),
         Number(config.seasonalFineLevel3 ?? 60000),
       ],
-      morningStart: String(config.morningStart || "08:00"),
-      afternoonStart: String(config.afternoonStart || "13:30"),
+      morningStart: String(officialSchedule.morningStart || "08:00"),
+      afternoonStart: String(officialSchedule.afternoonStart || "13:30"),
+      officialAfternoonStart: String(officialSchedule.afternoonStart || "13:30"),
+      seasonalAfternoonStart: String(seasonalSchedule.afternoonStart || "13:30"),
+      scheduleHistory: Array.isArray(config.scheduleHistory) ? config.scheduleHistory : [],
     };
     const response = {
       success: true,
@@ -31567,8 +31590,8 @@ const FALLBACK_ANNOUNCEMENTS = [
   {
     id: 900003,
     title: "Thay đổi thời gian đi làm",
-    summary: "Chính thức thay đổi giờ bắt đầu ca chiều sang 13:00 từ 00:00 ngày 14/09/2026; thời gian linh động vẫn là 5 phút.",
-    content: "Phòng vận hành thông báo chính thức thay đổi thời gian đi làm, bắt đầu áp dụng từ 00:00 ngày 14/09/2026:\n\n• Ca sáng: 08:00\n• Ca chiều: 13:00\n• Thời gian linh động: 5 phút đầu mỗi ca vẫn được tính đúng giờ.\n\nTất cả nhân viên phải thực hiện đúng khung giờ mới kể từ thời điểm có hiệu lực. Dữ liệu chấm công trước ngày 14/09/2026 vẫn giữ nguyên theo lịch cũ; lịch mới chỉ áp dụng cho các lượt chấm công phát sinh từ 00:00 ngày 14/09/2026.",
+    summary: "Nhân viên chính thức bắt đầu ca chiều lúc 13:00 từ 00:00 ngày 14/09/2026; nhân viên thời vụ giữ lịch cũ 13:30.",
+    content: "Phòng vận hành thông báo thay đổi thời gian đi làm, bắt đầu áp dụng từ 00:00 ngày 14/09/2026:\n\n• Nhân viên chính thức: ca sáng 08:00, ca chiều 13:00.\n• Nhân viên thời vụ: giữ nguyên ca chiều 13:30 theo lịch cũ.\n• Thời gian linh động: 5 phút đầu mỗi ca vẫn được tính đúng giờ.\n\nNhân viên chính thức phải thực hiện đúng khung giờ mới kể từ thời điểm có hiệu lực. Dữ liệu chấm công trước ngày 14/09/2026 vẫn giữ nguyên; lịch mới chỉ áp dụng cho lượt chấm công của nhân viên chính thức phát sinh từ 00:00 ngày 14/09/2026.",
     category: "attendance",
     severity: "info",
     status: "published",
@@ -35960,6 +35983,116 @@ ipcMain.handle("attendance:getRewardSummary", async (_event, periodKey) => {
     };
   } catch (error) {
     console.error("❌ Get attendance reward summary error:", error);
+    return { success: false, error: error.message };
+  }
+});
+
+const SALES_BONUS_RATE = 0.001;
+const SALES_BONUS_EFFECTIVE_AT = new Date("2026-09-01T00:00:00+07:00");
+
+// Staff only receive aggregate figures. Raw orders remain behind the admin APIs.
+ipcMain.handle("attendance:getSalesBonusSummary", async (_event, filters = {}) => {
+  try {
+    requireRole("admin", "manager", "staff");
+    if (!prisma) throw new Error("Prisma not available");
+
+    const from = new Date(filters.from);
+    const to = new Date(filters.to);
+    if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime()) || from > to) {
+      throw new Error("Khoảng thời gian tính thưởng không hợp lệ.");
+    }
+    if (to.getTime() - from.getTime() > 370 * 24 * 60 * 60 * 1000) {
+      throw new Error("Khoảng thời gian tính thưởng không được vượt quá 370 ngày.");
+    }
+
+    const calculationFrom = new Date(Math.max(from.getTime(), SALES_BONUS_EFFECTIVE_AT.getTime()));
+    let completedRevenue = 0;
+    let returnRevenue = 0;
+    let refundRevenue = 0;
+    let completedOrderCount = 0;
+    let returnCount = 0;
+    let refundCount = 0;
+
+    if (to >= calculationFrom) {
+      const rows = await prisma.$queryRaw`
+        SELECT
+          COALESCE((
+            SELECT SUM("total")
+            FROM "Order"
+            WHERE "status" = 'completed'
+              AND "createdAt" >= ${calculationFrom}
+              AND "createdAt" <= ${to}
+          ), 0)::float AS "completedRevenue",
+          COALESCE((
+            SELECT COUNT(*)
+            FROM "Order"
+            WHERE "status" = 'completed'
+              AND "createdAt" >= ${calculationFrom}
+              AND "createdAt" <= ${to}
+          ), 0)::int AS "completedOrderCount",
+          COALESCE((
+            SELECT SUM("totalAmount")
+            FROM "Return"
+            WHERE "status" = 'completed'
+              AND "returnDate" >= ${calculationFrom}
+              AND "returnDate" <= ${to}
+          ), 0)::float AS "returnRevenue",
+          COALESCE((
+            SELECT COUNT(*)
+            FROM "Return"
+            WHERE "status" = 'completed'
+              AND "returnDate" >= ${calculationFrom}
+              AND "returnDate" <= ${to}
+          ), 0)::int AS "returnCount",
+          COALESCE((
+            SELECT SUM("totalAmount")
+            FROM "Refund"
+            WHERE "status" IN ('received', 'completed', 'lost')
+              AND "refundDate" >= ${calculationFrom}
+              AND "refundDate" <= ${to}
+          ), 0)::float AS "refundRevenue",
+          COALESCE((
+            SELECT COUNT(*)
+            FROM "Refund"
+            WHERE "status" IN ('received', 'completed', 'lost')
+              AND "refundDate" >= ${calculationFrom}
+              AND "refundDate" <= ${to}
+          ), 0)::int AS "refundCount"
+      `;
+      const row = rows[0] || {};
+      completedRevenue = Number(row.completedRevenue || 0);
+      returnRevenue = Math.max(0, Number(row.returnRevenue || 0));
+      refundRevenue = Math.max(0, Number(row.refundRevenue || 0));
+      completedOrderCount = Number(row.completedOrderCount || 0);
+      returnCount = Number(row.returnCount || 0);
+      refundCount = Number(row.refundCount || 0);
+    }
+
+    const excludedRevenue = returnRevenue + refundRevenue;
+    const excludedOrderCount = returnCount + refundCount;
+    const eligibleRevenue = Math.max(0, completedRevenue - excludedRevenue);
+    return {
+      success: true,
+      data: {
+        rate: SALES_BONUS_RATE,
+        effectiveAt: SALES_BONUS_EFFECTIVE_AT.toISOString(),
+        requestedFrom: from.toISOString(),
+        requestedTo: to.toISOString(),
+        calculationFrom: to >= calculationFrom ? calculationFrom.toISOString() : null,
+        grossRevenue: Math.max(0, completedRevenue),
+        excludedRevenue: Math.max(0, excludedRevenue),
+        returnRevenue,
+        returnCount,
+        refundRevenue,
+        refundCount,
+        eligibleRevenue,
+        completedOrderCount,
+        excludedOrderCount,
+        bonusAmount: Math.round(eligibleRevenue * SALES_BONUS_RATE),
+      },
+    };
+  } catch (error) {
+    console.error("❌ attendance:getSalesBonusSummary error:", error);
     return { success: false, error: error.message };
   }
 });

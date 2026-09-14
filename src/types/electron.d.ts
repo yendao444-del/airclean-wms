@@ -1299,6 +1299,27 @@ export interface ElectronAPI {
     getCurrent: () => Promise<{ success: boolean; data?: any; error?: string }>;
   };
   attendance: {
+    getSalesBonusSummary: (filters: { from: string; to: string }) => Promise<{
+      success: boolean;
+      data?: {
+        rate: number;
+        effectiveAt: string;
+        requestedFrom: string;
+        requestedTo: string;
+        calculationFrom: string | null;
+        grossRevenue: number;
+        excludedRevenue: number;
+        returnRevenue: number;
+        returnCount: number;
+        refundRevenue: number;
+        refundCount: number;
+        eligibleRevenue: number;
+        completedOrderCount: number;
+        excludedOrderCount: number;
+        bonusAmount: number;
+      };
+      error?: string;
+    }>;
     getRewardSummary: (periodKey?: string) => Promise<{
       success: boolean;
       data?: {
