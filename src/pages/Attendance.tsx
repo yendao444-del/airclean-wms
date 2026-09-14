@@ -516,10 +516,48 @@ interface PenaltyConfig {
     // Ca làm việc
     morningStart: string; // '08:00'
     afternoonStart: string; // '13:30'
+    scheduleHistory?: AttendanceScheduleVersion[];
     // Ngày công chuẩn
     standardWorkDays: number; // 26
     packingCommission?: PackingCommissionConfig;
 }
+
+interface AttendanceScheduleVersion {
+    effectiveAt: string;
+    morningStart: string;
+    afternoonStart: string;
+    graceMinutes: number;
+    updatedBy?: string;
+}
+
+const getBangkokMidnightIso = (date: dayjs.Dayjs) => {
+    const dateKey = date.format('YYYY-MM-DD');
+    return new Date(`${dateKey}T00:00:00+07:00`).toISOString();
+};
+
+const getAttendanceScheduleAt = (config: PenaltyConfig, timestamp?: string) => {
+    const fallback = {
+        morningStart: config.morningStart,
+        afternoonStart: config.afternoonStart,
+        graceMinutes: Number(config.graceMinutes || 0),
+    };
+    const at = Date.parse(timestamp || '');
+    if (!Number.isFinite(at)) return fallback;
+    const versions = [...(config.scheduleHistory || [])]
+        .filter(version => Number.isFinite(Date.parse(version.effectiveAt)))
+        .sort((left, right) => Date.parse(left.effectiveAt) - Date.parse(right.effectiveAt));
+    let selected = fallback;
+    versions.forEach(version => {
+        if (Date.parse(version.effectiveAt) <= at) {
+            selected = {
+                morningStart: version.morningStart,
+                afternoonStart: version.afternoonStart,
+                graceMinutes: Number(version.graceMinutes || 0),
+            };
+        }
+    });
+    return selected;
+};
 
 type PackingDifficulty = 'easy' | 'medium' | 'high';
 
@@ -534,6 +572,9 @@ interface PackingCommissionConfig {
     skuLevels: Record<string, string>;
     customLevels?: CustomPackingLevel[];
     history?: PackingCommissionVersion[];
+    saleDates?: string[];
+    saleMultiplier?: number;
+    saleEffectiveAt?: string;
     updatedAt?: string;
     updatedBy?: string;
 }
@@ -543,6 +584,9 @@ interface PackingCommissionVersion {
     rates: Record<string, number>;
     skuLevels: Record<string, string>;
     customLevels?: CustomPackingLevel[];
+    saleDates?: string[];
+    saleMultiplier?: number;
+    saleEffectiveAt?: string;
     updatedBy?: string;
 }
 
@@ -561,6 +605,8 @@ const PACKING_LEVELS: Array<{ key: PackingDifficulty; label: string; color: stri
 const DEFAULT_PACKING_COMMISSION: PackingCommissionConfig = {
     rates: { easy: 20, medium: 30, high: 40 },
     skuLevels: {},
+    saleDates: [],
+    saleMultiplier: 1,
 };
 
 // The tiered packing policy starts in September 2026. Earlier payroll periods
@@ -571,6 +617,10 @@ const LEGACY_PACKING_UNIT_PRICE = 20;
 
 const PACKING_WEEKLY_REWARD_AMOUNT = 100000;
 const PACKING_WEEKLY_REWARD_START = dayjs('2026-08-31').startOf('day');
+// Recurring marketplace campaigns plus the traditional mid/end-month campaigns.
+// Full YYYY-MM-DD values remain supported for one-off exceptions.
+const PACKING_SALE_DATES = ['01-01', '02-02', '03-03', '04-04', '05-05', '06-06', '07-07', '08-08', '09-09', '10-10', '11-11', '12-12', '*-15', '*-25'];
+const PACKING_SALE_MULTIPLIER = 1.5;
 
 const normalizePackingSku = (value: unknown) => String(value || '').trim().toUpperCase();
 
@@ -628,11 +678,23 @@ const normalizePackingCommission = (value?: Partial<PackingCommissionConfig> | n
                 rates: normalizePackingRates(version.rates, versionCustomLevels),
                 skuLevels: normalizePackingSkuLevels(version.skuLevels, versionKeys),
                 customLevels: versionCustomLevels,
+                saleDates: Array.isArray(version.saleDates) ? version.saleDates.filter(date => /^(?:\*-\d{2}|\d{2}-\d{2}|\d{4}-\d{2}-\d{2})$/.test(String(date))) : [],
+                saleMultiplier: Math.max(1, Number(version.saleMultiplier || 1)),
+                saleEffectiveAt: version.saleEffectiveAt,
                 updatedBy: version.updatedBy,
             };
         });
     if (value?.updatedAt && dayjs(value.updatedAt).isValid() && !history.some(version => version.effectiveAt === value.updatedAt)) {
-        history.push({ effectiveAt: value.updatedAt, rates, skuLevels, customLevels, updatedBy: value.updatedBy });
+        history.push({
+            effectiveAt: value.updatedAt,
+            rates,
+            skuLevels,
+            customLevels,
+            saleDates: [],
+            saleMultiplier: 1,
+            saleEffectiveAt: undefined,
+            updatedBy: value.updatedBy,
+        });
     }
     history.sort((left, right) => dayjs(left.effectiveAt).valueOf() - dayjs(right.effectiveAt).valueOf());
     return {
@@ -640,10 +702,53 @@ const normalizePackingCommission = (value?: Partial<PackingCommissionConfig> | n
         skuLevels,
         customLevels,
         history,
+        saleDates: Array.isArray(value?.saleDates)
+            ? value.saleDates.filter(date => /^(?:\*-\d{2}|\d{2}-\d{2}|\d{4}-\d{2}-\d{2})$/.test(String(date)))
+            : DEFAULT_PACKING_COMMISSION.saleDates,
+        saleMultiplier: value?.saleMultiplier === undefined
+            ? DEFAULT_PACKING_COMMISSION.saleMultiplier
+            : Math.max(1, Number(value.saleMultiplier || 1)),
+        saleEffectiveAt: value?.saleEffectiveAt || DEFAULT_PACKING_COMMISSION.saleEffectiveAt,
         updatedAt: value?.updatedAt,
         updatedBy: value?.updatedBy,
     };
 };
+
+const formatPackingSaleDates = (dates?: string[]) => (dates || [])
+    .map(date => /^\d{2}-\d{2}$/.test(String(date))
+        ? dayjs(`2000-${date}`).format('DD/MM')
+        : /^\*-\d{2}$/.test(String(date)) ? `${String(date).slice(2)}/*`
+        : dayjs(date).isValid() ? dayjs(date).format('DD/MM/YYYY') : '')
+    .filter(Boolean)
+    .join(', ');
+
+const parsePackingSaleDates = (value: string) => [...new Set(value
+    .split(/[,;\n]+/)
+    .map(raw => raw.trim())
+    .filter(Boolean)
+    .map(raw => {
+        const recurringDay = raw.match(/^(\d{1,2})[\/-]\*$/);
+        if (recurringDay) {
+            const day = Number(recurringDay[1]);
+            return day >= 1 && day <= 31 ? `*-${String(day).padStart(2, '0')}` : '';
+        }
+        const match = raw.match(/^(\d{1,2})[\/-](\d{1,2})(?:[\/-](\d{4}))?$/);
+        if (!match) return '';
+        if (!match[3]) {
+            const month = Number(match[2]);
+            const day = Number(match[1]);
+            const recurring = dayjs(`2000-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`);
+            return recurring.isValid() && recurring.date() === day && recurring.month() + 1 === month
+                ? `${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`
+                : '';
+        }
+        const year = Number(match[3]);
+        const date = dayjs(`${year}-${String(Number(match[2])).padStart(2, '0')}-${String(Number(match[1])).padStart(2, '0')}`);
+        return date.isValid() && date.date() === Number(match[1]) && date.month() + 1 === Number(match[2])
+            ? date.format('YYYY-MM-DD')
+            : '';
+    })
+    .filter(Boolean))].sort();
 
 const LEGACY_PACKING_COMMISSION = normalizePackingCommission({
     rates: { easy: LEGACY_PACKING_UNIT_PRICE, medium: LEGACY_PACKING_UNIT_PRICE, high: LEGACY_PACKING_UNIT_PRICE },
@@ -669,6 +774,9 @@ const getPackingCommissionRuntime = (rawCommission?: PackingCommissionConfig) =>
                 rates: version.rates,
                 skuLevels: version.skuLevels,
                 customLevels: version.customLevels,
+                saleDates: version.saleDates,
+                saleMultiplier: version.saleMultiplier,
+                saleEffectiveAt: version.saleEffectiveAt,
             }),
         })),
     };
@@ -1122,9 +1230,23 @@ function getPackingCommissionAt(rawCommission?: PackingCommissionConfig, timesta
     const orderTime = Date.parse(timestamp || '');
     if (!Number.isFinite(orderTime)) return runtime.current;
     for (let index = runtime.history.length - 1; index >= 0; index -= 1) {
-        if (runtime.history[index].effectiveAt <= orderTime) return runtime.history[index].commission;
+        if (runtime.history[index].effectiveAt <= orderTime) {
+            return runtime.history[index].commission;
+        }
     }
     return getPackingCommissionRuntime(DEFAULT_PACKING_COMMISSION).current;
+}
+
+function getPackingSaleMultiplier(commission: PackingCommissionConfig, timestamp?: string): number {
+    const multiplier = Math.max(1, Number(commission.saleMultiplier || 1));
+    if (multiplier <= 1 || !timestamp || !Array.isArray(commission.saleDates) || commission.saleDates.length === 0) return 1;
+    const orderDate = dayjs(timestamp);
+    if (!orderDate.isValid()) return 1;
+    const effective = commission.saleEffectiveAt ? dayjs(commission.saleEffectiveAt).startOf('day') : null;
+    if (effective && orderDate.isBefore(effective)) return 1;
+    return commission.saleDates.includes(orderDate.format('YYYY-MM-DD'))
+        || commission.saleDates.includes(orderDate.format('MM-DD'))
+        || commission.saleDates.includes(`*-${orderDate.format('DD')}`) ? multiplier : 1;
 }
 
 function calcPackingCommission(items: PackingOrderItem[], rawCommission?: PackingCommissionConfig, timestamp?: string) {
@@ -1142,7 +1264,7 @@ function calcPackingCommission(items: PackingOrderItem[], rawCommission?: Packin
             ? LEGACY_PACKING_UNIT_PRICE
             : Number.isFinite(item.packingUnitPrice)
             ? Math.max(0, Number(item.packingUnitPrice))
-            : commission.rates[level];
+            : commission.rates[level] * getPackingSaleMultiplier(commission, timestamp);
         const income = isLegacyPolicy
             ? units * unitPrice
             : Number.isFinite(item.packingIncome)
@@ -1169,7 +1291,9 @@ function snapshotPackingOrder(order: PackingOrderLog, rawCommission?: PackingCom
             const level = isLegacyPolicy ? 'easy' : getPackingLevel(item, commission);
             const levelOption = getPackingLevelOption(commission, level);
             const packingUnits = calcPackingUnitsFromItem(item, order.timestamp, isLegacyPolicy);
-            const packingUnitPrice = isLegacyPolicy ? LEGACY_PACKING_UNIT_PRICE : commission.rates[level];
+            const packingUnitPrice = isLegacyPolicy
+                ? LEGACY_PACKING_UNIT_PRICE
+                : commission.rates[level] * getPackingSaleMultiplier(commission, order.timestamp);
             return {
                 ...item,
                 packingLevel: level,
@@ -3894,6 +4018,7 @@ export default function Attendance() {
         packingCommission: DEFAULT_PACKING_COMMISSION,
     });
     const [tempConfig, setTempConfig] = useState<PenaltyConfig>(config);
+    const [scheduleEffectiveDate, setScheduleEffectiveDate] = useState(() => dayjs().startOf('day'));
     const [packingCatalog, setPackingCatalog] = useState<PackingCatalogItem[]>([]);
     const [packingSkuSearch, setPackingSkuSearch] = useState('');
     const [selectedPackingSkus, setSelectedPackingSkus] = useState<Array<string | number>>([]);
@@ -3908,6 +4033,7 @@ export default function Attendance() {
     const [editingCustomPackingLevelKey, setEditingCustomPackingLevelKey] = useState<string | null>(null);
     const [packingConfigSaving, setPackingConfigSaving] = useState(false);
     const [packingRatesExpanded, setPackingRatesExpanded] = useState(false);
+    const [packingSaleDatesInput, setPackingSaleDatesInput] = useState('');
 
     const [employees, setEmployees] = useState<Employee[]>([]);
 
@@ -4039,7 +4165,9 @@ export default function Attendance() {
             try {
                 const api = (window as any).electronAPI;
                 const [productsRes, combosRes] = await Promise.all([
-                    api.products.getAll(),
+                    api.products.getPackingCatalog
+                        ? api.products.getPackingCatalog()
+                        : api.products.getAll(),
                     loadPackingComponents(),
                 ]);
                 if (cancelled) return;
@@ -4656,6 +4784,46 @@ export default function Attendance() {
                     new Promise((_, reject) => setTimeout(() => reject(`${label} TIMEOUT (${ms}ms)`), ms))
                 ]).catch(e => { console.warn(`[PACKING] ⚠️ ${label} failed:`, e); return { success: false, error: String(e) }; });
 
+            const commitPackingRows = (rows: PackingOrderLog[]) => {
+                const sorted = [...rows].sort((a, b) =>
+                    (Date.parse(b.timestamp) || 0) - (Date.parse(a.timestamp) || 0),
+                );
+                if (packingRequestKeyRef.current === requestKey) {
+                    packingOrderLogsRef.current = sorted;
+                    packingOrderCacheRef.current.set(requestKey, sorted);
+                    if (packingOrderCacheRef.current.size > 6) {
+                        const oldestKey = packingOrderCacheRef.current.keys().next().value;
+                        if (oldestKey) packingOrderCacheRef.current.delete(oldestKey);
+                    }
+                    startBackgroundTransition(() => {
+                        setPackingOrderLogsData(sorted);
+                        setPackingReadyKey(requestKey);
+                        setPackingLoadError('');
+                    });
+                }
+                return sorted;
+            };
+
+            // Prefer the main-process read model: it parses JSON once, keeps a
+            // revision-aware cache across tab remounts, and transfers only the
+            // exact rows needed by payroll. Only old preload builds without the
+            // endpoint may use the compatibility path. A failed new endpoint
+            // must keep the last good data instead of bypassing its snapshot guard.
+            if (api.ecommerceExports.getPackingReadModel) {
+                const readModelRes = await withTimeout(
+                    api.ecommerceExports.getPackingReadModel({ since: sinceVal, until: untilVal }),
+                    'Packing read model',
+                );
+                if (readModelRes?.success && Array.isArray(readModelRes.data)) {
+                    console.log('[PACKING] Read model rows:', readModelRes.data.length, 'cached:', Boolean(readModelRes.cached));
+                    return commitPackingRows(readModelRes.data as PackingOrderLog[]);
+                }
+                throw new Error(
+                    readModelRes?.error ||
+                    'Không tải được snapshot đóng gói nhất quán. Dữ liệu gần nhất được giữ nguyên để tránh sai thưởng.',
+                );
+            }
+
             // ComboProducts là nguồn chuẩn để quy đổi một dòng bán thành số gói thực đóng.
             const [initialEcomRes, combosRes] = await Promise.all([
                 withTimeout(
@@ -4665,6 +4833,7 @@ export default function Attendance() {
                         sinceField: 'ecommerceExportDate',
                         statusIn: ['completed'],
                         limit: packingFetchLimit,
+                        compact: true,
                     }),
                     'Ecom'
                 ),
@@ -4697,6 +4866,7 @@ export default function Attendance() {
                         statusIn: ['completed'],
                         limit: packingFetchLimit,
                         skip: ecommerceRows.length,
+                        compact: true,
                     }),
                     `Ecom page ${Math.floor(ecommerceRows.length / packingFetchLimit) + 1}`
                 );
@@ -4776,22 +4946,7 @@ export default function Attendance() {
 
             console.log('[PACKING] Done. Ecom:', ecommerceRows.length, '| Unified:', unified.length);
 
-            const sortTimes = new Map(unified.map(order => [order.id, Date.parse(order.timestamp) || 0]));
-            const sorted = unified.sort((a, b) => (sortTimes.get(b.id) || 0) - (sortTimes.get(a.id) || 0));
-            if (packingRequestKeyRef.current === requestKey) {
-                packingOrderLogsRef.current = sorted;
-                packingOrderCacheRef.current.set(requestKey, sorted);
-                if (packingOrderCacheRef.current.size > 6) {
-                    const oldestKey = packingOrderCacheRef.current.keys().next().value;
-                    if (oldestKey) packingOrderCacheRef.current.delete(oldestKey);
-                }
-                startBackgroundTransition(() => {
-                    setPackingOrderLogsData(sorted);
-                    setPackingReadyKey(requestKey);
-                    setPackingLoadError('');
-                });
-            }
-            return sorted;
+            return commitPackingRows(unified);
         } catch (error) {
             console.error('Lỗi tải dữ liệu đơn hàng:', error);
             const errorMessage = error instanceof Error ? error.message : 'Không thể tải dữ liệu đơn đóng gói.';
@@ -5048,6 +5203,7 @@ export default function Attendance() {
         let refreshQueued = false;
         let refreshTimer: number | null = null;
         let lastRevision: string | null = null;
+        let revisionCheckRunning = false;
         const revisionRange = {
             since: getPackingLoadStart(getPackingComparisonRange(packingDateRange)[0]).toISOString(),
             until: packingDateRange[1].endOf('day').toISOString(),
@@ -5096,7 +5252,8 @@ export default function Attendance() {
         };
 
         const checkRevision = async () => {
-            if (disposed || document.visibilityState === 'hidden') return;
+            if (disposed || revisionCheckRunning || document.visibilityState === 'hidden') return;
+            revisionCheckRunning = true;
             try {
                 const result = await api.ecommerceExports.getPackingRevision(revisionRange);
                 if (disposed || !result?.success || !result.data?.revision) return;
@@ -5111,13 +5268,17 @@ export default function Attendance() {
                 }
             } catch (error) {
                 console.warn('[PACKING] Live revision check failed:', error);
+            } finally {
+                revisionCheckRunning = false;
             }
         };
 
         const unsubscribeStock = api.products?.onStockChanged?.((change: any) => {
             if (String(change?.referenceType || '').toUpperCase() === 'TMDT') requestRefresh();
         });
-        const revisionTimer = window.setInterval(() => { void checkRevision(); }, 2500);
+        // Local events refresh immediately. Cross-workstation polling remains
+        // bounded because its aggregate fingerprint scans the selected period.
+        const revisionTimer = window.setInterval(() => { void checkRevision(); }, 15000);
         const handleVisibilityChange = () => {
             if (document.visibilityState === 'visible') void checkRevision();
         };
@@ -5955,23 +6116,21 @@ export default function Attendance() {
         if (date.isBefore(today, 'day')) return true;
         if (date.isAfter(today, 'day')) return false;
 
-        const start = session === 'morning' ? config.morningStart : config.afternoonStart;
+        // Resolve the schedule using the local Bangkok calendar date, not the
+        // machine timezone's UTC conversion.
+        const schedule = getAttendanceScheduleAt(config, getBangkokMidnightIso(date));
+        const start = session === 'morning' ? schedule.morningStart : schedule.afternoonStart;
         const [hour, minute] = start.split(':').map(Number);
-        const threshold = hour * 60 + minute + (config.graceMinutes || 0);
+        const threshold = hour * 60 + minute + schedule.graceMinutes;
         const nowMinutes = today.hour() * 60 + today.minute();
         return nowMinutes >= threshold;
-    }, [config.morningStart, config.afternoonStart, config.graceMinutes]);
+    }, [config]);
 
     // Thay thế array mock thành data mix thật sự
     const liveAttendanceMatrix = useMemo(() => {
         if (activeTab !== 'attendance') return [] as Array<Array<any>>;
         const startedAt = performance.now();
-        const grace = config.graceMinutes || 0;
-        const [amH, amM] = config.morningStart.split(':').map(Number);
-        const amThreshold = amH * 60 + amM + grace;
-        const [pmH, pmM] = config.afternoonStart.split(':').map(Number);
-        const pmThreshold = pmH * 60 + pmM + grace;
-
+        const currentSchedule = getAttendanceScheduleAt(config, dayjs().toISOString());
         const scheduleBySlot = new Map(workSchedules.map(schedule => [
             `${schedule.empId}|${schedule.date}|${schedule.session}`,
             schedule,
@@ -6020,7 +6179,9 @@ export default function Attendance() {
 
                 if (log.checkType === 'morning_in') {
                     monthData[dayIdx].amTime = logTime;
-                    monthData[dayIdx].am = logMin > amThreshold ? 2 : 1;
+                    const schedule = getAttendanceScheduleAt(config, log.timestamp);
+                    const [hour, minute] = schedule.morningStart.split(':').map(Number);
+                    monthData[dayIdx].am = logMin > hour * 60 + minute + schedule.graceMinutes ? 2 : 1;
                 } else if (log.checkType === 'morning_out') {
                     monthData[dayIdx].amOutTime = logTime;
                     if (monthData[dayIdx].am === 0) monthData[dayIdx].am = 1;
@@ -6028,7 +6189,9 @@ export default function Attendance() {
 
                 if (log.checkType === 'afternoon_in') {
                     monthData[dayIdx].pmTime = logTime;
-                    monthData[dayIdx].pm = logMin > pmThreshold ? 2 : 1;
+                    const schedule = getAttendanceScheduleAt(config, log.timestamp);
+                    const [hour, minute] = schedule.afternoonStart.split(':').map(Number);
+                    monthData[dayIdx].pm = logMin > hour * 60 + minute + schedule.graceMinutes ? 2 : 1;
                 } else if (log.checkType === 'evening_out') {
                     monthData[dayIdx].pmOutTime = logTime;
                     if (monthData[dayIdx].pm === 0) monthData[dayIdx].pm = 1;
@@ -6249,12 +6412,29 @@ export default function Attendance() {
         message.success(`Đã bỏ gán ${skus.length} sản phẩm.`);
     };
 
-    const openConfigModal = () => {
+const openConfigModal = () => {
         if (activeTab === 'packaging' && !isAdmin) {
             message.error('Chỉ Admin được phép cấu hình hoa hồng đóng gói.');
             return;
         }
-        setTempConfig({ ...config, packingCommission: normalizePackingCommission(config.packingCommission) });
+        const packingCommission = normalizePackingCommission(config.packingCommission);
+        const hasLegacyFixedSeptemberSchedule = JSON.stringify((packingCommission.saleDates || []).slice().sort()) === JSON.stringify(['2026-09-09', '2026-09-15', '2026-09-25']);
+        const saleCommission = {
+            ...packingCommission,
+            saleEffectiveAt: packingCommission.saleEffectiveAt || dayjs().format('YYYY-MM-DD'),
+        };
+        if (hasLegacyFixedSeptemberSchedule) {
+            saleCommission.saleDates = PACKING_SALE_DATES;
+            saleCommission.saleMultiplier = PACKING_SALE_MULTIPLIER;
+        }
+        setTempConfig({
+            ...config,
+            packingCommission: saleCommission.saleDates?.length
+                ? saleCommission
+                : { ...saleCommission, saleDates: PACKING_SALE_DATES, saleMultiplier: PACKING_SALE_MULTIPLIER },
+        });
+        setPackingSaleDatesInput(formatPackingSaleDates(saleCommission.saleDates?.length ? saleCommission.saleDates : PACKING_SALE_DATES));
+        setScheduleEffectiveDate(dayjs().startOf('day'));
         setActiveConfigTab(activeTab === 'packaging' ? 'packing' : 'rules');
         setSelectedPackingSkus([]);
         setPackingConfigView('unassigned');
@@ -6748,7 +6928,39 @@ export default function Attendance() {
             return;
         }
         const nextPackingCommission = normalizePackingCommission(tempConfig.packingCommission);
-        const effectiveAt = new Date().toISOString();
+        const effectiveAt = getBangkokMidnightIso(scheduleEffectiveDate);
+        const previousSchedule = {
+            morningStart: config.morningStart,
+            afternoonStart: config.afternoonStart,
+            graceMinutes: config.graceMinutes,
+        };
+        const existingScheduleHistory = Array.isArray(config.scheduleHistory) ? config.scheduleHistory : [];
+        const scheduleHistory = [...existingScheduleHistory];
+        // Legacy installations have no baseline. Add one before changing the
+        // schedule so old logs can still resolve the previous working hours.
+        if (scheduleHistory.length === 0) {
+            scheduleHistory.push({
+                effectiveAt: '1970-01-01T00:00:00.000Z',
+                ...previousSchedule,
+                updatedBy: fineAuditActor.username,
+            });
+        }
+        const scheduleChanged = previousSchedule.morningStart !== tempConfig.morningStart
+            || previousSchedule.afternoonStart !== tempConfig.afternoonStart
+            || Number(previousSchedule.graceMinutes || 0) !== Number(tempConfig.graceMinutes || 0);
+        const scheduleWithoutSameDate = scheduleChanged
+            ? scheduleHistory.filter(version => version.effectiveAt !== effectiveAt)
+            : [...scheduleHistory];
+        if (scheduleChanged) {
+            scheduleWithoutSameDate.push({
+                effectiveAt,
+                morningStart: tempConfig.morningStart,
+                afternoonStart: tempConfig.afternoonStart,
+                graceMinutes: tempConfig.graceMinutes,
+                updatedBy: fineAuditActor.username,
+            });
+        }
+        scheduleWithoutSameDate.sort((left, right) => Date.parse(left.effectiveAt) - Date.parse(right.effectiveAt));
         const versionHistory = activeConfigTab === 'packing'
             ? [
                 ...(nextPackingCommission.history || []),
@@ -6757,12 +6969,18 @@ export default function Attendance() {
                     rates: { ...nextPackingCommission.rates },
                     skuLevels: { ...nextPackingCommission.skuLevels },
                     customLevels: [...(nextPackingCommission.customLevels || [])],
+                    saleDates: [...(nextPackingCommission.saleDates || [])],
+                    saleMultiplier: nextPackingCommission.saleMultiplier || 1,
+                    saleEffectiveAt: nextPackingCommission.saleEffectiveAt,
                     updatedBy: fineAuditActor.username,
                 },
             ]
             : nextPackingCommission.history;
         const nextConfig: PenaltyConfig = {
             ...tempConfig,
+            scheduleHistory: activeConfigTab === 'rules'
+                ? scheduleWithoutSameDate.slice(-100)
+                : (config.scheduleHistory || []),
             packingCommission: activeConfigTab === 'packing'
                 ? {
                     ...nextPackingCommission,
@@ -6775,7 +6993,9 @@ export default function Attendance() {
         setConfig(nextConfig);
         setTempConfig(nextConfig);
         setConfigModalOpen(false);
-        message.success(activeConfigTab === 'packing' ? 'Đã lưu cấu hình hoa hồng đóng gói!' : 'Đã lưu cấu hình!');
+        message.success(activeConfigTab === 'packing'
+            ? 'Đã lưu cấu hình hoa hồng đóng gói!'
+            : `Đã lưu cấu hình, áp dụng từ 00:00 ngày ${scheduleEffectiveDate.format('DD/MM/YYYY')}.`);
     };
 
     const lockPayroll = () => {
@@ -10443,11 +10663,19 @@ export default function Attendance() {
                             key: 'packing',
                             label: <span><TeamOutlined /> Hoa hồng đóng gói</span>,
                             children: (
-                                <div style={{ display: 'flex', flexDirection: 'column', gap: 14, marginTop: 8 }}>
-                                    <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+                                <div className="packing-config-panel" style={{ display: 'flex', flexDirection: 'column', gap: 14, marginTop: 8 }}>
+                                    <div className="packing-config-hero">
+                                        <div>
+                                            <span className="packing-config-kicker">CẤU HÌNH THU NHẬP</span>
+                                            <h3>Hoa hồng đóng gói</h3>
+                                            <p>Thiết lập đơn giá theo độ khó và lịch sale của sàn.</p>
+                                        </div>
+                                    </div>
+                                    <div className="packing-rate-trigger-row">
                                         <Button
-                                            size="small"
-                                            icon={<SettingOutlined />}
+                                            className={`packing-rate-trigger${packingRatesExpanded ? ' is-open' : ''}`}
+                                            type={packingRatesExpanded ? 'default' : 'primary'}
+                                            icon={<DollarOutlined />}
                                             onClick={() => {
                                                 if (packingRatesExpanded) {
                                                     setTempConfig(previous => ({ ...previous, packingCommission: normalizePackingCommission(config.packingCommission) }));
@@ -10455,18 +10683,45 @@ export default function Attendance() {
                                                 setPackingRatesExpanded(!packingRatesExpanded);
                                             }}
                                         >
-                                            {packingRatesExpanded ? 'Ẩn thiết lập đơn giá' : 'Thiết lập đơn giá'}
+                                            {packingRatesExpanded ? 'Thu gọn đơn giá' : 'Chỉnh đơn giá đóng gói'}
                                         </Button>
                                     </div>
-                                    {packingRatesExpanded && <div style={{ display: 'flex', flexDirection: 'column', gap: 10, padding: '10px 12px', background: '#f8fbfa', border: '1px solid #dff0e7', borderRadius: 8 }}>
+                                    {packingRatesExpanded && <div className="packing-rate-editor" style={{ display: 'flex', flexDirection: 'column', gap: 10, padding: '10px 12px', background: '#f8fbfa', border: '1px solid #dff0e7', borderRadius: 8 }}>
                                         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
                                             <Text strong>Thiết lập đơn giá cơ bản</Text>
                                             <Button size="small" type="primary" loading={packingConfigSaving} onClick={savePackingRates}>Lưu đơn giá</Button>
                                         </div>
-                                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: 8 }}>
+                                        <div className="packing-rate-grid" style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: 8 }}>
                                             {PACKING_LEVELS.map(level => (
-                                                <InputNumber key={level.key} min={0} step={10} value={tempPackingCommission.rates[level.key]} onChange={value => updateTempPackingRate(level.key, value)} addonBefore={level.label} addonAfter="đ/gói" style={{ width: '100%' }} />
+                                                <div className={`packing-rate-card packing-rate-card--${level.key}`} key={level.key}>
+                                                    <div className="packing-rate-card__label"><Text strong>{level.label}</Text><span>đ/gói</span></div>
+                                                    <InputNumber min={0} step={10} value={tempPackingCommission.rates[level.key]} onChange={value => updateTempPackingRate(level.key, value)} controls={false} style={{ width: '100%' }} />
+                                                </div>
                                             ))}
+                                        </div>
+                                        <div className="packing-sale-row">
+                                            <div className="packing-sale-toggle">
+                                                <div>
+                                                    <Text strong style={{ display: 'block', fontSize: 13 }}>Tăng 50% ngày sale</Text>
+                                                    <Text type="secondary" style={{ fontSize: 11 }}>Bật để áp dụng hoa hồng x1.5 theo lịch sale.</Text>
+                                                </div>
+                                                <Switch
+                                                    checked={Number(tempPackingCommission.saleMultiplier || 1) > 1}
+                                                    checkedChildren="Bật"
+                                                    unCheckedChildren="Tắt"
+                                                    onChange={enabled => setTempConfig(previous => ({
+                                                        ...previous,
+                                                        packingCommission: {
+                                                            ...normalizePackingCommission(previous.packingCommission),
+                                                            saleMultiplier: enabled ? PACKING_SALE_MULTIPLIER : 1,
+                                                            saleDates: enabled
+                                                                ? (normalizePackingCommission(previous.packingCommission).saleDates.length ? normalizePackingCommission(previous.packingCommission).saleDates : PACKING_SALE_DATES)
+                                                                : normalizePackingCommission(previous.packingCommission).saleDates,
+                                                        },
+                                                    }))}
+                                                />
+                                            </div>
+                                            {Number(tempPackingCommission.saleMultiplier || 1) > 1 && <Text className="packing-sale-note" type="secondary" style={{ fontSize: 11 }}>Ngày sale được áp dụng tự động theo lịch định kỳ của sàn.</Text>}
                                         </div>
                                         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
                                             <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
@@ -10484,6 +10739,7 @@ export default function Attendance() {
                                         </div>
                                     </div>}
                                     <Tabs
+                                        className="packing-config-tabs"
                                         activeKey={packingConfigView}
                                         onChange={key => {
                                             setPackingConfigView(key as 'unassigned' | 'assigned');
@@ -10498,10 +10754,7 @@ export default function Attendance() {
                                     <Text type="secondary" style={{ fontSize: 12 }}>
                                         Sản phẩm chưa gán vẫn được tính mặc định mức Dễ ({tempPackingCommission.rates.easy.toLocaleString('vi-VN')}đ/gói). Màu sắc và biến thể con tự động kế thừa sản phẩm cha.
                                     </Text>
-                                    <Text style={{ fontSize: 12, color: '#079447' }}>
-                                        Cấu hình mới chỉ áp dụng cho đơn được ghi nhận sau thời điểm xác nhận lưu. Đơn cũ giữ nguyên mức tại thời điểm phát sinh.
-                                    </Text>
-                                    <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                                    <div className="packing-config-search" style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
                                         <Input
                                             allowClear
                                             prefix={<SearchOutlined />}
@@ -10566,6 +10819,20 @@ export default function Attendance() {
                                             <Text type="secondary" style={{ fontSize: 11, marginLeft: 6 }}>— số phút tối đa cho phép đi trễ</Text>
                                         </div>
                                         <InputNumber value={tempConfig.graceMinutes} onChange={v => setTempConfig({ ...tempConfig, graceMinutes: v || 0 })} min={0} max={30} addonAfter="phút" style={{ width: 120 }} />
+                                    </div>
+
+                                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, padding: '10px 14px', background: '#f0f5ff', borderRadius: 8, border: '1px solid #adc6ff' }}>
+                                        <div>
+                                            <Text strong style={{ fontSize: 13 }}>Áp dụng giờ ca mới từ ngày</Text>
+                                            <div><Text type="secondary" style={{ fontSize: 11 }}>Có hiệu lực từ 00:00; dữ liệu trước ngày này giữ nguyên.</Text></div>
+                                        </div>
+                                        <DatePicker
+                                            value={scheduleEffectiveDate}
+                                            format="DD/MM/YYYY"
+                                            allowClear={false}
+                                            disabledDate={date => date.isBefore(dayjs().startOf('day'), 'day')}
+                                            onChange={value => value && setScheduleEffectiveDate(value.startOf('day'))}
+                                        />
                                     </div>
 
                                     {/* Phạt đi muộn: 2 cột song song */}

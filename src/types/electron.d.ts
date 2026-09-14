@@ -239,6 +239,12 @@ export interface StockMutationResult {
 }
 
 export interface ElectronAPI {
+  mobileScanTest: {
+    start: () => Promise<{ success: boolean; url: string; token: string; address: string; secure: boolean }>;
+    stop: () => Promise<{ success: boolean }>;
+    onReceived: (callback: (data: { code: string; employee: string; deviceId: string; status: 'success' | 'fail'; message: string; at: string }) => void) => () => void;
+    onDevice: (callback: (data: { deviceId: string; employee?: string; connected: boolean }) => void) => () => void;
+  };
   products: {
     getAll: () => Promise<{
       success: boolean;
@@ -258,6 +264,11 @@ export interface ElectronAPI {
     getCatalogForSale?: () => Promise<{
       success: boolean;
       data?: Product[];
+      error?: string;
+    }>;
+    getPackingCatalog?: () => Promise<{
+      success: boolean;
+      data?: Array<Pick<Product, 'sku' | 'name' | 'variants'>>;
       error?: string;
     }>;
     getForStockAlerts?: () => Promise<{
@@ -927,11 +938,39 @@ export interface ElectronAPI {
       search?: string;
       statusIn?: string[];
       statusNotIn?: string[];
+      compact?: boolean;
       skip?: number;
     }) => Promise<{
       success: boolean;
       data?: any[];
       hasMore?: boolean;
+      error?: string;
+    }>;
+    getPackingReadModel?: (filters?: {
+      since?: string;
+      until?: string;
+    }) => Promise<{
+      success: boolean;
+      data?: Array<{
+        id: string;
+        timestamp: string;
+        orderNumber: string;
+        platform: 'Shopee' | 'TikTok' | 'Web';
+        customerName: string;
+        packer: string;
+        items: Array<{
+          sku: string;
+          productName: string;
+          variant?: string;
+          quantity: number;
+          packingSourceSku?: string;
+          packingUnits?: number;
+        }>;
+        totalSKU: number;
+        status: 'completed' | 'issue';
+      }>;
+      revision?: string;
+      cached?: boolean;
       error?: string;
     }>;
     getPackingRevision: (filters?: {
@@ -1328,6 +1367,9 @@ export interface ElectronAPI {
         rates: Record<string, number>;
         skuLevels: Record<string, string>;
         customLevels?: Array<{ key: string; label: string; unit: string }>;
+        saleDates?: string[];
+        saleMultiplier?: number;
+        saleEffectiveAt?: string;
       };
     }) => Promise<{
       success: boolean;

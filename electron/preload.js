@@ -1,4 +1,40 @@
-const { contextBridge, ipcRenderer } = require('electron');
+const { contextBridge, ipcRenderer: electronIpcRenderer } = require('electron');
+
+// The main process registers the large IPC surface after the first paint.
+// Queue every renderer invocation behind that readiness handshake.
+const rawInvoke = electronIpcRenderer.invoke.bind(electronIpcRenderer);
+const backendReady = new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+        reject(new Error('Backend IPC khởi động quá thời gian cho phép. Vui lòng khởi động lại ứng dụng.'));
+    }, 30000);
+    rawInvoke('app:waitBackendReady').then(
+        (result) => {
+            clearTimeout(timer);
+            if (!result?.success) {
+                reject(new Error(result?.error || 'Backend IPC chưa sẵn sàng.'));
+                return;
+            }
+            resolve(result);
+        },
+        (error) => {
+            clearTimeout(timer);
+            reject(error);
+        },
+    );
+});
+
+function invoke(channel, ...args) {
+    return backendReady.then(() => rawInvoke(channel, ...args));
+}
+
+// Keep the existing protected API declarations unchanged while making every
+// invocation wait for the deferred backend registration above.
+const ipcRenderer = {
+    invoke,
+    on: electronIpcRenderer.on.bind(electronIpcRenderer),
+    removeListener: electronIpcRenderer.removeListener.bind(electronIpcRenderer),
+    removeAllListeners: electronIpcRenderer.removeAllListeners.bind(electronIpcRenderer),
+};
 
 const appConfigRevisions = new Map();
 const appConfigWriteTails = new Map();
@@ -6,7 +42,7 @@ const appConfigWriteTails = new Map();
 async function getAppConfig(key) {
     const pendingWrite = appConfigWriteTails.get(key);
     if (pendingWrite) await pendingWrite.catch(() => undefined);
-    const result = await ipcRenderer.invoke('appConfig:get', key);
+    const result = await invoke('appConfig:get', key);
     if (result?.success) appConfigRevisions.set(key, result.updatedAt || null);
     return result;
 }
@@ -15,7 +51,7 @@ function setAppConfig(key, value) {
     const previous = appConfigWriteTails.get(key) || Promise.resolve();
     const write = previous.catch(() => undefined).then(async () => {
         const hasRevision = appConfigRevisions.has(key);
-        const result = await ipcRenderer.invoke(
+        const result = await invoke(
             'appConfig:set',
             key,
             value,
@@ -36,12 +72,27 @@ function setAppConfig(key, value) {
 // Expose protected methods that allow the renderer process to use
 // the ipcRenderer without exposing the entire object
 contextBridge.exposeInMainWorld('electronAPI', {
+    mobileScanTest: {
+        start: () => rawInvoke('mobileScan:start'),
+        stop: () => rawInvoke('mobileScan:stop'),
+        onReceived: (callback) => {
+            const listener = (_event, data) => callback(data);
+            electronIpcRenderer.on('mobileScan:received', listener);
+            return () => electronIpcRenderer.removeListener('mobileScan:received', listener);
+        },
+        onDevice: (callback) => {
+            const listener = (_event, data) => callback(data);
+            electronIpcRenderer.on('mobileScan:device', listener);
+            return () => electronIpcRenderer.removeListener('mobileScan:device', listener);
+        },
+    },
     // Products
     products: {
         getAll: () => ipcRenderer.invoke('products:getAll'),
         getForAdmin: () => ipcRenderer.invoke('products:getForAdmin'),
         getCatalogForPurchase: () => ipcRenderer.invoke('products:getCatalogForPurchase'),
         getCatalogForSale: () => ipcRenderer.invoke('products:getCatalogForSale'),
+        getPackingCatalog: () => ipcRenderer.invoke('products:getPackingCatalog'),
         getForStockAlerts: () => ipcRenderer.invoke('products:getForStockAlerts'),
         getInventoryCatalog: () => ipcRenderer.invoke('products:getInventoryCatalog'),
         getById: (id) => ipcRenderer.invoke('products:getById', id),
@@ -232,6 +283,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     // Ecommerce Export (XUẤT HÀNG TMDT)
     ecommerceExports: {
         getAll: (args) => ipcRenderer.invoke('ecommerceExports:getAll', args),
+        getPackingReadModel: (args) => ipcRenderer.invoke('ecommerceExports:getPackingReadModel', args),
         getPackingRevision: (args) => ipcRenderer.invoke('ecommerceExports:getPackingRevision', args),
         create: (data) => ipcRenderer.invoke('ecommerceExports:create', data),
         update: (id, data) => ipcRenderer.invoke('ecommerceExports:update', id, data),

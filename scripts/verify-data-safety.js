@@ -3,11 +3,17 @@ const path = require('path');
 
 const root = path.resolve(__dirname, '..');
 const read = (relativePath) => fs.readFileSync(path.join(root, relativePath), 'utf8');
+const readOptional = (relativePath) => {
+  const absolutePath = path.join(root, relativePath);
+  return fs.existsSync(absolutePath) ? fs.readFileSync(absolutePath, 'utf8') : '';
+};
 const ipc = read('electron/ipc-handlers.js');
 const normalizedIpc = ipc.replace(/\r\n/g, '\n');
 const main = read('electron/main.js');
 const preload = read('electron/preload.js');
+const packageJson = read('package.json');
 const offlineQueue = read('electron/offline-queue.js');
+const appPage = read('src/App.tsx');
 const ecommerce = read('src/pages/EcommerceExport.tsx');
 const stockBalance = read('src/pages/StockBalance.tsx');
 const returnsPage = read('src/pages/Returns.tsx');
@@ -15,11 +21,15 @@ const refundsPage = read('src/pages/Refunds.tsx');
 const handlingUnitsPage = read('src/pages/HandlingUnits.tsx');
 const purchasePage = read('src/pages/Purchase.tsx');
 const stockCheckPage = read('src/pages/StockCheck.tsx');
+const attendancePage = read('src/pages/Attendance.tsx');
 const posPage = read('src/pages/POS.tsx');
-const r2Lab = read('src/pages/R2StorageLab.tsx');
+const r2Lab = readOptional('src/pages/R2StorageLab.tsx');
+if (!r2Lab) console.warn('Data-safety note: optional R2StorageLab.tsx is absent; its UI checks were skipped.');
 const r2TestWorker = read('cloudflare/r2-test-worker/src/index.ts');
 const evidenceWorker = read('cloudflare/r2-daily-evidence-worker/src/index.ts');
 const devLauncher = read('scripts/start-electron-dev.js');
+const fastStartBatch = read('START.bat');
+const devStartBatch = read('START-DEV.bat');
 const r2BootstrapScript = read('scripts/prepare-r2-daily-evidence-config.js');
 
 const failures = [];
@@ -445,6 +455,11 @@ rejectText(packageBalanceHandler, 'handlingUnits.finalizePick(', 'Package confir
 rejectText(packageBalanceHandler, 'handlingUnits.updateUnit(', 'Package confirmation must not update units in separate requests');
 requireText(ipc, 'getMisaIntegrationBaseUrl(config)', 'MISA environment routing is missing');
 requireText(main, 'app.requestSingleInstanceLock()', 'Single-instance lock is missing');
+requireText(main, "mainWindow.webContents.once('did-finish-load'", 'Deferred backend load has no did-finish-load fallback');
+requireText(main, 'setTimeout(loadBackendHandlers, 8000)', 'Deferred backend load has no bounded startup fallback');
+requireText(main, "process.env.DBYPOS_USE_DIST === '1'", 'Electron fast start must support the built renderer outside a package');
+requireText(preload, 'Backend IPC khởi động quá thời gian cho phép', 'Preload backend wait has no timeout');
+requireText(preload, "rawInvoke('app:waitBackendReady')", 'Preload must wait for deferred IPC registration');
 requireText(offlineQueue, 'Recovered complete temp item', 'Offline temp recovery is missing');
 rejectText(
   offlineQueue.slice(0, offlineQueue.indexOf('function enqueue')),
@@ -454,14 +469,46 @@ rejectText(
 rejectText(ecommerce, "console.log('Purged ' + cancelledIds.length", 'Ecommerce load still auto-deletes cancelled records');
 rejectText(stockBalance, 'stockBalance.adjustStock(', 'Stock balance renderer still uses split stock mutation');
 rejectText(stockBalance, 'stockBalance.create(', 'Stock balance renderer still writes history separately');
-requireText(r2Lab, 'const DATA_SAFETY_MODE = true;', 'R2 lab safety mode is not enabled');
-requireText(r2Lab, 'disabled={DATA_SAFETY_MODE || Boolean(deletingKeys[item.key])}', 'R2 lab delete button is not disabled');
+if (r2Lab) {
+  requireText(r2Lab, 'const DATA_SAFETY_MODE = true;', 'R2 lab safety mode is not enabled');
+  requireText(r2Lab, 'disabled={DATA_SAFETY_MODE || Boolean(deletingKeys[item.key])}', 'R2 lab delete button is not disabled');
+}
 requireText(r2TestWorker, 'Deletion is disabled by data-safety mode', 'R2 test worker still permits deletion');
 requireText(evidenceWorker, 'Deletion is disabled by data-safety mode', 'Evidence worker still permits deletion');
 requireText(devLauncher, 'acquireLauncherLock', 'Development launcher duplicate lock is missing');
 requireText(devLauncher, 'electron-resource-app-quarantine', 'Development launcher must preserve a generated resources/app before starting');
-requireText(devLauncher, "startNode(electronEntry, [projectRoot]", 'Development launcher must pass the absolute working-tree path to Electron');
+requireText(devLauncher, "spawn(process.execPath, [electronEntry, projectRoot]", 'Development launcher must pass the absolute working-tree path to Electron');
 rejectText(devLauncher, 'fs.rm(', 'Development launcher still deletes quarantined Electron cache');
+rejectText(devLauncher, "typescript', 'bin', 'tsc", 'Fast runtime launcher still blocks startup on a full TypeScript check');
+requireText(devLauncher, "await runNode(viteEntry, ['build']);", 'Fast runtime launcher must refresh a stale production renderer');
+requireText(devLauncher, 'if (electronRestartRequested)', 'Electron must restart only after a watched backend change');
+requireText(devLauncher, 'shutdown(code || 0);', 'Closing Electron normally must stop the launcher instead of reopening it');
+requireText(fastStartBatch, 'set "DBYPOS_FAST_START=1"', 'START.bat must select the cached production renderer');
+requireText(devStartBatch, 'set "DBYPOS_FAST_START="', 'START-DEV.bat must explicitly select Vite development mode');
+requireText(ipc, 'ecommerceExports:getPackingReadModel', 'Packing payroll read model is missing');
+requireText(ipc, 'before.revision !== after.revision', 'Packing read model must reject a mixed cross-workstation revision');
+requireText(ipc, 'packingReadModelInFlight', 'Packing read model must deduplicate concurrent period reads');
+requireText(ipc, 'PACKING_READ_MODEL_MAX_ROWS + 1', 'Packing read model must detect oversized periods without truncation');
+requireText(ipc, 'exportAggregate.updatedAtSum', 'Packing export revision must detect edits outside the latest row');
+requireText(ipc, 'comboAggregate.updatedAtSum', 'Packing combo revision must detect edits outside the latest row');
+requireText(attendancePage, 'A failed new endpoint', 'Packing renderer must document fail-closed read-model behavior');
+requireText(attendancePage, 'Không tải được snapshot đóng gói nhất quán.', 'Packing renderer must keep the last good data when the read model fails');
+rejectText(attendancePage, 'Read model unavailable; using compatibility path', 'Packing renderer still bypasses a failed read-model snapshot guard');
+requireText(attendancePage, 'revisionCheckRunning', 'Packing revision polling must prevent overlapping database checks');
+requireText(
+  attendancePage,
+  'const revisionTimer = window.setInterval(() => { void checkRevision(); }, 15000);',
+  'Packing revision polling interval must remain bounded at 15 seconds',
+);
+requireText(appPage, "const GlobalTaskAlerts = lazy(() => import('./components/GlobalTaskAlerts'))", 'Global task alerts must remain outside the startup bundle');
+requireText(appPage, 'void loadAttendancePage();', 'Attendance chunk must remain eligible for idle warming');
+requireText(packageJson, '!node_modules/.prisma/**/*.tmp*', 'Packaged app must exclude stale Prisma temp binaries');
+const packingCatalogStart = ipc.indexOf('ipcMain.handle("products:getPackingCatalog"');
+const packingCatalogEnd = ipc.indexOf('ipcMain.handle("handlingUnits:getWorkspace"', packingCatalogStart);
+const packingCatalogHandler = packingCatalogStart >= 0 && packingCatalogEnd > packingCatalogStart
+  ? ipc.slice(packingCatalogStart, packingCatalogEnd)
+  : '';
+rejectText(packingCatalogHandler, 'status: "active"', 'Packing catalog must retain inactive historical SKU mappings');
 
 if (failures.length > 0) {
   console.error('Data-safety verification failed:');

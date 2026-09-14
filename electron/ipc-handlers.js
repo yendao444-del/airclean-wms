@@ -263,6 +263,7 @@ else delete process.env.DIRECT_URL;
 
 const { PrismaClient, Prisma } = require("@prisma/client");
 const fs = require("fs");
+const { buildPackingReadModel } = require("./packing-read-model");
 const https = require("https");
 const http = require("http");
 const crypto = require("crypto");
@@ -6929,6 +6930,22 @@ ipcMain.handle("handlingUnits:exportLabelsPdf", async (event, payload = {}) => {
     return { success: true, data: { path: pdfPath } };
   } catch (error) {
     console.error("Export handling-unit labels PDF error:", error);
+    return { success: false, error: error.message };
+  }
+});
+
+// Packing payroll only needs SKU identity and variant membership. Avoid
+// transferring stock, pricing and category fields to the Attendance renderer.
+ipcMain.handle("products:getPackingCatalog", async () => {
+  try {
+    requireRole();
+    if (!prisma) throw new Error("Prisma not available");
+    const products = await prisma.product.findMany({
+      select: { sku: true, name: true, variants: true },
+      orderBy: { createdAt: "desc" },
+    });
+    return { success: true, data: products };
+  } catch (error) {
     return { success: false, error: error.message };
   }
 });
@@ -22028,6 +22045,209 @@ require("./update-handlers")(prisma, { requireRole });
 // ECOMMERCE EXPORTS HANDLERS (XUẤT HÀNG TMDT)
 // ========================================
 
+const PACKING_READ_MODEL_MAX_ROWS = 50000;
+const PACKING_READ_MODEL_CACHE_MAX_ROWS = 30000;
+const packingReadModelCache = new Map();
+const packingReadModelInFlight = new Map();
+let packingReadModelCachedRows = 0;
+
+function getPackingDateFilter({ since, until } = {}) {
+  const dateFilter = {};
+  if (since) {
+    const start = new Date(since);
+    if (Number.isNaN(start.getTime())) throw new Error("Thời gian bắt đầu không hợp lệ.");
+    dateFilter.gte = start;
+  }
+  if (until) {
+    const end = new Date(until);
+    if (Number.isNaN(end.getTime())) throw new Error("Thời gian kết thúc không hợp lệ.");
+    dateFilter.lte = end;
+  }
+  if (dateFilter.gte && dateFilter.lte && dateFilter.gte > dateFilter.lte) {
+    throw new Error("Khoảng thời gian đóng gói không hợp lệ.");
+  }
+  return dateFilter;
+}
+
+async function getPackingSourceRevision(dateFilter) {
+  const exportConditions = [Prisma.sql`"status" = 'completed'`];
+  if (dateFilter.gte) {
+    exportConditions.push(Prisma.sql`"ecommerceExportDate" >= ${dateFilter.gte}`);
+  }
+  if (dateFilter.lte) {
+    exportConditions.push(Prisma.sql`"ecommerceExportDate" <= ${dateFilter.lte}`);
+  }
+  const [exportRows, comboRows] = await Promise.all([
+    prisma.$queryRaw(Prisma.sql`
+      SELECT
+        COUNT(*)::bigint AS "count",
+        COALESCE(MAX("id"), 0)::bigint AS "latestId",
+        MAX("updatedAt") AS "updatedAt",
+        COALESCE(SUM("id"), 0)::numeric AS "idSum",
+        COALESCE(SUM(EXTRACT(EPOCH FROM "updatedAt") * 1000), 0)::numeric AS "updatedAtSum"
+      FROM "EcommerceExport"
+      WHERE ${Prisma.join(exportConditions, " AND ")}
+    `),
+    prisma.$queryRaw(Prisma.sql`
+      SELECT
+        COUNT(*)::bigint AS "count",
+        COALESCE(MAX("id"), 0)::bigint AS "latestId",
+        MAX("updatedAt") AS "updatedAt",
+        COALESCE(SUM("id"), 0)::numeric AS "idSum",
+        COALESCE(SUM(EXTRACT(EPOCH FROM "updatedAt") * 1000), 0)::numeric AS "updatedAtSum"
+      FROM "ComboProduct"
+    `),
+  ]);
+  const exportAggregate = exportRows?.[0] || {};
+  const comboAggregate = comboRows?.[0] || {};
+  const count = Number(exportAggregate.count || 0);
+  const latestId = Number(exportAggregate.latestId || 0);
+  const updatedAt = exportAggregate.updatedAt?.toISOString?.() || null;
+  const comboCount = Number(comboAggregate.count || 0);
+  const comboLatestId = Number(comboAggregate.latestId || 0);
+  const comboUpdatedAt = comboAggregate.updatedAt?.toISOString?.() || null;
+  return {
+    count,
+    latestId,
+    updatedAt,
+    revision: [
+      count,
+      latestId,
+      String(exportAggregate.idSum || 0),
+      String(exportAggregate.updatedAtSum || 0),
+      updatedAt || "none",
+      comboCount,
+      comboLatestId,
+      String(comboAggregate.idSum || 0),
+      String(comboAggregate.updatedAtSum || 0),
+      comboUpdatedAt || "none",
+    ].join(":"),
+  };
+}
+
+function rememberPackingReadModel(cacheKey, value) {
+  const previous = packingReadModelCache.get(cacheKey);
+  if (previous) packingReadModelCachedRows -= previous.length;
+  packingReadModelCache.set(cacheKey, value);
+  packingReadModelCachedRows += value.length;
+  while (
+    packingReadModelCache.size > 3 ||
+    (packingReadModelCachedRows > PACKING_READ_MODEL_CACHE_MAX_ROWS &&
+      packingReadModelCache.size > 1)
+  ) {
+    const oldestKey = packingReadModelCache.keys().next().value;
+    if (!oldestKey) break;
+    const oldest = packingReadModelCache.get(oldestKey);
+    packingReadModelCache.delete(oldestKey);
+    packingReadModelCachedRows -= oldest?.length || 0;
+  }
+}
+
+ipcMain.handle(
+  "ecommerceExports:getPackingReadModel",
+  async (_event, { since, until } = {}) => {
+    try {
+      requireRole("admin", "manager");
+      if (!prisma) throw new Error("Prisma not available");
+      const startedAt = Date.now();
+      const dateFilter = getPackingDateFilter({ since, until });
+      const rangeKey = `${dateFilter.gte?.toISOString() || "all"}|${dateFilter.lte?.toISOString() || "all"}`;
+      const existingRequest = packingReadModelInFlight.get(rangeKey);
+      if (existingRequest) return await existingRequest;
+
+      // A revision check keeps the process-local cache coherent with writes
+      // from other workstations. A changed revision during a cold read causes
+      // one retry rather than returning a mixed payroll snapshot.
+      const request = (async () => {
+        for (let attempt = 0; attempt < 2; attempt += 1) {
+        const before = await getPackingSourceRevision(dateFilter);
+        const cacheKey = `${rangeKey}|${before.revision}`;
+        const cached = packingReadModelCache.get(cacheKey);
+        if (cached) {
+          packingReadModelCache.delete(cacheKey);
+          packingReadModelCache.set(cacheKey, cached);
+          return {
+            success: true,
+            data: cached,
+            revision: before.revision,
+            cached: true,
+          };
+        }
+
+        const [exports, combos] = await Promise.all([
+          prisma.ecommerceExport.findMany({
+            where: {
+              status: "completed",
+              ...(Object.keys(dateFilter).length > 0
+                ? { ecommerceExportDate: dateFilter }
+                : {}),
+            },
+            select: {
+              id: true,
+              customerName: true,
+              ecommerceExportCode: true,
+              orderNumber: true,
+              ecommerceExportDate: true,
+              items: true,
+              status: true,
+              createdBy: true,
+              pickedBy: true,
+              updatedAt: true,
+            },
+            orderBy: [{ ecommerceExportDate: "desc" }, { id: "desc" }],
+            take: PACKING_READ_MODEL_MAX_ROWS + 1,
+          }),
+          prisma.comboProduct.findMany({
+            select: { sku: true, items: true, status: true },
+            orderBy: { createdAt: "desc" },
+          }),
+        ]);
+        if (exports.length > PACKING_READ_MODEL_MAX_ROWS) {
+          throw new Error(
+            `Dữ liệu đóng gói của kỳ vượt ${PACKING_READ_MODEL_MAX_ROWS.toLocaleString("vi-VN")} đơn. Chưa chốt để tránh tính thiếu thưởng.`,
+          );
+        }
+
+        const after = await getPackingSourceRevision(dateFilter);
+        if (before.revision !== after.revision) continue;
+
+        const normalizedExports = exports.map((row) => ({
+          ...row,
+          ecommerceExportDate: row.ecommerceExportDate.toISOString(),
+          updatedAt: row.updatedAt.toISOString(),
+        }));
+        const data = buildPackingReadModel(normalizedExports, combos);
+        rememberPackingReadModel(cacheKey, data);
+        console.log(
+          `[Perf] ecommerceExports:getPackingReadModel rows=${data.length} cached=false ms=${Date.now() - startedAt}`,
+        );
+        return {
+          success: true,
+          data,
+          revision: before.revision,
+          cached: false,
+        };
+        }
+
+        throw new Error(
+          "Dữ liệu đóng gói vừa thay đổi trên máy khác. Vui lòng tải lại để đối chiếu chính xác.",
+        );
+      })();
+      packingReadModelInFlight.set(rangeKey, request);
+      try {
+        return await request;
+      } finally {
+        if (packingReadModelInFlight.get(rangeKey) === request) {
+          packingReadModelInFlight.delete(rangeKey);
+        }
+      }
+    } catch (error) {
+      console.error("Get packing read model error:", error);
+      return { success: false, error: error.message };
+    }
+  },
+);
+
 ipcMain.handle(
   "ecommerceExports:getAll",
   async (
@@ -22041,6 +22261,7 @@ ipcMain.handle(
       statusIn,
       statusNotIn,
       skip,
+      compact,
     } = {},
   ) => {
     try {
@@ -22101,6 +22322,22 @@ ipcMain.handle(
         orderBy: { ecommerceExportDate: "desc" },
         skip: skip || 0,
         take: take + 1,
+        ...(compact
+          ? {
+              select: {
+                id: true,
+                customerName: true,
+                ecommerceExportCode: true,
+                orderNumber: true,
+                ecommerceExportDate: true,
+                items: true,
+                status: true,
+                createdBy: true,
+                pickedBy: true,
+                updatedAt: true,
+              },
+            }
+          : {}),
       });
       const hasMore = exports.length > take;
       const rows = hasMore ? exports.slice(0, take) : exports;
@@ -22148,41 +22385,12 @@ ipcMain.handle(
     try {
       requireRole("admin", "manager");
       if (!prisma) throw new Error("Prisma not available");
-
-      const dateFilter = {};
-      if (since) {
-        const start = new Date(since);
-        if (Number.isNaN(start.getTime())) throw new Error("Thời gian bắt đầu không hợp lệ.");
-        dateFilter.gte = start;
-      }
-      if (until) {
-        const end = new Date(until);
-        if (Number.isNaN(end.getTime())) throw new Error("Thời gian kết thúc không hợp lệ.");
-        dateFilter.lte = end;
-      }
-
-      const aggregate = await prisma.ecommerceExport.aggregate({
-        where: {
-          status: "completed",
-          ...(Object.keys(dateFilter).length > 0
-            ? { ecommerceExportDate: dateFilter }
-            : {}),
-        },
-        _count: { _all: true },
-        _max: { id: true, updatedAt: true },
-      });
-      const count = Number(aggregate._count?._all || 0);
-      const latestId = Number(aggregate._max?.id || 0);
-      const updatedAt = aggregate._max?.updatedAt?.toISOString() || null;
+      const dateFilter = getPackingDateFilter({ since, until });
+      const revision = await getPackingSourceRevision(dateFilter);
 
       return {
         success: true,
-        data: {
-          count,
-          latestId,
-          updatedAt,
-          revision: `${count}:${latestId}:${updatedAt || "none"}`,
-        },
+        data: revision,
       };
     } catch (error) {
       console.error("Get packing live revision error:", error);
@@ -26231,21 +26439,44 @@ function requireConfigAccess(key, operation) {
 
 let attendanceReadCache = null;
 
+// Reuse the large attendance configuration between policy/notification reads.
+// A lightweight updatedAt check keeps the cache coherent without mutating data.
+async function getAttendanceDataSnapshot() {
+  if (attendanceReadCache) {
+    const revision = await prisma.appConfig.findUnique({
+      where: { key: "attendanceData" },
+      select: { updatedAt: true },
+    });
+    const revisionKey = revision?.updatedAt?.toISOString() || null;
+    if (revisionKey === attendanceReadCache.updatedAt) {
+      return { data: attendanceReadCache.data, updatedAt: revisionKey, cached: true };
+    }
+  }
+
+  const record = await prisma.appConfig.findUnique({
+    where: { key: "attendanceData" },
+    select: { value: true, updatedAt: true },
+  });
+  let data = {};
+  try {
+    data = record?.value ? JSON.parse(record.value) : {};
+  } catch {
+    throw new Error("Cấu hình chính sách hiện hành không hợp lệ.");
+  }
+  const updatedAt = record?.updatedAt?.toISOString() || null;
+  attendanceReadCache = { success: true, data, updatedAt };
+  return { data, updatedAt, cached: false };
+}
+
 ipcMain.handle("policies:getCurrent", async () => {
+  const startedAt = Date.now();
   try {
     requireRole();
     if (!prisma) throw new Error("Prisma not available");
 
-    const record = await prisma.appConfig.findUnique({
-      where: { key: "attendanceData" },
-      select: { value: true, updatedAt: true },
-    });
-    let attendanceData = {};
-    try {
-      attendanceData = record?.value ? JSON.parse(record.value) : {};
-    } catch {
-      throw new Error("Cấu hình chính sách hiện hành không hợp lệ.");
-    }
+    const attendanceSnapshot = await getAttendanceDataSnapshot();
+    const attendanceData = attendanceSnapshot.data || {};
+    const updatedAt = attendanceSnapshot.updatedAt;
 
     const config = attendanceData?.config || {};
     const attendanceReward = normalizeAttendanceRewardConfig(config);
@@ -26265,7 +26496,7 @@ ipcMain.handle("policies:getCurrent", async () => {
       morningStart: String(config.morningStart || "08:00"),
       afternoonStart: String(config.afternoonStart || "13:30"),
     };
-    return {
+    const response = {
       success: true,
       data: {
         config: {
@@ -26276,7 +26507,10 @@ ipcMain.handle("policies:getCurrent", async () => {
             skuLevels: packingCommission.skuLevels || {},
             customLevels: Array.isArray(packingCommission.customLevels) ? packingCommission.customLevels : [],
             history: Array.isArray(packingCommission.history) ? packingCommission.history : [],
-            updatedAt: packingCommission.updatedAt || record?.updatedAt?.toISOString() || null,
+            saleDates: Array.isArray(packingCommission.saleDates) ? packingCommission.saleDates : [],
+            saleMultiplier: Math.max(1, Number(packingCommission.saleMultiplier || 1)),
+            saleEffectiveAt: packingCommission.saleEffectiveAt || null,
+            updatedAt: packingCommission.updatedAt || updatedAt,
             updatedBy: packingCommission.updatedBy || "admin",
           },
         },
@@ -26345,6 +26579,8 @@ ipcMain.handle("policies:getCurrent", async () => {
         },
       },
     };
+    console.log(`[Perf] policies:getCurrent ms=${Date.now() - startedAt} cached=${attendanceSnapshot.cached}`);
+    return response;
   } catch (error) {
     console.error("❌ Get current policies error:", error);
     return { success: false, error: error.message };
@@ -26461,6 +26697,37 @@ ipcMain.handle("appConfig:set", async (event, key, value, expectedUpdatedAt) => 
                           ? currentValue.payrollOverrides
                           : {},
                     };
+                    // A renderer opened before a schedule change can flush a
+                    // stale snapshot while closing. Keep the authoritative
+                    // schedule history in that case instead of reverting the
+                    // new hours in the shared attendance document.
+                    const incomingConfig = valueToSave?.config;
+                    const currentConfig = currentValue?.config;
+                    const currentScheduleHistory = Array.isArray(currentConfig?.scheduleHistory)
+                      ? currentConfig.scheduleHistory
+                      : [];
+                    const incomingScheduleHistory = Array.isArray(incomingConfig?.scheduleHistory)
+                      ? incomingConfig.scheduleHistory
+                      : [];
+                    const currentLatestSchedule = [...currentScheduleHistory]
+                      .filter((version) => version?.effectiveAt)
+                      .sort((left, right) => Date.parse(right.effectiveAt) - Date.parse(left.effectiveAt))[0];
+                    const incomingLatestSchedule = [...incomingScheduleHistory]
+                      .filter((version) => version?.effectiveAt)
+                      .sort((left, right) => Date.parse(right.effectiveAt) - Date.parse(left.effectiveAt))[0];
+                    const incomingScheduleIsStale = currentLatestSchedule && (
+                      !incomingLatestSchedule
+                      || Date.parse(incomingLatestSchedule.effectiveAt) < Date.parse(currentLatestSchedule.effectiveAt)
+                    );
+                    if (incomingConfig && currentConfig && incomingScheduleIsStale) {
+                      valueToSave.config = {
+                        ...incomingConfig,
+                        morningStart: currentConfig.morningStart,
+                        afternoonStart: currentConfig.afternoonStart,
+                        graceMinutes: currentConfig.graceMinutes,
+                        scheduleHistory: currentConfig.scheduleHistory,
+                      };
+                    }
                   } catch {}
                 }
                 return tx.appConfig.upsert({
@@ -26642,6 +26909,13 @@ ipcMain.handle("attendance:updatePackingCommission", async (event, payload = {})
       const normalizedLevel = String(level || "").trim();
       if (normalizedSku && validKeys.has(normalizedLevel)) skuLevels[normalizedSku] = normalizedLevel;
     });
+    const saleDates = Array.isArray(source.saleDates)
+      ? [...new Set(source.saleDates.map((date) => String(date).trim()).filter((date) => /^(?:\*-\d{2}|\d{2}-\d{2}|\d{4}-\d{2}-\d{2})$/.test(date)))].sort()
+      : [];
+    const saleMultiplier = Math.max(1, Math.min(10, Number(source.saleMultiplier || 1)));
+    const saleEffectiveAt = source.saleEffectiveAt && /^\d{4}-\d{2}-\d{2}$/.test(String(source.saleEffectiveAt))
+      ? String(source.saleEffectiveAt)
+      : null;
 
     const result = await enqueueAttendanceDataWrite(async () => {
       let lastConflict = null;
@@ -26661,15 +26935,30 @@ ipcMain.handle("attendance:updatePackingCommission", async (event, payload = {})
                 rates: current.rates || { easy: 20, medium: 30, high: 40 },
                 skuLevels: current.skuLevels || {},
                 customLevels: current.customLevels || [],
+                saleDates: current.saleDates || [],
+                saleMultiplier: current.saleMultiplier || 1,
+                saleEffectiveAt: current.saleEffectiveAt || null,
                 updatedBy: current.updatedBy,
               });
             }
             const effectiveAt = new Date().toISOString();
-            const version = { effectiveAt, rates, skuLevels, customLevels, updatedBy: currentSession.username };
+            const version = {
+              effectiveAt,
+              rates,
+              skuLevels,
+              customLevels,
+              saleDates,
+              saleMultiplier,
+              saleEffectiveAt,
+              updatedBy: currentSession.username,
+            };
             const packingCommission = {
               rates,
               skuLevels,
               customLevels,
+              saleDates,
+              saleMultiplier,
+              saleEffectiveAt,
               history: [...history.slice(-199), version],
               updatedAt: effectiveAt,
               updatedBy: currentSession.username,
@@ -26689,7 +26978,14 @@ ipcMain.handle("attendance:updatePackingCommission", async (event, payload = {})
             return {
               packingCommission,
               previousCommission: current,
-              policyChanges: getPackingCommissionPolicyChanges(current, packingCommission),
+              policyChanges: [
+                ...getPackingCommissionPolicyChanges(current, packingCommission),
+                ...(JSON.stringify(current.saleDates || []) !== JSON.stringify(saleDates)
+                  || Number(current.saleMultiplier || 1) !== saleMultiplier
+                  || String(current.saleEffectiveAt || '') !== String(saleEffectiveAt || '')
+                  ? [{ key: 'saleSchedule', previous: current, next: packingCommission }]
+                  : []),
+              ],
             };
           }, { isolationLevel: "Serializable", timeout: 15000, maxWait: 10000 });
         } catch (error) {
@@ -26710,25 +27006,19 @@ ipcMain.handle("attendance:updatePackingCommission", async (event, payload = {})
       severity: "INFO",
     }).catch((error) => console.warn("Không thể ghi audit hoa hồng đóng gói:", error.message));
 
-    let notification = { created: false, recipientCount: 0 };
+    // Do not block the save button on announcement delivery. The commission
+    // transaction has already committed; notification delivery is best-effort.
     if (result.policyChanges.length > 0) {
-      try {
-        notification = await publishPackingCommissionChangeAnnouncement({
-          changes: result.policyChanges,
-          effectiveAt: result.packingCommission.updatedAt,
-          publishedBy: currentSession.username,
-        });
-      } catch (notificationError) {
+      void publishPackingCommissionChangeAnnouncement({
+        changes: result.policyChanges,
+        effectiveAt: result.packingCommission.updatedAt,
+        publishedBy: currentSession.username,
+      }).catch((notificationError) => {
         console.error("Không thể phát hành thông báo thay đổi hoa hồng:", notificationError);
-        notification = {
-          created: false,
-          recipientCount: 0,
-          error: "Hoa hồng đã được lưu nhưng chưa phát được thông báo. Vui lòng thử lưu lại hoặc kiểm tra kết nối.",
-        };
-      }
+      });
     }
 
-    return { success: true, data: result.packingCommission, notification };
+    return { success: true, data: result.packingCommission, notification: { created: false, recipientCount: 0 } };
   } catch (error) {
     console.error("❌ attendance:updatePackingCommission error:", error);
     return { success: false, error: error.message };
@@ -31274,6 +31564,23 @@ const FALLBACK_ANNOUNCEMENTS = [
     issuer: "Phòng nhân sự",
     createdByName: "Thúy Lê (Admin)",
   },
+  {
+    id: 900003,
+    title: "Thay đổi thời gian đi làm",
+    summary: "Chính thức thay đổi giờ bắt đầu ca chiều sang 13:00 từ 00:00 ngày 14/09/2026; thời gian linh động vẫn là 5 phút.",
+    content: "Phòng vận hành thông báo chính thức thay đổi thời gian đi làm, bắt đầu áp dụng từ 00:00 ngày 14/09/2026:\n\n• Ca sáng: 08:00\n• Ca chiều: 13:00\n• Thời gian linh động: 5 phút đầu mỗi ca vẫn được tính đúng giờ.\n\nTất cả nhân viên phải thực hiện đúng khung giờ mới kể từ thời điểm có hiệu lực. Dữ liệu chấm công trước ngày 14/09/2026 vẫn giữ nguyên theo lịch cũ; lịch mới chỉ áp dụng cho các lượt chấm công phát sinh từ 00:00 ngày 14/09/2026.",
+    category: "attendance",
+    severity: "info",
+    status: "published",
+    audienceRoles: '["manager","staff","viewer"]',
+    effectiveAt: "2026-09-13T17:00:00.000Z",
+    publishedAt: "2026-09-13T17:00:00.000Z",
+    requireAcknowledgement: true,
+    version: 1,
+    policyCode: "ATT-SCHEDULE-2026.09",
+    issuer: "Phòng vận hành",
+    createdByName: "Thúy Lê (Admin)",
+  },
 ];
 
 const FALLBACK_PACKING_LEVELS = [
@@ -31306,6 +31613,10 @@ async function getGeneratedFallbackAnnouncements() {
 }
 
 function formatPackingCommissionChange(change) {
+  if (change.key === "saleSchedule") {
+    const multiplier = Math.max(1, Number(change.next?.saleMultiplier || 1));
+    return multiplier > 1 ? "• Ngày sale tăng 50%" : "• Ngừng tăng hoa hồng ngày sale";
+  }
   if (!change.previous && change.next) {
     return `• Bổ sung ${change.next.label}: ${formatFallbackVnd(change.next.rate)}/${change.next.unit}`;
   }
@@ -31315,13 +31626,29 @@ function formatPackingCommissionChange(change) {
   return `• ${change.next.label}: ${formatFallbackVnd(change.previous.rate)}/${change.previous.unit} → ${formatFallbackVnd(change.next.rate)}/${change.next.unit}`;
 }
 
+// Shared notification contract for future policy rules. Each change carries a
+// stable key/label/value instead of relying on renderer-side text guessing.
+function buildStandardPolicyChange(change) {
+  return {
+    key: String(change?.key || "policyChange"),
+    label: String(change?.label || "Thay đổi chính sách"),
+    previous: change?.previousValue == null ? "Không áp dụng" : String(change.previousValue),
+    current: change?.currentValue == null ? "Đã cập nhật" : String(change.currentValue),
+    effectiveAt: change?.effectiveAt || null,
+  };
+}
+
 function buildPackingCommissionChangeAnnouncement({ changes, effectiveAt, publishedBy, version, id }) {
   const changeLines = changes.map(formatPackingCommissionChange);
+  const structuredChanges = changes.map((change) => change.key === "saleSchedule"
+    ? buildStandardPolicyChange({ key: change.key, label: "Ngày sale", previousValue: "Đơn giá thường", currentValue: "+ 50% hoa hồng", effectiveAt })
+    : buildStandardPolicyChange({ key: change.key, label: change.next?.label, previousValue: change.previous?.rate, currentValue: change.next?.rate, effectiveAt }));
+  const saleOnly = changes.length === 1 && changes[0]?.key === "saleSchedule";
   return {
     id,
-    title: "Điều chỉnh hoa hồng đóng gói",
+    title: saleOnly ? "Ngày sale tăng 50%" : "Điều chỉnh hoa hồng đóng gói",
     summary: changeLines.map((line) => line.replace(/^•\s*/, "")).join(" · "),
-    content: [
+    content: saleOnly ? changeLines[0].replace(/^•\s*/, "") : [
       "Công ty cập nhật mức hoa hồng đóng gói. Các mức dưới đây được áp dụng theo cấu hình mới trên phần mềm.",
       "",
       "Mức thay đổi",
@@ -31343,6 +31670,7 @@ function buildPackingCommissionChangeAnnouncement({ changes, effectiveAt, publis
     policyCode: `PKG-REWARD-WEEKLY-v${version}`,
     issuer: "Phòng vận hành",
     createdByName: publishedBy,
+    metadata: JSON.stringify({ template: "policy-change-table-v1", changes: structuredChanges }),
   };
 }
 
@@ -31439,14 +31767,13 @@ async function publishPackingCommissionChangeAnnouncement({ changes, effectiveAt
 async function getFallbackAnnouncements() {
   const fallback = FALLBACK_ANNOUNCEMENTS[0];
   const attendancePolicy = FALLBACK_ANNOUNCEMENTS.find((item) => item.policyCode === "ATT-REWARD-2026.09");
+  const attendanceSchedule = FALLBACK_ANNOUNCEMENTS.find((item) => item.policyCode === "ATT-SCHEDULE-2026.09");
   let attendanceData = {};
-  let record;
+  let updatedAt;
   try {
-    record = await prisma.appConfig.findUnique({
-      where: { key: "attendanceData" },
-      select: { value: true, updatedAt: true },
-    });
-    attendanceData = record?.value ? JSON.parse(record.value) : {};
+    const snapshot = await getAttendanceDataSnapshot();
+    attendanceData = snapshot.data || {};
+    updatedAt = snapshot.updatedAt;
   } catch (error) {
     console.warn("[Notifications] Không đọc được cấu hình thưởng đóng gói:", error.message);
   }
@@ -31476,8 +31803,7 @@ async function getFallbackAnnouncements() {
     }));
   const rateLines = [...standardRates, ...customRates]
     .map((level) => `${level.label}: ${formatFallbackVnd(level.rate)}/${level.unit}`);
-  const updatedAt = packingCommission?.updatedAt || record?.updatedAt?.toISOString();
-  const effectiveAt = updatedAt || fallback.effectiveAt;
+  const effectiveAt = packingCommission?.updatedAt || updatedAt || fallback.effectiveAt;
   const publication = await getFallbackAudienceConfig(fallback.id);
 
   const packingAnnouncement = {
@@ -31499,7 +31825,7 @@ async function getFallbackAnnouncements() {
     createdByName: publication?.publishedBy || packingCommission?.updatedBy || fallback.createdByName,
   };
   const generatedAnnouncements = await getGeneratedFallbackAnnouncements();
-  const baseAnnouncements = attendancePolicy ? [packingAnnouncement, attendancePolicy] : [packingAnnouncement];
+  const baseAnnouncements = [packingAnnouncement, attendancePolicy, attendanceSchedule].filter(Boolean);
   return [...generatedAnnouncements, ...baseAnnouncements];
 }
 
@@ -31563,8 +31889,14 @@ async function mutateFallbackRecipientState(userId, announcementId, updater) {
 
 async function listFallbackAnnouncements(actor) {
   const announcements = await getFallbackAnnouncements();
+  // Reuse the employee/user lookup for every announcement in this response.
+  // The fallback path is used on older databases and otherwise becomes N+1.
+  const fallbackContext = {};
+  if (actor?.role !== "admin" && announcements.length > 0) {
+    await getFallbackRequiredRecipients(announcements[0].id, fallbackContext);
+  }
   const visibleAnnouncements = await Promise.all(announcements.map(async (item) => (
-    (await canReceiveFallbackAnnouncement(item, actor)) ? item : null
+    (await canReceiveFallbackAnnouncement(item, actor, fallbackContext)) ? item : null
   )));
   const recipientState = await getFallbackRecipientState(actor.id);
   return visibleAnnouncements
@@ -31595,11 +31927,8 @@ function isTargetedPackingAnnouncement(announcement) {
 
 async function getAttendanceEmployeeUsernames() {
   try {
-    const record = await prisma.appConfig.findUnique({
-      where: { key: "attendanceData" },
-      select: { value: true },
-    });
-    const attendanceData = record?.value ? JSON.parse(record.value) : {};
+    const snapshot = await getAttendanceDataSnapshot();
+    const attendanceData = snapshot.data || {};
     return new Set(
       (Array.isArray(attendanceData?.employees) ? attendanceData.employees : [])
         .map((employee) => normalizeActorName(employee?.username))
@@ -31628,10 +31957,23 @@ async function getFallbackAudienceConfig(announcementId) {
   return parseFallbackAudienceConfig(record?.value);
 }
 
-async function getFallbackRequiredRecipients(announcementId) {
-  const employeeUsernames = await getAttendanceEmployeeUsernames();
+async function getFallbackRequiredRecipients(announcementId, context = null) {
+  const employeeUsernames = context?.employeeUsernames || await getAttendanceEmployeeUsernames();
   if (employeeUsernames.size === 0) return [];
-  const users = await prisma.user.findMany({
+  if (!context?.users) {
+    context && (context.employeeUsernames = employeeUsernames);
+    const users = await prisma.user.findMany({
+      where: {
+        status: "active",
+        role: { not: "admin" },
+        username: { in: [...employeeUsernames] },
+      },
+      select: { id: true, username: true, fullName: true, role: true },
+      orderBy: [{ role: "asc" }, { fullName: "asc" }],
+    });
+    if (context) context.users = users;
+  }
+  const users = context?.users || await prisma.user.findMany({
     where: {
       status: "active",
       role: { not: "admin" },
@@ -31640,7 +31982,13 @@ async function getFallbackRequiredRecipients(announcementId) {
     select: { id: true, username: true, fullName: true, role: true },
     orderBy: [{ role: "asc" }, { fullName: "asc" }],
   });
-  const audienceConfig = await getFallbackAudienceConfig(announcementId);
+  const audienceConfig = context?.audienceConfigs?.has(announcementId)
+    ? context.audienceConfigs.get(announcementId)
+    : await getFallbackAudienceConfig(announcementId);
+  if (context) {
+    context.audienceConfigs ||= new Map();
+    context.audienceConfigs.set(announcementId, audienceConfig);
+  }
   const selectedIds = Array.isArray(audienceConfig?.userIds)
     ? new Set(audienceConfig.userIds.map(Number).filter(Number.isSafeInteger))
     : null;
@@ -31648,11 +31996,11 @@ async function getFallbackRequiredRecipients(announcementId) {
   return users.map((user) => ({ ...user, required: !selectedIds || selectedIds.has(user.id) }));
 }
 
-async function canReceiveFallbackAnnouncement(announcement, actor) {
+async function canReceiveFallbackAnnouncement(announcement, actor, context = null) {
   // Admin access is intentionally broader than the acknowledgement audience.
   if (actor?.role === "admin") return true;
   if (!announcementIsVisibleToRole(announcement, actor?.role)) return false;
-  const recipients = await getFallbackRequiredRecipients(announcement.id);
+  const recipients = await getFallbackRequiredRecipients(announcement.id, context);
   return recipients.some((recipient) => recipient.required && recipient.id === actor?.id);
 }
 
