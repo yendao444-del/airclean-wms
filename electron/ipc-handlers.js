@@ -22160,7 +22160,9 @@ ipcMain.handle(
       // one retry rather than returning a mixed payroll snapshot.
       const request = (async () => {
         for (let attempt = 0; attempt < 2; attempt += 1) {
+        const attemptStartedAt = Date.now();
         const before = await getPackingSourceRevision(dateFilter);
+        const revisionReadyAt = Date.now();
         const cacheKey = `${rangeKey}|${before.revision}`;
         const cached = packingReadModelCache.get(cacheKey);
         if (cached) {
@@ -22189,10 +22191,8 @@ ipcMain.handle(
               orderNumber: true,
               ecommerceExportDate: true,
               items: true,
-              status: true,
               createdBy: true,
               pickedBy: true,
-              updatedAt: true,
             },
             orderBy: [{ ecommerceExportDate: "desc" }, { id: "desc" }],
             take: PACKING_READ_MODEL_MAX_ROWS + 1,
@@ -22202,6 +22202,7 @@ ipcMain.handle(
             orderBy: { createdAt: "desc" },
           }),
         ]);
+        const sourceRowsReadyAt = Date.now();
         if (exports.length > PACKING_READ_MODEL_MAX_ROWS) {
           throw new Error(
             `Dữ liệu đóng gói của kỳ vượt ${PACKING_READ_MODEL_MAX_ROWS.toLocaleString("vi-VN")} đơn. Chưa chốt để tránh tính thiếu thưởng.`,
@@ -22214,12 +22215,16 @@ ipcMain.handle(
         const normalizedExports = exports.map((row) => ({
           ...row,
           ecommerceExportDate: row.ecommerceExportDate.toISOString(),
-          updatedAt: row.updatedAt.toISOString(),
+          status: "completed",
         }));
         const data = buildPackingReadModel(normalizedExports, combos);
+        const modelReadyAt = Date.now();
         rememberPackingReadModel(cacheKey, data);
         console.log(
-          `[Perf] ecommerceExports:getPackingReadModel rows=${data.length} cached=false ms=${Date.now() - startedAt}`,
+          `[Perf] ecommerceExports:getPackingReadModel rows=${data.length} cached=false ms=${Date.now() - startedAt}` +
+          ` revision=${revisionReadyAt - attemptStartedAt}ms` +
+          ` source=${sourceRowsReadyAt - revisionReadyAt}ms` +
+          ` model=${modelReadyAt - sourceRowsReadyAt}ms`,
         );
         return {
           success: true,
@@ -23728,12 +23733,15 @@ const ORDER_MARKETPLACE_SOURCES = ["shopee", "tiktok", "lazada", "tmdt"];
 
 function getUnifiedMarketplaceOrderTimeSql(alias = "o") {
   const tableRef = alias === "o" ? "o" : '"Order"';
-  const noteColumn = Prisma.raw(`${tableRef}."note"`);
   const sourceColumn = Prisma.raw(`${tableRef}."source"`);
+  const orderNumberColumn = Prisma.raw(`${tableRef}."orderNumber"`);
   const createdAtColumn = Prisma.raw(`${tableRef}."createdAt"`);
   return Prisma.sql`CASE
     WHEN ${sourceColumn} IN (${Prisma.join(ORDER_MARKETPLACE_SOURCES)}) THEN COALESCE(
-      NULLIF(BTRIM(substring(${noteColumn} from 'OrderPlacedAt: ([^|]+)')), '')::timestamptz AT TIME ZONE 'UTC',
+      (SELECT MAX(e."ecommerceExportDate")
+       FROM "EcommerceExport" e
+       WHERE e."orderNumber" = ${orderNumberColumn}
+         AND e."status" = 'completed'),
       ${createdAtColumn}
     )
     ELSE ${createdAtColumn}

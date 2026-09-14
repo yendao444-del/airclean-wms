@@ -75,8 +75,11 @@ mkdir "!PATCH_TEMP!\resources\app\dist"
 mkdir "!PATCH_TEMP!\resources\app\electron"
 mkdir "!PATCH_TEMP!\resources\app\python"
 mkdir "!PATCH_TEMP!\resources\app\node_modules\@supabase"
+mkdir "!PATCH_TEMP!\resources\app\node_modules\@zxing"
+mkdir "!PATCH_TEMP!\resources\app\node_modules\cloudflared"
 mkdir "!PATCH_TEMP!\resources\app\node_modules\iceberg-js"
 mkdir "!PATCH_TEMP!\resources\app\node_modules\tslib"
+mkdir "!PATCH_TEMP!\resources\app\node_modules\ws"
 
 call node scripts\prepare-google-oauth-config.js
 if errorlevel 1 (
@@ -117,8 +120,33 @@ del /Q "!PATCH_TEMP!\resources\app\electron\config.js" 2>nul
 del /Q "!PATCH_TEMP!\resources\app\electron\supabase-storage.json" 2>nul
 del /Q "!PATCH_TEMP!\resources\app\electron\gdrive-credentials.json" 2>nul
 xcopy "node_modules\@supabase\*" "!PATCH_TEMP!\resources\app\node_modules\@supabase\" /E /I /Y /Q >nul 2>&1
+xcopy "node_modules\@zxing\*" "!PATCH_TEMP!\resources\app\node_modules\@zxing\" /E /I /Y /Q >nul 2>&1
+xcopy "node_modules\cloudflared\*" "!PATCH_TEMP!\resources\app\node_modules\cloudflared\" /E /I /Y /Q >nul 2>&1
 xcopy "node_modules\iceberg-js\*" "!PATCH_TEMP!\resources\app\node_modules\iceberg-js\" /E /I /Y /Q >nul 2>&1
 xcopy "node_modules\tslib\*" "!PATCH_TEMP!\resources\app\node_modules\tslib\" /E /I /Y /Q >nul 2>&1
+xcopy "node_modules\ws\*" "!PATCH_TEMP!\resources\app\node_modules\ws\" /E /I /Y /Q >nul 2>&1
+
+if not exist "!PATCH_TEMP!\resources\app\node_modules\ws\index.js" (
+    echo    [ERROR] Thieu node_modules\ws trong patch. Khong tao goi update khong day du.
+    rmdir /S /Q "!PATCH_TEMP!" 2>nul
+    rmdir /S /Q "!BUILD_DIST!" 2>nul
+    pause
+    exit /b 1
+)
+if not exist "!PATCH_TEMP!\resources\app\node_modules\@zxing\browser\umd\zxing-browser.min.js" (
+    echo    [ERROR] Thieu node_modules\@zxing trong patch. Khong tao goi update khong day du.
+    rmdir /S /Q "!PATCH_TEMP!" 2>nul
+    rmdir /S /Q "!BUILD_DIST!" 2>nul
+    pause
+    exit /b 1
+)
+if not exist "!PATCH_TEMP!\resources\app\node_modules\cloudflared\bin\cloudflared.exe" (
+    echo    [ERROR] Thieu node_modules\cloudflared trong patch. Khong tao goi update khong day du.
+    rmdir /S /Q "!PATCH_TEMP!" 2>nul
+    rmdir /S /Q "!BUILD_DIST!" 2>nul
+    pause
+    exit /b 1
+)
 copy /Y "python\attendance_service.py" "!PATCH_TEMP!\resources\app\python\" >nul 2>&1
 copy /Y "python\requirements.txt" "!PATCH_TEMP!\resources\app\python\" >nul 2>&1
 copy /Y "package.json" "!PATCH_TEMP!\resources\app\package.json" >nul 2>&1

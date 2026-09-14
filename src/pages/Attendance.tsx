@@ -1,5 +1,5 @@
 import { useState, useMemo, useCallback, useRef, useEffect, useTransition, forwardRef, useImperativeHandle, cloneElement, isValidElement } from 'react';
-import { PieChart, Pie, Cell, Tooltip as ReTooltip, ResponsiveContainer, Legend } from 'recharts';
+import AttendancePackingChart from '../components/AttendancePackingChart';
 import { Medal } from '@phosphor-icons/react';
 import { useCurrentUser } from '../lib/hooks/useCurrentUser';
 import { useAuth } from '../contexts/AuthContext';
@@ -60,6 +60,7 @@ import {
     LockOutlined,
     DollarOutlined,
     DownOutlined,
+    UpOutlined,
     GiftOutlined,
     StopOutlined,
     TeamOutlined,
@@ -4094,7 +4095,6 @@ export default function Attendance() {
     const [salesBonusReadyKey, setSalesBonusReadyKey] = useState('');
     const [salesBonusLoading, setSalesBonusLoading] = useState(false);
     const [salesBonusError, setSalesBonusError] = useState('');
-    const [salesBonusDetailsOpen, setSalesBonusDetailsOpen] = useState(false);
     const salesBonusRequestRef = useRef('');
 
     // === State cho quỹ + audit ===
@@ -7902,47 +7902,12 @@ const openConfigModal = () => {
                                 {/* Right: Donut Chart */}
                                 <div style={{ padding: '16px 16px 12px', display: 'flex', flexDirection: 'column', gap: 8 }}>
                                     <div style={{ fontSize: 11, fontWeight: 700, color: '#8c8c8c', textTransform: 'uppercase', letterSpacing: 0.5 }}>Phân bổ đóng gói</div>
-                                    {chartData.length > 0 ? (<>
-                                        <ResponsiveContainer width="100%" height={200}>
-                                            <PieChart>
-                                                <Pie
-                                                    data={chartData}
-                                                    cx="50%"
-                                                    cy="50%"
-                                                    innerRadius={58}
-                                                    outerRadius={90}
-                                                    paddingAngle={3}
-                                                    dataKey="value"
-                                                >
-                                                    {chartData.map((_: any, i: number) => (
-                                                        <Cell key={i} fill={CHART_COLORS[i % CHART_COLORS.length]} />
-                                                    ))}
-                                                </Pie>
-                                                <ReTooltip
-                                                    formatter={(value: any, name: any, props: any) => [
-                                                        <span><b>{value} đơn</b> · {props.payload.units} SP — {fmt(props.payload.income)}</span>, name
-                                                    ]}
-                                                    contentStyle={{ fontSize: 12, borderRadius: 8 }}
-                                                />
-                                            </PieChart>
-                                        </ResponsiveContainer>
-                                        {/* Custom legend bên dưới */}
-                                        <div style={{ display: 'flex', flexDirection: 'column', gap: 5, paddingLeft: 4 }}>
-                                            {chartData.map((entry: any, i: number) => {
-                                                const pct = chartTotalOrders > 0 ? Math.round(entry.value / chartTotalOrders * 100) : 0;
-                                                return (
-                                                    <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                                                        <div style={{ width: 10, height: 10, borderRadius: '50%', background: CHART_COLORS[i % CHART_COLORS.length], flexShrink: 0 }} />
-                                                        <span style={{ fontSize: 12, color: '#595959', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{entry.name}</span>
-                                                        <span style={{ fontSize: 12, fontWeight: 700, color: CHART_COLORS[i % CHART_COLORS.length] }}>{entry.value} đơn</span>
-                                                        <span style={{ fontSize: 11, color: '#aaa', minWidth: 36, textAlign: 'right' }}>{pct}%</span>
-                                                    </div>
-                                                );
-                                            })}
-                                        </div>
-                                    </>) : (
-                                        <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#d9d9d9', fontSize: 13 }}>Chưa có dữ liệu</div>
-                                    )}
+                                    <AttendancePackingChart
+                                        chartData={chartData}
+                                        chartTotalOrders={chartTotalOrders}
+                                        formatCurrency={fmt}
+                                        colors={CHART_COLORS}
+                                    />
                                 </div>
                             </div>
                         </div>
@@ -8209,9 +8174,6 @@ const openConfigModal = () => {
             ? Number(isCurrentPeriodLocked ? (employee?.salesBonus || 0) : activeSalesBonusSummary.bonusAmount)
             : 0;
         const rateLabel = `${new Intl.NumberFormat('vi-VN', { maximumFractionDigits: 3 }).format(activeSalesBonusSummary.rate * 100)}%`;
-        const calculationStart = activeSalesBonusSummary.calculationFrom
-            ? dayjs(activeSalesBonusSummary.calculationFrom)
-            : null;
         const mascot = employee && normalizeAttendanceText(employee.username).includes('toan')
             ? packingRaceRunnerPanda
             : packingRaceLeaderFox;
@@ -8235,6 +8197,15 @@ const openConfigModal = () => {
                             title={`${employee?.name || 'Chưa xác định nhân viên'} · ${isEligible ? 'Nhân viên chính thức' : 'Nhân viên thời vụ'}`}
                         >
                             <div className="att-sales-bonus__avatar"><img src={mascot} alt={`Ảnh đại diện ${employee?.name || 'nhân viên'}`} /></div>
+                            <div className="att-sales-bonus__employee-copy">
+                                <h3>{employee?.name || 'Chưa xác định nhân viên'}</h3>
+                                <p>@{employee?.username || '—'}</p>
+                                <span className={isEligible ? 'is-official' : 'is-seasonal'}><CrownOutlined /> {isEligible ? 'Nhân viên chính thức' : 'Nhân viên thời vụ'}</span>
+                                <div className={`att-sales-bonus__eligibility ${isEligible ? '' : 'is-ineligible'}`}>
+                                    <InfoCircleOutlined />
+                                    <span><strong>{isEligible ? 'Đủ điều kiện nhận thưởng' : 'Không thuộc đối tượng áp dụng'}</strong></span>
+                                </div>
+                            </div>
                         </div>
 
                         <div className="att-sales-bonus__equation">
@@ -8258,11 +8229,11 @@ const openConfigModal = () => {
 
                     <div className="att-sales-bonus__reconcile">
                         <div className="att-sales-bonus__reconcile-head">
-                            <button type="button" onClick={() => setSalesBonusDetailsOpen(value => !value)} aria-expanded={salesBonusDetailsOpen}>
+                            <div className="att-sales-bonus__reconcile-title">
                                 <UnorderedListOutlined />
                                 <span>Chi tiết doanh thu đủ điều kiện</span>
-                                <DownOutlined className={salesBonusDetailsOpen ? 'is-open' : ''} />
-                            </button>
+                                <UpOutlined className="att-sales-bonus__details-caret" />
+                            </div>
                             <Button
                                 type="primary"
                                 icon={<AuditOutlined />}
@@ -8276,40 +8247,23 @@ const openConfigModal = () => {
                             </Button>
                         </div>
 
-                        {salesBonusDetailsOpen && (
-                            <div className="att-sales-bonus__details">
-                                <div className="att-sales-bonus__detail-row">
-                                    <i className="is-up"><ArrowUpOutlined /></i>
-                                    <span><strong>Doanh thu đơn hàng hoàn tất</strong><small>{activeSalesBonusSummary.completedOrderCount} đơn hoàn tất trong kỳ áp dụng</small></span>
-                                    <b>{fmt(activeSalesBonusSummary.grossRevenue)}</b>
-                                </div>
-                                <div className="att-sales-bonus__detail-row">
-                                    <i className="is-down"><MinusCircleOutlined /></i>
-                                    <span><strong>Hàng hoàn</strong><small>{activeSalesBonusSummary.refundCount} đơn từ mục Hàng hoàn</small></span>
-                                    <b className="is-negative">- {fmt(activeSalesBonusSummary.refundRevenue)}</b>
-                                </div>
-                                <div className="att-sales-bonus__detail-row">
-                                    <i className="is-down"><MinusCircleOutlined /></i>
-                                    <span><strong>Trả hàng</strong><small>{activeSalesBonusSummary.returnCount} đơn từ mục Trả hàng</small></span>
-                                    <b className="is-negative">- {fmt(activeSalesBonusSummary.returnRevenue)}</b>
-                                </div>
-                                <div className="att-sales-bonus__detail-row is-total">
-                                    <i className="is-equal">=</i>
-                                    <span><strong>Doanh thu đủ điều kiện</strong><small>Doanh thu dùng để tính thưởng sau khi loại trừ</small></span>
-                                    <b>{fmt(activeSalesBonusSummary.eligibleRevenue)}</b>
-                                </div>
-                                <div className="att-sales-bonus__note">
-                                    <InfoCircleOutlined />
-                                    <div>
-                                        <strong>Lưu ý</strong>
-                                        <p>Thưởng được cộng tự động vào mục Thưởng và tổng thu nhập khi chốt lương.</p>
-                                        <p>Chỉ nhân viên chính thức được áp dụng; mỗi nhân viên đủ điều kiện nhận {rateLabel} doanh thu.</p>
-                                        <p>Doanh thu lấy từ Đơn hàng hoàn tất, sau đó trừ số tiền trong Hàng hoàn và Trả hàng.</p>
-                                        <p>Chính sách áp dụng từ 00:00 ngày {dayjs(activeSalesBonusSummary.effectiveAt || SALES_BONUS_EFFECTIVE_AT).format('DD/MM/YYYY')}{calculationStart ? `; kỳ này bắt đầu tính từ ${calculationStart.format('DD/MM/YYYY')}` : '; kỳ đang xem chưa tới thời điểm áp dụng'}.</p>
-                                    </div>
-                                </div>
+                        <div className="att-sales-bonus__details">
+                            <div className="att-sales-bonus__detail-row">
+                                <i className="is-up"><ArrowUpOutlined /></i>
+                                <span><strong>Doanh thu đơn hàng hợp lệ</strong><small>Tổng doanh thu từ các đơn hàng hoàn thành (không bao gồm đơn hủy)</small></span>
+                                <b>{fmt(activeSalesBonusSummary.grossRevenue)}</b>
                             </div>
-                        )}
+                            <div className="att-sales-bonus__detail-row">
+                                <i className="is-down"><MinusCircleOutlined /></i>
+                                <span><strong>Hoàn / hủy / điều chỉnh</strong><small>{activeSalesBonusSummary.refundCount + activeSalesBonusSummary.returnCount} đơn hoàn, hủy hoặc điều chỉnh giảm doanh thu</small></span>
+                                <b className="is-negative">- {fmt(activeSalesBonusSummary.refundRevenue + activeSalesBonusSummary.returnRevenue)}</b>
+                            </div>
+                            <div className="att-sales-bonus__detail-row is-total">
+                                <i className="is-equal">=</i>
+                                <span><strong>Doanh thu đủ điều kiện</strong><small>Doanh thu dùng để tính thưởng</small></span>
+                                <b>{fmt(activeSalesBonusSummary.eligibleRevenue)}</b>
+                            </div>
+                        </div>
                     </div>
                 </Spin>
             </section>
