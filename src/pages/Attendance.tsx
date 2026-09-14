@@ -91,6 +91,10 @@ import {
     ThunderboltOutlined,
     FlagOutlined,
     InboxOutlined,
+    PercentageOutlined,
+    UnorderedListOutlined,
+    AuditOutlined,
+    InfoCircleOutlined,
 } from '@ant-design/icons';
 import packingFoxMascot from '../assets/packing/fox-mascot.jpg';
 import packingPandaMascot from '../assets/packing/panda-mascot.jpg';
@@ -356,6 +360,44 @@ interface ReturnOverdueTracking {
     packer?: string;
 }
 
+interface SalesBonusSummary {
+    rate: number;
+    effectiveAt: string;
+    requestedFrom: string;
+    requestedTo: string;
+    calculationFrom: string | null;
+    grossRevenue: number;
+    excludedRevenue: number;
+    returnRevenue: number;
+    returnCount: number;
+    refundRevenue: number;
+    refundCount: number;
+    eligibleRevenue: number;
+    completedOrderCount: number;
+    excludedOrderCount: number;
+    bonusAmount: number;
+}
+
+const SALES_BONUS_RATE = 0.001;
+const SALES_BONUS_EFFECTIVE_AT = '2026-09-01T00:00:00+07:00';
+const EMPTY_SALES_BONUS_SUMMARY: SalesBonusSummary = {
+    rate: SALES_BONUS_RATE,
+    effectiveAt: SALES_BONUS_EFFECTIVE_AT,
+    requestedFrom: '',
+    requestedTo: '',
+    calculationFrom: null,
+    grossRevenue: 0,
+    excludedRevenue: 0,
+    returnRevenue: 0,
+    returnCount: 0,
+    refundRevenue: 0,
+    refundCount: 0,
+    eligibleRevenue: 0,
+    completedOrderCount: 0,
+    excludedOrderCount: 0,
+    bonusAmount: 0,
+};
+
 interface RefundOverdueTracking {
     id: number;
     refundCode?: string;
@@ -397,6 +439,7 @@ interface LockedPayrollSnapshot {
     sourceSummary: {
         packingOrderCount: number;
         packingTotalUnits: number;
+        salesBonusSummary?: SalesBonusSummary;
     };
 }
 
@@ -527,6 +570,7 @@ interface AttendanceScheduleVersion {
     morningStart: string;
     afternoonStart: string;
     graceMinutes: number;
+    employeeTypes?: Array<'Official' | 'Seasonal'>;
     updatedBy?: string;
 }
 
@@ -535,7 +579,11 @@ const getBangkokMidnightIso = (date: dayjs.Dayjs) => {
     return new Date(`${dateKey}T00:00:00+07:00`).toISOString();
 };
 
-const getAttendanceScheduleAt = (config: PenaltyConfig, timestamp?: string) => {
+const getAttendanceScheduleAt = (
+    config: PenaltyConfig,
+    timestamp?: string,
+    employeeType?: 'Official' | 'Seasonal',
+) => {
     const fallback = {
         morningStart: config.morningStart,
         afternoonStart: config.afternoonStart,
@@ -548,7 +596,10 @@ const getAttendanceScheduleAt = (config: PenaltyConfig, timestamp?: string) => {
         .sort((left, right) => Date.parse(left.effectiveAt) - Date.parse(right.effectiveAt));
     let selected = fallback;
     versions.forEach(version => {
-        if (Date.parse(version.effectiveAt) <= at) {
+        const appliesToEmployee = !version.employeeTypes?.length
+            || !employeeType
+            || version.employeeTypes.includes(employeeType);
+        if (Date.parse(version.effectiveAt) <= at && appliesToEmployee) {
             selected = {
                 morningStart: version.morningStart,
                 afternoonStart: version.afternoonStart,
@@ -1439,7 +1490,8 @@ function calculatePayroll(
     packingCommission: PackingCommissionConfig = DEFAULT_PACKING_COMMISSION,
     employmentEndDates: Record<string, string> = {},
     overrides?: Record<string, PayrollOverride>,
-    attendanceDeductionsReady = true
+    attendanceDeductionsReady = true,
+    salesBonusAmount = 0
 ) {
     const STANDARD_WORK_DAYS = 26;
     const HOURS_PER_SHIFT = 4;
@@ -1677,11 +1729,12 @@ function calculatePayroll(
         const fineShare = 0;
 
         const mBonus = bonusesData.filter(b => b.empId === emp.id && isAccruedDuringEmployment(b)).reduce((sum, b) => sum + b.amount, 0);
-        const totalBonus = mBonus;
+        const salesBonus = emp.type === 'Official' ? Math.max(0, Math.round(salesBonusAmount)) : 0;
+        const totalBonus = mBonus + salesBonus;
         const finalSalary = salaryBase + packIncome + totalBonus - myFines - leaveDeduction + extraAdjust;
         return {
             ...emp, shifts, absentDays, salaryBase, packIncome, totalPackValue_100,
-            fineShare, mBonus, myFines, totalBonus, finalSalary, leaveDeduction,
+            fineShare, mBonus, salesBonus, myFines, totalBonus, finalSalary, leaveDeduction,
             packOrderCount, packTotalUnits, packBreakdown,
             // Giá trị gốc (auto) để so sánh trên UI
             autoShifts, autoSalaryBase, autoPackIncome,
@@ -3996,6 +4049,7 @@ export default function Attendance() {
         // Điểm danh còn phải khởi động dịch vụ nhận diện khuôn mặt.
         return 'overview';
     });
+    const [bonusCategory, setBonusCategory] = useState<'sales' | 'additional'>('sales');
     const [bonusView, setBonusView] = useState<'personal' | 'manage'>(() => isAdmin ? 'manage' : 'personal');
     const [bonusSearch, setBonusSearch] = useState('');
     const [config, setConfig] = useState<PenaltyConfig>({
@@ -4036,6 +4090,12 @@ export default function Attendance() {
     const [packingSaleDatesInput, setPackingSaleDatesInput] = useState('');
 
     const [employees, setEmployees] = useState<Employee[]>([]);
+    const [salesBonusSummary, setSalesBonusSummary] = useState<SalesBonusSummary>(EMPTY_SALES_BONUS_SUMMARY);
+    const [salesBonusReadyKey, setSalesBonusReadyKey] = useState('');
+    const [salesBonusLoading, setSalesBonusLoading] = useState(false);
+    const [salesBonusError, setSalesBonusError] = useState('');
+    const [salesBonusDetailsOpen, setSalesBonusDetailsOpen] = useState(false);
+    const salesBonusRequestRef = useRef('');
 
     // === State cho quỹ + audit ===
     const [bonusModalOpen, setBonusModalOpen] = useState(false);
@@ -4695,6 +4755,80 @@ export default function Attendance() {
         setHeaderExtra(attendancePeriodSelector);
         return clearHeaderExtra;
     }, [attendancePeriodSelector, clearHeaderExtra, setHeaderExtra]);
+
+    const loadSalesBonusSummary = useCallback(async (
+        range: AttendancePeriod = overviewDateRange,
+        options?: { force?: boolean }
+    ): Promise<SalesBonusSummary> => {
+        const from = range[0].startOf('day').toISOString();
+        const to = range[1].endOf('day').toISOString();
+        const requestKey = `${range[0].startOf('day').valueOf()}-${range[1].endOf('day').valueOf()}`;
+        if (!options?.force && salesBonusReadyKey === requestKey) return salesBonusSummary;
+        salesBonusRequestRef.current = requestKey;
+        if (salesBonusReadyKey !== requestKey) {
+            setSalesBonusSummary({ ...EMPTY_SALES_BONUS_SUMMARY, requestedFrom: from, requestedTo: to });
+        }
+        setSalesBonusLoading(true);
+        setSalesBonusError('');
+        try {
+            const api = (window as any).electronAPI;
+            const response = api?.attendance?.getSalesBonusSummary
+                ? await api.attendance.getSalesBonusSummary({ from, to })
+                : isAttendanceUiTest
+                    ? {
+                        success: true,
+                        data: {
+                            ...EMPTY_SALES_BONUS_SUMMARY,
+                            requestedFrom: from,
+                            requestedTo: to,
+                            calculationFrom: dayjs(SALES_BONUS_EFFECTIVE_AT).toISOString(),
+                            grossRevenue: 1320000000,
+                            excludedRevenue: 70000000,
+                            returnRevenue: 25000000,
+                            returnCount: 12,
+                            refundRevenue: 45000000,
+                            refundCount: 25,
+                            eligibleRevenue: 1250000000,
+                            completedOrderCount: 1842,
+                            excludedOrderCount: 37,
+                            bonusAmount: 1250000,
+                        },
+                    }
+                    : { success: false, error: 'Ứng dụng chưa có API thưởng doanh số. Vui lòng khởi động lại app.' };
+            if (!response?.success || !response.data) throw new Error(response?.error || 'Không tải được thưởng doanh số.');
+            const normalized: SalesBonusSummary = {
+                ...EMPTY_SALES_BONUS_SUMMARY,
+                ...response.data,
+                rate: Number(response.data.rate ?? SALES_BONUS_RATE),
+                grossRevenue: Number(response.data.grossRevenue || 0),
+                excludedRevenue: Number(response.data.excludedRevenue || 0),
+                returnRevenue: Number(response.data.returnRevenue || 0),
+                returnCount: Number(response.data.returnCount || 0),
+                refundRevenue: Number(response.data.refundRevenue || 0),
+                refundCount: Number(response.data.refundCount || 0),
+                eligibleRevenue: Number(response.data.eligibleRevenue || 0),
+                completedOrderCount: Number(response.data.completedOrderCount || 0),
+                excludedOrderCount: Number(response.data.excludedOrderCount || 0),
+                bonusAmount: Number(response.data.bonusAmount || 0),
+            };
+            if (salesBonusRequestRef.current === requestKey) {
+                setSalesBonusSummary(normalized);
+                setSalesBonusReadyKey(requestKey);
+            }
+            return normalized;
+        } catch (error: any) {
+            const errorMessage = error?.message || 'Không tải được thưởng doanh số.';
+            if (salesBonusRequestRef.current === requestKey) setSalesBonusError(errorMessage);
+            throw error;
+        } finally {
+            if (salesBonusRequestRef.current === requestKey) setSalesBonusLoading(false);
+        }
+    }, [isAttendanceUiTest, overviewDateRange, salesBonusReadyKey, salesBonusSummary]);
+
+    useEffect(() => {
+        if (!isDbLoaded || (activeTab !== 'overview' && activeTab !== 'bonuses')) return;
+        void loadSalesBonusSummary(overviewDateRange).catch(() => undefined);
+    }, [activeTab, isDbLoaded, loadSalesBonusSummary, overviewDateRange]);
 
     const [packingOrderLogsData, setPackingOrderLogsData] = useState<PackingOrderLog[]>([]);
     const [packingRewardNow, setPackingRewardNow] = useState(() => dayjs());
@@ -5880,6 +6014,10 @@ export default function Attendance() {
         dayjs(lp.end).isSame(overviewDateRange[1], 'day')
     ), [lockedPeriods, overviewDateRange]);
     const lockedPayrollSnapshot = currentLockedPeriod?.payrollSnapshot;
+    const lockedSalesBonusSummary = lockedPayrollSnapshot?.sourceSummary?.salesBonusSummary as SalesBonusSummary | undefined;
+    const activeSalesBonusSummary = currentLockedPeriod
+        ? (lockedSalesBonusSummary || EMPTY_SALES_BONUS_SUMMARY)
+        : salesBonusSummary;
     const overviewFines = lockedPayrollSnapshot?.fines || liveOverviewFines;
     const overviewBonuses = lockedPayrollSnapshot?.bonuses || liveOverviewBonusesWithWeekly;
     const overviewPackingLogs = lockedPayrollSnapshot?.packingLogs || liveOverviewPackingLogs;
@@ -5954,12 +6092,13 @@ export default function Attendance() {
     // Kỳ hiện tại có bị khóa không?
     const isCurrentPeriodLocked = Boolean(currentLockedPeriod);
     const overviewAttendanceExpectedKey = `${overviewDateRange[0].year()}-${String(overviewDateRange[0].month() + 1).padStart(2, '0')}`;
+    const salesBonusExpectedKey = `${overviewDateRange[0].startOf('day').valueOf()}-${overviewDateRange[1].endOf('day').valueOf()}`;
     const overviewAttendanceReady = isBackgroundSyncComplete && overviewAttendanceLogsKey === overviewAttendanceExpectedKey;
     const packingExpectedKey = `${getPackingLoadStart(overviewDateRange[0]).valueOf()}-${overviewDateRange[1].endOf('day').valueOf()}`;
     const isPackingDataReady = packingCatalogReady && packingReadyKey === packingExpectedKey && !packingLoadError;
     const isPayrollDataReady = isCurrentPeriodLocked
         ? Boolean(lockedPayrollSnapshot)
-        : (overviewAttendanceReady && areFineSourcesReady && isPackingDataReady && attendanceRewardReadyKey === attendanceRewardPeriodKey);
+        : (overviewAttendanceReady && areFineSourcesReady && isPackingDataReady && attendanceRewardReadyKey === attendanceRewardPeriodKey && salesBonusReadyKey === salesBonusExpectedKey);
     const employmentEndDates = useMemo(() => Object.fromEntries(
         systemUsers
             .filter((item: any) => item?.employmentStatus === 'resigned' && item?.resignationDate)
@@ -5981,6 +6120,7 @@ export default function Attendance() {
                 totalPackValue_100: 0,
                 fineShare: 0,
                 mBonus: 0,
+                salesBonus: 0,
                 myFines: 0,
                 totalBonus: 0,
                 finalSalary: 0,
@@ -6002,13 +6142,13 @@ export default function Attendance() {
         const startedAt = performance.now();
         const rows = calculatePayroll(
             overviewFines, leaveRecords, workSchedules, overviewWareHousePacking, employees, overviewBonuses,
-            overviewAttendanceLogs, overviewDateRange[0].month() + 1, overviewDateRange[0].year(), overviewPackingLogs, packingCommission, employmentEndDates, payrollOverrides, overviewAttendanceReady
+            overviewAttendanceLogs, overviewDateRange[0].month() + 1, overviewDateRange[0].year(), overviewPackingLogs, packingCommission, employmentEndDates, payrollOverrides, overviewAttendanceReady, activeSalesBonusSummary.bonusAmount
         );
         console.info('[Attendance:compute] payroll ms:', Math.round(performance.now() - startedAt));
         return rows;
-    }, [lockedPayrollSnapshot, isPayrollDataReady, overviewFines, leaveRecords, workSchedules, overviewWareHousePacking, employees, overviewBonuses, overviewAttendanceLogs, overviewDateRange, overviewPackingLogs, packingCommission, employmentEndDates, payrollOverrides, overviewAttendanceReady]);
+    }, [lockedPayrollSnapshot, isPayrollDataReady, overviewFines, leaveRecords, workSchedules, overviewWareHousePacking, employees, overviewBonuses, overviewAttendanceLogs, overviewDateRange, overviewPackingLogs, packingCommission, employmentEndDates, payrollOverrides, overviewAttendanceReady, activeSalesBonusSummary.bonusAmount]);
 
-    function buildPayrollDataFromPackingLogs(orderLogs: PackingOrderLog[]) {
+    function buildPayrollDataFromPackingLogs(orderLogs: PackingOrderLog[], bonusSummary: SalesBonusSummary = activeSalesBonusSummary) {
         const freshOverviewPackingLogs = orderLogs.filter(o => inOverviewRange(o.timestamp));
         const freshTotalUnits = freshOverviewPackingLogs.reduce((sum, order) => sum + calcPacksFromItems(order.items, order.timestamp), 0);
         const freshWeeklyBonuses = buildPackingWeeklyResults(orderLogs, employees, packingRewardNow)
@@ -6030,7 +6170,8 @@ export default function Attendance() {
             packingCommission,
             employmentEndDates,
             payrollOverrides,
-            overviewAttendanceReady
+            overviewAttendanceReady,
+            bonusSummary.bonusAmount
         );
     }
 
@@ -6111,14 +6252,18 @@ export default function Attendance() {
 
     const daysInMonth = dayjs(`${selectedYear}-${selectedMonth}-01`).daysInMonth();
 
-    const isAttendanceSessionDue = useCallback((date: dayjs.Dayjs, session: LeaveSession) => {
+    const isAttendanceSessionDue = useCallback((
+        date: dayjs.Dayjs,
+        session: LeaveSession,
+        employeeType?: 'Official' | 'Seasonal',
+    ) => {
         const today = dayjs();
         if (date.isBefore(today, 'day')) return true;
         if (date.isAfter(today, 'day')) return false;
 
         // Resolve the schedule using the local Bangkok calendar date, not the
         // machine timezone's UTC conversion.
-        const schedule = getAttendanceScheduleAt(config, getBangkokMidnightIso(date));
+        const schedule = getAttendanceScheduleAt(config, getBangkokMidnightIso(date), employeeType);
         const start = session === 'morning' ? schedule.morningStart : schedule.afternoonStart;
         const [hour, minute] = start.split(':').map(Number);
         const threshold = hour * 60 + minute + schedule.graceMinutes;
@@ -6130,7 +6275,6 @@ export default function Attendance() {
     const liveAttendanceMatrix = useMemo(() => {
         if (activeTab !== 'attendance') return [] as Array<Array<any>>;
         const startedAt = performance.now();
-        const currentSchedule = getAttendanceScheduleAt(config, dayjs().toISOString());
         const scheduleBySlot = new Map(workSchedules.map(schedule => [
             `${schedule.empId}|${schedule.date}|${schedule.session}`,
             schedule,
@@ -6179,7 +6323,7 @@ export default function Attendance() {
 
                 if (log.checkType === 'morning_in') {
                     monthData[dayIdx].amTime = logTime;
-                    const schedule = getAttendanceScheduleAt(config, log.timestamp);
+                    const schedule = getAttendanceScheduleAt(config, log.timestamp, emp.type);
                     const [hour, minute] = schedule.morningStart.split(':').map(Number);
                     monthData[dayIdx].am = logMin > hour * 60 + minute + schedule.graceMinutes ? 2 : 1;
                 } else if (log.checkType === 'morning_out') {
@@ -6189,7 +6333,7 @@ export default function Attendance() {
 
                 if (log.checkType === 'afternoon_in') {
                     monthData[dayIdx].pmTime = logTime;
-                    const schedule = getAttendanceScheduleAt(config, log.timestamp);
+                    const schedule = getAttendanceScheduleAt(config, log.timestamp, emp.type);
                     const [hour, minute] = schedule.afternoonStart.split(':').map(Number);
                     monthData[dayIdx].pm = logMin > hour * 60 + minute + schedule.graceMinutes ? 2 : 1;
                 } else if (log.checkType === 'evening_out') {
@@ -6217,8 +6361,8 @@ export default function Attendance() {
                     if (d.am === 2) lateCount++;
                     if (d.pm === 2) lateCount++;
                     if (!isSunday && !isHoliday) {
-                        if (d.am === 0 && isAttendanceSessionDue(currentDay, 'morning')) absentCount += 0.5;
-                        if (d.pm === 0 && isAttendanceSessionDue(currentDay, 'afternoon')) absentCount += 0.5;
+                        if (d.am === 0 && isAttendanceSessionDue(currentDay, 'morning', emp.type)) absentCount += 0.5;
+                        if (d.pm === 0 && isAttendanceSessionDue(currentDay, 'afternoon', emp.type)) absentCount += 0.5;
                     }
                     if (d.am > 0) shiftCount++;
                     if (d.pm > 0) shiftCount++;
@@ -6957,6 +7101,7 @@ const openConfigModal = () => {
                 morningStart: tempConfig.morningStart,
                 afternoonStart: tempConfig.afternoonStart,
                 graceMinutes: tempConfig.graceMinutes,
+                employeeTypes: ['Official'],
                 updatedBy: fineAuditActor.username,
             });
         }
@@ -7029,10 +7174,13 @@ const openConfigModal = () => {
                 if (!api?.attendance?.updatePayrollLock) {
                     throw new Error('Ứng dụng chưa có API khóa bảng lương an toàn. Vui lòng khởi động lại app.');
                 }
-                const freshPackingLogs = await loadPackingOrders(getPackingLoadStart(overviewDateRange[0]).toISOString(), { strict: true, range: overviewDateRange });
+                const [freshPackingLogs, freshSalesBonusSummary] = await Promise.all([
+                    loadPackingOrders(getPackingLoadStart(overviewDateRange[0]).toISOString(), { strict: true, range: overviewDateRange }),
+                    loadSalesBonusSummary(overviewDateRange, { force: true }),
+                ]);
                 const freshOverviewPackingLogs = freshPackingLogs.filter(o => inOverviewRange(o.timestamp));
                 const snapshottedPackingLogs = freshOverviewPackingLogs.map(order => snapshotPackingOrder(order, packingCommission));
-                const freshPayrollRows = buildPayrollDataFromPackingLogs(freshPackingLogs);
+                const freshPayrollRows = buildPayrollDataFromPackingLogs(freshPackingLogs, freshSalesBonusSummary);
                 const freshWeeklyBonuses = buildPackingWeeklyResults(freshPackingLogs, employees, packingRewardNow)
                     .map(packingWeeklyResultToBonus)
                     .filter((bonus): bonus is BonusRecord => Boolean(bonus) && inOverviewRange(bonus.date));
@@ -7056,6 +7204,7 @@ const openConfigModal = () => {
                         sourceSummary: {
                             packingOrderCount: snapshottedPackingLogs.length,
                             packingTotalUnits: snapshottedPackingLogs.reduce((sum, order) => sum + calcPacksFromItems(order.items, order.timestamp), 0),
+                            salesBonusSummary: freshSalesBonusSummary,
                         },
                     },
                 };
@@ -8050,7 +8199,124 @@ const openConfigModal = () => {
     // ============================================
     // TAB 3: THƯỞNG
     // ============================================
-    const renderBonuses = () => {
+    const renderSalesBonus = () => {
+        const employee = currentEmployeePayroll
+            || (isAdmin ? payrollData.find(item => item.type === 'Official') : undefined)
+            || employees.find(item => matchesCurrentUserPayrollRow(item))
+            || employees[0];
+        const isEligible = employee?.type === 'Official';
+        const employeeBonus = isEligible
+            ? Number(isCurrentPeriodLocked ? (employee?.salesBonus || 0) : activeSalesBonusSummary.bonusAmount)
+            : 0;
+        const rateLabel = `${new Intl.NumberFormat('vi-VN', { maximumFractionDigits: 3 }).format(activeSalesBonusSummary.rate * 100)}%`;
+        const calculationStart = activeSalesBonusSummary.calculationFrom
+            ? dayjs(activeSalesBonusSummary.calculationFrom)
+            : null;
+        const mascot = employee && normalizeAttendanceText(employee.username).includes('toan')
+            ? packingRaceRunnerPanda
+            : packingRaceLeaderFox;
+
+        return (
+            <section className="att-sales-bonus">
+                {salesBonusError && !lockedSalesBonusSummary && (
+                    <Alert
+                        type="error"
+                        showIcon
+                        message="Chưa tải được dữ liệu thưởng doanh số"
+                        description={salesBonusError}
+                        action={<Button size="small" onClick={() => void loadSalesBonusSummary(overviewDateRange, { force: true }).catch(() => undefined)}>Thử lại</Button>}
+                    />
+                )}
+
+                <Spin spinning={salesBonusLoading && !lockedSalesBonusSummary} tip="Đang đối soát doanh thu...">
+                    <div className="att-sales-bonus__formula-card">
+                        <div
+                            className="att-sales-bonus__employee"
+                            title={`${employee?.name || 'Chưa xác định nhân viên'} · ${isEligible ? 'Nhân viên chính thức' : 'Nhân viên thời vụ'}`}
+                        >
+                            <div className="att-sales-bonus__avatar"><img src={mascot} alt={`Ảnh đại diện ${employee?.name || 'nhân viên'}`} /></div>
+                        </div>
+
+                        <div className="att-sales-bonus__equation">
+                            <div className="att-sales-bonus__metric is-revenue">
+                                <span><BarChartOutlined /> Doanh thu đủ điều kiện</span>
+                                <strong>{fmt(activeSalesBonusSummary.eligibleRevenue)}</strong>
+                            </div>
+                            <b className="att-sales-bonus__operator">×</b>
+                            <div className="att-sales-bonus__metric is-rate">
+                                <span><PercentageOutlined /> Tỷ lệ thưởng</span>
+                                <strong>{rateLabel}</strong>
+                            </div>
+                            <b className="att-sales-bonus__operator">=</b>
+                            <div className="att-sales-bonus__metric is-result">
+                                <span><GiftOutlined /> Thưởng phải trả {isCurrentPeriodLocked ? '' : '(tạm tính)'}</span>
+                                <strong>{fmt(employeeBonus)}</strong>
+                                <small><ClockCircleOutlined /> {isCurrentPeriodLocked ? 'Đã chốt cùng bảng lương' : 'Tạm tính đến khi chốt lương'}</small>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div className="att-sales-bonus__reconcile">
+                        <div className="att-sales-bonus__reconcile-head">
+                            <button type="button" onClick={() => setSalesBonusDetailsOpen(value => !value)} aria-expanded={salesBonusDetailsOpen}>
+                                <UnorderedListOutlined />
+                                <span>Chi tiết doanh thu đủ điều kiện</span>
+                                <DownOutlined className={salesBonusDetailsOpen ? 'is-open' : ''} />
+                            </button>
+                            <Button
+                                type="primary"
+                                icon={<AuditOutlined />}
+                                loading={salesBonusLoading}
+                                disabled={isCurrentPeriodLocked}
+                                onClick={() => void loadSalesBonusSummary(overviewDateRange, { force: true })
+                                    .then(() => message.success('Đã đối soát lại doanh thu.'))
+                                    .catch((error: any) => message.error(error?.message || 'Đối soát thất bại.'))}
+                            >
+                                {isCurrentPeriodLocked ? 'Dữ liệu đã chốt' : 'Đối soát doanh thu'}
+                            </Button>
+                        </div>
+
+                        {salesBonusDetailsOpen && (
+                            <div className="att-sales-bonus__details">
+                                <div className="att-sales-bonus__detail-row">
+                                    <i className="is-up"><ArrowUpOutlined /></i>
+                                    <span><strong>Doanh thu đơn hàng hoàn tất</strong><small>{activeSalesBonusSummary.completedOrderCount} đơn hoàn tất trong kỳ áp dụng</small></span>
+                                    <b>{fmt(activeSalesBonusSummary.grossRevenue)}</b>
+                                </div>
+                                <div className="att-sales-bonus__detail-row">
+                                    <i className="is-down"><MinusCircleOutlined /></i>
+                                    <span><strong>Hàng hoàn</strong><small>{activeSalesBonusSummary.refundCount} đơn từ mục Hàng hoàn</small></span>
+                                    <b className="is-negative">- {fmt(activeSalesBonusSummary.refundRevenue)}</b>
+                                </div>
+                                <div className="att-sales-bonus__detail-row">
+                                    <i className="is-down"><MinusCircleOutlined /></i>
+                                    <span><strong>Trả hàng</strong><small>{activeSalesBonusSummary.returnCount} đơn từ mục Trả hàng</small></span>
+                                    <b className="is-negative">- {fmt(activeSalesBonusSummary.returnRevenue)}</b>
+                                </div>
+                                <div className="att-sales-bonus__detail-row is-total">
+                                    <i className="is-equal">=</i>
+                                    <span><strong>Doanh thu đủ điều kiện</strong><small>Doanh thu dùng để tính thưởng sau khi loại trừ</small></span>
+                                    <b>{fmt(activeSalesBonusSummary.eligibleRevenue)}</b>
+                                </div>
+                                <div className="att-sales-bonus__note">
+                                    <InfoCircleOutlined />
+                                    <div>
+                                        <strong>Lưu ý</strong>
+                                        <p>Thưởng được cộng tự động vào mục Thưởng và tổng thu nhập khi chốt lương.</p>
+                                        <p>Chỉ nhân viên chính thức được áp dụng; mỗi nhân viên đủ điều kiện nhận {rateLabel} doanh thu.</p>
+                                        <p>Doanh thu lấy từ Đơn hàng hoàn tất, sau đó trừ số tiền trong Hàng hoàn và Trả hàng.</p>
+                                        <p>Chính sách áp dụng từ 00:00 ngày {dayjs(activeSalesBonusSummary.effectiveAt || SALES_BONUS_EFFECTIVE_AT).format('DD/MM/YYYY')}{calculationStart ? `; kỳ này bắt đầu tính từ ${calculationStart.format('DD/MM/YYYY')}` : '; kỳ đang xem chưa tới thời điểm áp dụng'}.</p>
+                                    </div>
+                                </div>
+                            </div>
+                        )}
+                    </div>
+                </Spin>
+            </section>
+        );
+    };
+
+    const renderAdditionalBonuses = () => {
         const creatorLabel = (bonus: BonusRecord) => {
             const createLog = [...bonusAuditLog].reverse().find(log => log.bonusId === bonus.id && log.action === 'create');
             const creatorUsername = bonus.createdBy || createLog?.changedBy || '';
@@ -8387,6 +8653,10 @@ const openConfigModal = () => {
             </div>
         );
     };
+
+    const renderBonuses = () => bonusCategory === 'sales'
+        ? renderSalesBonus()
+        : renderAdditionalBonuses();
 
     // ============================================
     // TAB 4: PHẠT
@@ -9348,7 +9618,7 @@ const openConfigModal = () => {
                         leave?: LeaveRequest
                     ) => {
                         const label = session === 'morning' ? 'Sáng' : 'Chiều';
-                        const isSessionDue = isAttendanceSessionDue(currentDay, session);
+                        const isSessionDue = isAttendanceSessionDue(currentDay, session, emp.type);
 
                         if (emp.type === 'Seasonal') {
                             if (status > 0) {
@@ -9889,10 +10159,37 @@ const openConfigModal = () => {
     // ============================================
     // TABS CONFIG (nav-only, no children)
     // ============================================
+    const bonusParentMenu = {
+        selectedKeys: [bonusCategory],
+        items: [
+            { key: 'sales', icon: <PercentageOutlined />, label: 'Thưởng doanh thu' },
+            { key: 'additional', icon: <GiftOutlined />, label: 'Thưởng bổ sung' },
+        ],
+        onClick: ({ key }: { key: string }) => {
+            setBonusCategory(key === 'additional' ? 'additional' : 'sales');
+            setBonusView(isAdmin ? 'manage' : 'personal');
+            setActiveTab('bonuses');
+        },
+    };
+
     const tabNavItems = [
         { key: 'overview', label: isAdmin ? <><ProfileOutlined /> Tổng quát</> : 'TỔNG QUÁT' },
         { key: 'packaging', label: isAdmin ? <><TeamOutlined /> Đóng gói</> : 'ĐÓNG GÓI' },
-        { key: 'bonuses', label: isAdmin ? <><GiftOutlined /> Thưởng</> : 'THƯỞNG' },
+        {
+            key: 'bonuses',
+            label: (
+                <Dropdown menu={bonusParentMenu} trigger={['click']} overlayClassName="att-bonus-parent-dropdown">
+                    <span
+                        className="att-bonus-parent-label"
+                        onClick={event => event.stopPropagation()}
+                    >
+                        <GiftOutlined />
+                        <span>Thưởng</span>
+                        <DownOutlined className="att-bonus-parent-label__arrow" />
+                    </span>
+                </Dropdown>
+            ),
+        },
         { key: 'fines', label: 'Phạt' },
         { key: 'attendance', label: isAdmin ? <><CalendarOutlined /> Điểm danh</> : 'ĐIỂM DANH' },
         {
@@ -9956,7 +10253,6 @@ const openConfigModal = () => {
                 <Tabs
                     activeKey={activeTab}
                     onChange={nextTab => {
-                        if (nextTab === 'bonuses') setBonusView(isAdmin ? 'manage' : 'personal');
                         setActiveTab(nextTab);
                     }}
                     items={tabNavItems}
@@ -10120,6 +10416,9 @@ const openConfigModal = () => {
                         empBonuses.forEach((bonus: any, index: number) => addAuditRow(`bonus-${index}`, bonus.type || 'Thưởng bổ sung', bonus.detail || 'Khen thưởng / Phụ cấp', bonus.date ? dayjs(bonus.date).format('DD/MM/YYYY') : '—', bonus.amount || 0, 'positive'));
                     } else if ((p.mBonus || 0) > 0) {
                         addAuditRow('bonus', 'Thưởng khác', 'Theo quy định công ty', overviewDateRange[1].format('DD/MM/YYYY'), p.mBonus, 'positive');
+                    }
+                    if ((p.salesBonus || 0) > 0) {
+                        addAuditRow('sales-bonus', 'Thưởng doanh số', `${(activeSalesBonusSummary.rate * 100).toLocaleString('vi-VN')}% doanh thu đủ điều kiện`, overviewDateRange[1].format('DD/MM/YYYY'), p.salesBonus, 'positive');
                     }
                     if (empFines.length) {
                         empFines.forEach((fine: any, index: number) => addAuditRow(`fine-${index}`, fine.type || 'Phạt vi phạm', fineDescription(fine), fineTime(fine) || '—', -(fine.amount || 0), 'negative'));
@@ -10465,6 +10764,19 @@ const openConfigModal = () => {
                                                         </td>
                                                         <td className="ps-inv-note">Theo quy định công ty</td>
                                                         <td className="text-right ps-inv-text-green">+{fmt(p.mBonus)}</td>
+                                                    </tr>
+                                                )}
+
+                                                {p.salesBonus > 0 && (
+                                                    <tr>
+                                                        <td>
+                                                            <span className="ps-inv-row-label">
+                                                                <span className="ps-inv-icon ps-inv-icon-green"><PercentageOutlined /></span>
+                                                                Thưởng doanh số
+                                                            </span>
+                                                        </td>
+                                                        <td className="ps-inv-note">0,1% doanh thu đủ điều kiện · chỉ áp dụng nhân viên chính thức</td>
+                                                        <td className="text-right ps-inv-text-green">+{fmt(p.salesBonus)}</td>
                                                     </tr>
                                                 )}
 
@@ -10823,8 +11135,8 @@ const openConfigModal = () => {
 
                                     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, padding: '10px 14px', background: '#f0f5ff', borderRadius: 8, border: '1px solid #adc6ff' }}>
                                         <div>
-                                            <Text strong style={{ fontSize: 13 }}>Áp dụng giờ ca mới từ ngày</Text>
-                                            <div><Text type="secondary" style={{ fontSize: 11 }}>Có hiệu lực từ 00:00; dữ liệu trước ngày này giữ nguyên.</Text></div>
+                                            <Text strong style={{ fontSize: 13 }}>Áp dụng giờ ca mới cho nhân viên chính thức từ ngày</Text>
+                                            <div><Text type="secondary" style={{ fontSize: 11 }}>Có hiệu lực từ 00:00; nhân viên thời vụ và dữ liệu cũ giữ nguyên.</Text></div>
                                         </div>
                                         <DatePicker
                                             value={scheduleEffectiveDate}

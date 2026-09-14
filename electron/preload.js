@@ -532,6 +532,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
         register: (data) => ipcRenderer.invoke('attendance:register', data),
         getLogs: (filters) => ipcRenderer.invoke('attendance:getLogs', filters),
         getRewardSummary: (periodKey) => ipcRenderer.invoke('attendance:getRewardSummary', periodKey),
+        getSalesBonusSummary: (filters) => ipcRenderer.invoke('attendance:getSalesBonusSummary', filters),
         updateLeaveStatus: (data) => ipcRenderer.invoke('attendance:updateLeaveStatus', data),
         updatePayrollOverride: (data) => ipcRenderer.invoke('attendance:updatePayrollOverride', data),
         updatePayrollLock: (data) => ipcRenderer.invoke('attendance:updatePayrollLock', data),
