@@ -283,10 +283,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
     // Ecommerce Export (XUẤT HÀNG TMDT)
     ecommerceExports: {
         getAll: (args) => ipcRenderer.invoke('ecommerceExports:getAll', args),
+        findByScanCode: (code) => ipcRenderer.invoke('ecommerceExports:findByScanCode', code),
+        getOperationalCounts: () => ipcRenderer.invoke('ecommerceExports:getOperationalCounts'),
         getPackingReadModel: (args) => ipcRenderer.invoke('ecommerceExports:getPackingReadModel', args),
         getPackingRevision: (args) => ipcRenderer.invoke('ecommerceExports:getPackingRevision', args),
         create: (data) => ipcRenderer.invoke('ecommerceExports:create', data),
         update: (id, data) => ipcRenderer.invoke('ecommerceExports:update', id, data),
+        completePickup: (id, data) => ipcRenderer.invoke('ecommerceExports:completePickup', id, data),
         saveTelegramSettings: (data) => ipcRenderer.invoke('ecommerceExports:saveTelegramSettings', data),
         nextTelegramOrderCounter: () => ipcRenderer.invoke('ecommerceExports:nextTelegramOrderCounter'),
         delete: (id) => ipcRenderer.invoke('ecommerceExports:delete', id),
@@ -296,6 +299,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
         getCompletedKeys: () => ipcRenderer.invoke('ecommerceExports:getCompletedKeys'),
         checkExistingKeys: (data) => ipcRenderer.invoke('ecommerceExports:checkExistingKeys', data),
         syncOrderPlacedAt: (records) => ipcRenderer.invoke('ecommerceExports:syncOrderPlacedAt', records),
+        importSnapshot: (payload) => ipcRenderer.invoke('ecommerceExports:importSnapshot', payload),
         getPackersByOrderNumbers: (orderNumbers) => ipcRenderer.invoke('ecommerceExports:getPackersByOrderNumbers', orderNumbers),
         bulkCreate: (records) => ipcRenderer.invoke('ecommerceExports:bulkCreate', records),
         bulkCancel: (ids) => ipcRenderer.invoke('ecommerceExports:bulkCancel', ids),

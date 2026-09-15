@@ -930,6 +930,11 @@ export interface ElectronAPI {
     }>;
   };
   ecommerceExports: {
+    getOperationalCounts: () => Promise<{
+      success: boolean;
+      data?: { pending: number; completed: number; mismatch: number; overdue: number; cancelled: number };
+      error?: string;
+    }>;
     getAll: (filters?: {
       since?: string;
       until?: string;
@@ -944,6 +949,11 @@ export interface ElectronAPI {
       success: boolean;
       data?: any[];
       hasMore?: boolean;
+      error?: string;
+    }>;
+    findByScanCode: (code: string) => Promise<{
+      success: boolean;
+      data?: any | null;
       error?: string;
     }>;
     getPackingReadModel?: (filters?: {
@@ -993,6 +1003,16 @@ export interface ElectronAPI {
       id: number,
       data: any,
     ) => Promise<{ success: boolean; data?: any; error?: string }>;
+    completePickup: (
+      id: number,
+      data: { updatedAt?: string | Date; pickedBy?: string },
+    ) => Promise<{
+      success: boolean;
+      skipped?: boolean;
+      reason?: string;
+      data?: any;
+      error?: string;
+    }>;
     saveTelegramSettings: (data: {
       chatId?: string;
       apiToken?: string;
@@ -1006,6 +1026,11 @@ export interface ElectronAPI {
     bulkDelete: (
       ids: number[],
     ) => Promise<{ success: boolean; data?: number; error?: string }>;
+    deleteCancelled: () => Promise<{
+      success: boolean;
+      data?: number;
+      error?: string;
+    }>;
     deleteAll: () => Promise<{
       success: boolean;
       data?: number;
@@ -1029,6 +1054,23 @@ export interface ElectronAPI {
     ) => Promise<{
       success: boolean;
       data?: { ecommerceExports: number; orders: number };
+      error?: string;
+    }>;
+    importSnapshot: (payload: {
+      platform: "Shopee" | "TikTok";
+      fileNames: string[];
+      records: any[];
+      allowEmptySnapshot?: boolean;
+    }) => Promise<{
+      success: boolean;
+      data?: {
+        batchId: number;
+        imported: number;
+        created: number;
+        updated: number;
+        skippedCompleted: number;
+        mismatch: number;
+      };
       error?: string;
     }>;
     getPackersByOrderNumbers: (
