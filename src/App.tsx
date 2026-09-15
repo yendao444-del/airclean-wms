@@ -1,14 +1,16 @@
-import { useState, useEffect, useMemo, useRef, lazy, Suspense, Component, ErrorInfo, ReactNode } from 'react';
+import { useState, useEffect, useMemo, useRef, lazy, Suspense, Component, ErrorInfo, ReactNode, type ComponentType } from 'react';
 import { Layout, Menu, Button, Typography, ConfigProvider, Space, Tooltip, Avatar } from 'antd';
 import AntAppProvider from './components/AntAppProvider';
 import {
-    DashboardOutlined,
+    BarChartOutlined,
     ShoppingCartOutlined,
 
     InboxOutlined,
     ImportOutlined,
     ExportOutlined,
     DatabaseOutlined,
+    HomeOutlined,
+    TruckOutlined,
 
     SettingOutlined,
     ScanOutlined,
@@ -23,10 +25,8 @@ import {
     LogoutOutlined,
     CheckCircleOutlined,
     AppstoreOutlined,
-    ShoppingOutlined,
     FileTextOutlined,
-    OrderedListOutlined,
-    LineChartOutlined,
+    ProfileOutlined,
     AuditOutlined,
     WalletOutlined,
     ApartmentOutlined,
@@ -44,11 +44,11 @@ import ForceUpdateGate from './components/ForceUpdateGate';
 // Dashboard includes charting code, so load it after authentication like the
 // rest of the operational screens instead of making the login bundle pay for it.
 const DashboardPage = lazy(() => import('./pages/Dashboard'));
-import GlobalTaskAlerts from './components/GlobalTaskAlerts';
-import HeaderTaskTicker from './components/HeaderTaskTicker';
 import NotificationBell from './components/NotificationBell';
-import GlobalNotificationPopup from './components/GlobalNotificationPopup';
-import NotificationCenter from './pages/NotificationCenter';
+const GlobalTaskAlerts = lazy(() => import('./components/GlobalTaskAlerts'));
+const HeaderTaskTicker = lazy(() => import('./components/HeaderTaskTicker'));
+const GlobalNotificationPopup = lazy(() => import('./components/GlobalNotificationPopup'));
+const NotificationCenter = lazy(() => import('./pages/NotificationCenter'));
 import { useNotificationInbox } from './lib/useNotificationInbox';
 
 import Login from './pages/Login';
@@ -78,7 +78,8 @@ const SalesHistoryPage = lazy(() => import('./pages/SalesHistory'));
 const OrderPickingPage = lazy(() => import('./pages/OrderPicking'));
 const OrdersPage = lazy(() => import('./pages/Orders'));
 const BusinessReportPage = lazy(() => import('./pages/BusinessReport'));
-const AttendancePage = lazy(() => import('./pages/Attendance'));
+const loadAttendancePage = () => import('./pages/Attendance');
+const AttendancePage = lazy(loadAttendancePage);
 const StockCheckPage = lazy(() => import('./pages/StockCheck'));
 const MyProfilePage = lazy(() => import('./pages/MyProfile'));
 const HandlingUnitsPage = lazy(() => import('./pages/HandlingUnits'));
@@ -116,6 +117,12 @@ class ErrorBoundary extends Component<{ children: ReactNode }, ErrorBoundaryStat
 }
 
 type MenuItem = Required<MenuProps>['items'][number];
+
+// Keep the sidebar icon family consistent with the selected geometric concept:
+// squared, monoline icons with one predictable optical footprint.
+const menuGeometric = (Icon: ComponentType<any>) => (
+    <Icon className="app-menu-geometric-icon" />
+);
 
 
 
@@ -157,6 +164,18 @@ function AppContent() {
             ? 'Nhân viên chỉ xem'
             : 'Nhân viên';
     const notificationInbox = useNotificationInbox(actualUser?.id);
+
+    // Development-only timing marks make startup and page-load regressions measurable
+    // without writing telemetry or business data anywhere.
+    useEffect(() => {
+        if (!import.meta.env.DEV) return;
+        console.info(`[perf] renderer AppContent mounted: ${Math.round(performance.now())}ms`);
+    }, []);
+
+    useEffect(() => {
+        if (!import.meta.env.DEV) return;
+        console.info(`[perf] page selected: ${selectedKey} at ${Math.round(performance.now())}ms`);
+    }, [selectedKey]);
 
     const openNotificationCenter = (announcementId?: number) => {
         setPreviewMenuOpen(false);
@@ -202,6 +221,32 @@ function AppContent() {
 
         return () => {
             cancelled = true;
+        };
+    }, [actualUser?.id, actualUser?.role, isAttendanceUiTest]);
+
+    // Attendance is one of the largest screens. Warm its lazy chunk while the
+    // dashboard is idle so the first menu click does not pay parse/compile cost.
+    useEffect(() => {
+        if (!actualUser || isAttendanceUiTest) return;
+        const idleWindow = window as Window & {
+            requestIdleCallback?: (callback: () => void, options?: { timeout: number }) => number;
+            cancelIdleCallback?: (id: number) => void;
+        };
+        let timer: number | null = null;
+        let idleId: number | null = null;
+        const preload = () => {
+            void loadAttendancePage();
+        };
+
+        if (idleWindow.requestIdleCallback) {
+            idleId = idleWindow.requestIdleCallback(preload, { timeout: 5000 });
+        } else {
+            timer = window.setTimeout(preload, 1500);
+        }
+
+        return () => {
+            if (timer !== null) window.clearTimeout(timer);
+            if (idleId !== null) idleWindow.cancelIdleCallback?.(idleId);
         };
     }, [actualUser?.id, actualUser?.role, isAttendanceUiTest]);
 
@@ -361,111 +406,111 @@ function AppContent() {
 
         // Dashboard - always visible if accessible
         if (accessibleKeys.includes('dashboard')) {
-            items.push(createMenuItem('Tổng quan', 'dashboard', <DashboardOutlined />));
+            items.push(createMenuItem('Tổng quan', 'dashboard', menuGeometric(AppstoreOutlined)));
         }
 
         // BÁN HÀNG submenu
         if (accessibleKeys.includes('pos')) {
-            items.push(createMenuItem('Bán hàng', 'pos', <ShoppingCartOutlined />));
+            items.push(createMenuItem('Bán hàng', 'pos', menuGeometric(ShoppingCartOutlined)));
         }
 
         // 📋 Đơn hàng - module độc lập
         if (accessibleKeys.includes('orders')) {
-            items.push(createMenuItem('Đơn hàng', 'orders', <OrderedListOutlined />));
+            items.push(createMenuItem('Đơn hàng', 'orders', menuGeometric(ProfileOutlined)));
         }
 
         // Tools submenu
         const toolsChildren: MenuItem[] = [];
         if (accessibleKeys.includes('fee-calculator') && hasPermission('permissions')) {
-            toolsChildren.push(createMenuItem('Tính phí sản', 'fee-calculator', <CalculatorOutlined />));
+            toolsChildren.push(createMenuItem('Tính phí sản', 'fee-calculator', menuGeometric(CalculatorOutlined)));
         }
         if (accessibleKeys.includes('order-picking')) {
-            toolsChildren.push(createMenuItem('Nhặt hàng', 'order-picking', <ScanOutlined />));
+            toolsChildren.push(createMenuItem('Nhặt hàng', 'order-picking', menuGeometric(ScanOutlined)));
         }
         if (toolsChildren.length > 0) {
-            items.push(createMenuItem('Công cụ hỗ trợ', 'tools', <ToolOutlined />, toolsChildren));
+            items.push(createMenuItem('Công cụ hỗ trợ', 'tools', menuGeometric(ToolOutlined), toolsChildren));
         }
 
         // 📦 Sản phẩm submenu
         const productsChildren: MenuItem[] = [];
         if (accessibleKeys.includes('products')) {
-            productsChildren.push(createMenuItem('Danh sách sản phẩm', 'products', <DatabaseOutlined />));
+            productsChildren.push(createMenuItem('Danh sách sản phẩm', 'products', menuGeometric(DatabaseOutlined)));
         }
         if (accessibleKeys.includes('combos')) {
             productsChildren.push(createMenuItem('Combo Products', 'combos'));
         }
         if (productsChildren.length > 0) {
-            items.push(createMenuItem('Sản phẩm', 'products-menu', <AppstoreOutlined />, productsChildren));
+            items.push(createMenuItem('Sản phẩm', 'products-menu', menuGeometric(InboxOutlined), productsChildren));
         }
 
         // 📋 Quản lý kho submenu
         const inventoryChildren: MenuItem[] = [];
         if (accessibleKeys.includes('stock-balance')) {
-            inventoryChildren.push(createMenuItem('Tồn kho', 'stock-balance', <DatabaseOutlined />));
+            inventoryChildren.push(createMenuItem('Tồn kho', 'stock-balance', menuGeometric(DatabaseOutlined)));
         }
         if (accessibleKeys.includes('stock-check')) {
-            inventoryChildren.push(createMenuItem('Kiểm hàng', 'stock-check', <AuditOutlined />));
+            inventoryChildren.push(createMenuItem('Kiểm hàng', 'stock-check', menuGeometric(AuditOutlined)));
         }
         if (accessibleKeys.includes('purchase')) {
-            inventoryChildren.push(createMenuItem('Nhập hàng', 'purchase', <ImportOutlined />));
+            inventoryChildren.push(createMenuItem('Nhập hàng', 'purchase', menuGeometric(ImportOutlined)));
         }
         if (accessibleKeys.includes('supplier-debt')) {
-            inventoryChildren.push(createMenuItem('Công nợ NCC', 'supplier-debt', <WalletOutlined />));
+            inventoryChildren.push(createMenuItem('Công nợ NCC', 'supplier-debt', menuGeometric(WalletOutlined)));
         }
         if (accessibleKeys.includes('export')) {
-            inventoryChildren.push(createMenuItem('Xuất hàng', 'export', <ScanOutlined />));
+            inventoryChildren.push(createMenuItem('Xuất hàng', 'export', menuGeometric(ScanOutlined)));
         }
         if (accessibleKeys.includes('returns')) {
-            inventoryChildren.push(createMenuItem('Trả hàng', 'returns', <ExportOutlined />));
+            inventoryChildren.push(createMenuItem('Trả hàng', 'returns', menuGeometric(ExportOutlined)));
         }
         if (accessibleKeys.includes('refunds')) {
-            inventoryChildren.push(createMenuItem('Hàng hoàn', 'refunds', <RollbackOutlined />));
+            inventoryChildren.push(createMenuItem('Hàng hoàn', 'refunds', menuGeometric(RollbackOutlined)));
         }
         if (inventoryChildren.length > 0) {
-            items.push(createMenuItem('Quản lý kho', 'inventory', <InboxOutlined />, inventoryChildren));
+            items.push(createMenuItem('Quản lý kho', 'inventory', menuGeometric(HomeOutlined), inventoryChildren));
         }
 
         // Quản lý kiện hàng là một workspace vận hành kho độc lập. Nó dùng
         // chung phân quyền nhưng không nằm dưới menu Quản lý kho.
         if (accessibleKeys.includes('handling-units')) {
-            items.push(createMenuItem('Quản lý kiện hàng', 'handling-units', <ApartmentOutlined />));
+            items.push(createMenuItem('Quản lý kiện hàng', 'handling-units', menuGeometric(ApartmentOutlined)));
         }
 
         // 📮 Bàn giao TMDT submenu
         const ecommerceChildren: MenuItem[] = [];
         if (accessibleKeys.includes('ecommerce-export')) {
-            ecommerceChildren.push(createMenuItem('Xuất hàng TMDT', 'ecommerce-export', <SendOutlined />));
+            ecommerceChildren.push(createMenuItem('Xuất hàng TMDT', 'ecommerce-export', menuGeometric(SendOutlined)));
         }
         if (accessibleKeys.includes('carrier-complaints')) {
-            ecommerceChildren.push(createMenuItem('Khiếu nại DVVC', 'carrier-complaints', <SafetyCertificateOutlined />));
+            ecommerceChildren.push(createMenuItem('Khiếu nại DVVC', 'carrier-complaints', menuGeometric(SafetyCertificateOutlined)));
         }
         if (accessibleKeys.includes('einvoice')) {
-            ecommerceChildren.push(createMenuItem('Xuất HĐĐT', 'einvoice', <FileTextOutlined />));
+            ecommerceChildren.push(createMenuItem('Xuất HĐĐT', 'einvoice', menuGeometric(FileTextOutlined)));
         }
         if (ecommerceChildren.length > 0) {
-            items.push(createMenuItem('Bàn giao TMDT', 'ecommerce-menu', <ShoppingOutlined />, ecommerceChildren));
+            items.push(createMenuItem('Bàn giao TMDT', 'ecommerce-menu', menuGeometric(TruckOutlined), ecommerceChildren));
         }
 
 
 
         // Báo cáo kinh doanh (Admin only)
         if (accessibleKeys.includes('business-report')) {
-            items.push(createMenuItem('Báo cáo kinh doanh', 'business-report', <LineChartOutlined />));
+            items.push(createMenuItem('Báo cáo kinh doanh', 'business-report', menuGeometric(BarChartOutlined)));
         }
 
         // Daily Tasks
         if (accessibleKeys.includes('daily-tasks')) {
-            items.push(createMenuItem('Công việc hàng ngày', 'daily-tasks', <CheckCircleOutlined />));
+            items.push(createMenuItem('Công việc hàng ngày', 'daily-tasks', menuGeometric(CheckCircleOutlined)));
         }
 
         // Bảng công (Public)
         if (accessibleKeys.includes('attendance')) {
-            items.push(createMenuItem('Bảng công', 'attendance', <ScheduleOutlined />));
+            items.push(createMenuItem('Bảng công', 'attendance', menuGeometric(ScheduleOutlined)));
         }
 
         // Settings
         if (accessibleKeys.includes('settings')) {
-            items.push(createMenuItem('Cài đặt', 'settings', <SettingOutlined />));
+            items.push(createMenuItem('Cài đặt', 'settings', menuGeometric(SettingOutlined)));
         }
 
 
@@ -622,13 +667,15 @@ function AppContent() {
             }}
         >
             <AntAppProvider>
-                {!isNotificationUiTest && <GlobalTaskAlerts />}
-                <GlobalNotificationPopup
-                    announcement={notificationInbox.popupAnnouncement}
-                    suppressed={isRolePreview}
-                    onMarkRead={notificationInbox.markRead}
-                    onAcknowledge={notificationInbox.acknowledge}
-                />
+                <Suspense fallback={null}>
+                    {!isNotificationUiTest && <GlobalTaskAlerts />}
+                    <GlobalNotificationPopup
+                        announcement={notificationInbox.popupAnnouncement}
+                        suppressed={isRolePreview}
+                        onMarkRead={notificationInbox.markRead}
+                        onAcknowledge={notificationInbox.acknowledge}
+                    />
+                </Suspense>
                 {/* ── Custom Title Bar ── */}
                 <div className="app-titlebar" style={{
                     height: 40,
@@ -861,7 +908,9 @@ function AppContent() {
                                     {headerExtra}
                                 </div>
                             )}
-                            <HeaderTaskTicker onNavigate={(key) => navigateTo(key)} />
+                            <Suspense fallback={null}>
+                                <HeaderTaskTicker onNavigate={(key) => navigateTo(key)} />
+                            </Suspense>
                         </Header>}
 
                         <Content

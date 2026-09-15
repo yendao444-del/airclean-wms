@@ -46,16 +46,30 @@ const categories: Record<string, { label: string; className: string }> = {
 };
 
 const formatDate = (value?: string | null) => value
-    ? new Intl.DateTimeFormat('vi-VN').format(new Date(value))
+    ? new Intl.DateTimeFormat('vi-VN', { timeZone: 'Asia/Bangkok' }).format(new Date(value))
     : 'Chưa công bố';
 
 const formatDatePadded = (value?: string | null) => value
-    ? new Intl.DateTimeFormat('vi-VN', { day: '2-digit', month: '2-digit', year: 'numeric' }).format(new Date(value))
+    ? new Intl.DateTimeFormat('vi-VN', { timeZone: 'Asia/Bangkok', day: '2-digit', month: '2-digit', year: 'numeric' }).format(new Date(value))
     : 'Chưa công bố';
 
 const formatDateTime = (value?: string | null) => value
     ? new Intl.DateTimeFormat('vi-VN', { hour: '2-digit', minute: '2-digit', day: '2-digit', month: '2-digit', year: 'numeric' }).format(new Date(value))
     : 'Chưa công bố';
+
+const notificationDayKey = (value?: string | null) => value
+    ? new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Bangkok' }).format(new Date(value))
+    : '';
+
+const getStructuredPolicyChanges = (item?: Announcement | null) => {
+    if (!item?.metadata) return [];
+    try {
+        const metadata = typeof item.metadata === 'string' ? JSON.parse(item.metadata) : item.metadata;
+        return metadata?.template === 'policy-change-table-v1' && Array.isArray(metadata.changes) ? metadata.changes : [];
+    } catch {
+        return [];
+    }
+};
 
 const formatOfficialDate = (value?: string | null) => {
     const d = value ? new Date(value) : new Date();
@@ -164,17 +178,38 @@ export default function NotificationCenter({ inbox, isAdmin = false, initialSele
         if (initialSelectedId) setSelectedId(initialSelectedId);
     }, [initialSelectedId]);
 
+    const displayItems = useMemo(() => {
+        const rawItems = [...inbox.items];
+        // Present same-day sale and work-schedule changes as one update card.
+        // Original records remain untouched and can still be opened from history.
+        const sale = rawItems.find(item => item.policyCode?.startsWith('PKG-REWARD-WEEKLY-v'));
+        const schedule = rawItems.find(item => item.policyCode === 'ATT-SCHEDULE-2026.09');
+        const canMerge = sale && schedule && notificationDayKey(sale.effectiveAt) === notificationDayKey(schedule.effectiveAt);
+        return canMerge
+            ? rawItems.filter(item => item.id !== schedule.id).map(item => item.id === sale.id ? {
+                ...item,
+                title: 'Cập nhật hoa hồng và giờ làm việc',
+                summary: 'Ngày sale tăng 50% · Nhân viên chính thức bắt đầu ca chiều lúc 13:00 từ ngày 14/09/2026.',
+                content: `${item.content}\n\n${schedule.content}`,
+                policyCode: 'MERGED-ATT-PKG-2026.09',
+            } : item)
+            : rawItems;
+    }, [inbox.items]);
+
     const filtered = useMemo(() => {
         const normalizedQuery = query.trim().toLocaleLowerCase('vi-VN');
-        return [...inbox.items]
+        return displayItems
             .filter(item => {
                 if (normalizedQuery && !`${item.title} ${item.summary} ${item.policyCode || ''} ${item.issuer || ''}`.toLocaleLowerCase('vi-VN').includes(normalizedQuery)) return false;
                 return true;
             })
             .sort((a, b) => (new Date(b.publishedAt).getTime() - new Date(a.publishedAt).getTime()) * (sort === 'newest' ? 1 : -1));
-    }, [inbox.items, query, sort]);
+    }, [displayItems, query, sort]);
 
-    const selected = inbox.items.find(item => item.id === selectedId) || null;
+    const selected = displayItems.find(item => item.id === selectedId) || null;
+    const isAttendancePolicy = selected?.policyCode === 'ATT-REWARD-2026.09';
+    const isAttendanceSchedulePolicy = selected?.policyCode === 'ATT-SCHEDULE-2026.09';
+    const isMergedAttendancePackingUpdate = selected?.policyCode === 'MERGED-ATT-PKG-2026.09';
     const featured = useMemo(() => inbox.items
         .filter(item => requiresNotificationAcknowledgement(item) && !item.recipient?.acknowledgedAt)
         .sort((a, b) => new Date(a.effectiveAt || a.publishedAt).getTime() - new Date(b.effectiveAt || b.publishedAt).getTime())[0] || null,
@@ -205,6 +240,19 @@ export default function NotificationCenter({ inbox, isAdmin = false, initialSele
 
     const parsedOfficialArticles = useMemo<OfficialArticle[]>(() => {
         if (!selected?.content) return [];
+        const structuredChanges = getStructuredPolicyChanges(selected);
+        if (structuredChanges.length > 0) {
+            return [{
+                title: 'Mức thay đổi',
+                paragraphs: [],
+                tableRows: structuredChanges.map((change: any, index: number) => ({
+                    stt: index + 1,
+                    label: String(change.label || 'Thay đổi'),
+                    value: String(change.current || 'Đã cập nhật'),
+                })),
+                bullets: [],
+            }];
+        }
         const lines = selected.content.split('\n').map(l => l.trim()).filter(Boolean);
         const articles: OfficialArticle[] = [];
 
@@ -231,6 +279,11 @@ export default function NotificationCenter({ inbox, isAdmin = false, initialSele
             // Bullet pair or regular bullet
             if (line.startsWith('•') || line.startsWith('-')) {
                 const raw = line.replace(/^[•\-]\s*/, '').trim();
+                if (raw.toLocaleLowerCase('vi-VN').startsWith('ngày sale')) {
+                    if (!currentArticle.tableRows) currentArticle.tableRows = [];
+                    currentArticle.tableRows.push({ stt: rowStt++, label: 'Ngày sale', value: '+ 50% hoa hồng' });
+                    continue;
+                }
                 const colonIndex = raw.indexOf(':');
                 if (colonIndex > 0 && colonIndex < 35 && raw.length < 85) {
                     const label = raw.slice(0, colonIndex).trim();
@@ -374,7 +427,7 @@ export default function NotificationCenter({ inbox, isAdmin = false, initialSele
                 .filter(recipient => recipient.required !== false && !recipient.readAt && !recipient.acknowledgedAt)
                 .map(recipient => recipient.id));
         } else {
-            message.error(result.error || 'Không tải được danh sách nhân viên chính thức.');
+            message.error(result.error || 'Không tải được danh sách nhân viên.');
         }
         setRecipientSetupLoading(false);
     };
@@ -382,7 +435,7 @@ export default function NotificationCenter({ inbox, isAdmin = false, initialSele
     const saveRecipientSetup = async () => {
         if (!selected) return;
         if (requiredRecipientIds.length === 0) {
-            message.warning('Hãy chọn ít nhất một nhân viên chính thức cần xác nhận.');
+            message.warning('Hãy chọn ít nhất một nhân viên cần xác nhận.');
             return;
         }
         setRecipientSetupSaving(true);
@@ -480,7 +533,7 @@ export default function NotificationCenter({ inbox, isAdmin = false, initialSele
                         {/* 1. Shopee Top Crimson Header Banner */}
                         <div className="shopee-notice-banner">
                             <h1>
-                                CẬP NHẬT VỀ {selected.title.toUpperCase()} TỪ NGÀY {formatDatePadded(selected.effectiveAt)}
+                                {isMergedAttendancePackingUpdate ? 'CẬP NHẬT HOA HỒNG VÀ THỜI GIAN LÀM VIỆC' : isAttendanceSchedulePolicy ? 'THAY ĐỔI THỜI GIAN ĐI LÀM' : `CẬP NHẬT VỀ ${selected.title.toUpperCase()}`} TỪ NGÀY {formatDatePadded(selected.effectiveAt)}
                             </h1>
                         </div>
 
@@ -488,14 +541,116 @@ export default function NotificationCenter({ inbox, isAdmin = false, initialSele
                         <div className="shopee-notice-intro">
                             <p>
                                 Theo đó, từ ngày <span className="shopee-highlight-date">{formatDatePadded(selected.effectiveAt)}</span>,{' '}
-                                {selected.issuer || 'Hệ thống'} cập nhật một số thay đổi về{' '}
-                                <span className="shopee-highlight-bold">{selected.title}</span> như sau:
+                                {isMergedAttendancePackingUpdate ? 'cập nhật ngắn gọn hai nội dung:' : `${selected.issuer || 'Hệ thống'} ${isAttendanceSchedulePolicy ? 'chính thức thay đổi khung giờ làm việc' : 'cập nhật một số thay đổi về'} `}{!isMergedAttendancePackingUpdate && !isAttendanceSchedulePolicy && <span className="shopee-highlight-bold">{selected.title}</span>} {!isMergedAttendancePackingUpdate && 'như sau:'}
                             </p>
                         </div>
 
                         {/* 3. Numbered Sections */}
                         <div className="shopee-sections-list">
-                            {parsedOfficialArticles.map((art, aIdx) => (
+                            {isMergedAttendancePackingUpdate ? (
+                                <>
+                                    <section className="shopee-section-block merged-worktime-summary">
+                                        <h2 className="shopee-section-heading">1. HOA HỒNG</h2>
+                                        <div className="shopee-table-wrapper"><table className="shopee-spec-table"><thead><tr><th className="th-navy" style={{ width: '48px' }}>STT</th><th className="th-navy">Nhóm công việc</th><th className="th-navy">Phân loại hạng mục</th><th className="th-navy">Quy cách chi tiết</th><th className="th-coral" colSpan={2}>Mức đơn giá áp dụng</th></tr><tr className="tr-header-sub"><th className="th-navy-sub" colSpan={4}>Tiêu chuẩn hạng mục</th><th className="th-coral-sub" colSpan={2}>Từ {formatDatePadded(selected.effectiveAt)}</th></tr></thead><tbody><tr className="tr-data-row"><td className="td-center td-stt">1</td><td className="td-cat">Đóng gói bưu kiện</td><td className="td-level"><b>Ngày sale</b></td><td className="td-subcat">Theo lịch sale</td><td className="td-center td-rate" colSpan={2}><b>+ 50% hoa hồng</b></td></tr></tbody></table></div>
+                                    </section>
+                                    <section className="shopee-section-block">
+                                        <h2 className="shopee-section-heading">2. THỜI GIAN LÀM VIỆC</h2>
+                                        <p className="shopee-section-subtext">Nhân viên chính thức: ca chiều <b>13:30 → 13:00</b> từ ngày {formatDatePadded(selected.effectiveAt)}. Nhân viên thời vụ giữ nguyên 13:30; linh động 5 phút đầu ca.</p>
+                                        <div className="shopee-table-wrapper"><table className="shopee-spec-table attendance-policy-table"><thead><tr><th className="th-navy" style={{ width: '48px' }}>STT</th><th className="th-navy">Nhóm thời gian</th><th className="th-navy">Trước {formatDatePadded(selected.effectiveAt)}</th><th className="th-coral">Từ {formatDatePadded(selected.effectiveAt)}</th></tr></thead><tbody><tr className="tr-data-row"><td className="td-center td-stt">1</td><td className="td-level"><b>Ca chiều - Chính thức</b></td><td className="td-center">13:30</td><td className="td-center td-rate"><b>13:00</b></td></tr><tr className="tr-data-row"><td className="td-center td-stt">2</td><td className="td-level"><b>Ca chiều - Thời vụ</b></td><td className="td-center">13:30</td><td className="td-center td-rate"><b>13:30</b></td></tr><tr className="tr-data-row"><td className="td-center td-stt">3</td><td className="td-level"><b>Thời gian linh động</b></td><td className="td-center">5 phút</td><td className="td-center td-rate"><b>5 phút đầu mỗi ca</b></td></tr></tbody></table></div>
+                                    </section>
+                                </>
+                            ) : isAttendanceSchedulePolicy ? (
+                                <section className="shopee-section-block">
+                                    <h2 className="shopee-section-heading">1. THỜI GIAN LÀM VIỆC ÁP DỤNG</h2>
+                                    <p className="shopee-section-subtext">
+                                        {selected.issuer || 'Phòng vận hành'} cập nhật giờ ca chiều cho nhân viên chính thức. Mốc áp dụng được tính từ 00:00 ngày {formatDatePadded(selected.effectiveAt)}.
+                                    </p>
+                                    <div className="shopee-table-wrapper">
+                                        <table className="shopee-spec-table attendance-policy-table">
+                                            <thead>
+                                                <tr>
+                                                    <th className="th-navy" style={{ width: '48px' }}>STT</th>
+                                                    <th className="th-navy">Nhóm thời gian</th>
+                                                    <th className="th-navy">Trước {formatDatePadded(selected.effectiveAt)}</th>
+                                                    <th className="th-coral">Từ {formatDatePadded(selected.effectiveAt)}</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody>
+                                                <tr className="tr-data-row">
+                                                    <td className="td-center td-stt">1</td>
+                                                    <td className="td-level"><b>Ca chiều - Chính thức</b></td>
+                                                    <td className="td-center">13:30</td>
+                                                    <td className="td-center td-rate"><b>13:00</b></td>
+                                                </tr>
+                                                <tr className="tr-data-row">
+                                                    <td className="td-center td-stt">2</td>
+                                                    <td className="td-level"><b>Ca chiều - Thời vụ</b></td>
+                                                    <td className="td-center">13:30</td>
+                                                    <td className="td-center td-rate"><b>13:30</b></td>
+                                                </tr>
+                                                <tr className="tr-data-row">
+                                                    <td className="td-center td-stt">3</td>
+                                                    <td className="td-level"><b>Thời gian linh động</b></td>
+                                                    <td className="td-center">5 phút</td>
+                                                    <td className="td-center td-rate"><b>5 phút</b></td>
+                                                </tr>
+                                                <tr className="tr-fallback-row">
+                                                    <td colSpan={2} className="td-fallback-title">Dữ liệu chấm công trước ngày áp dụng</td>
+                                                    <td colSpan={2} className="td-center td-fallback-val">Giữ nguyên theo lịch cũ</td>
+                                                </tr>
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                    <div className="shopee-bullets-container">
+                                        <div className="shopee-bullet-item"><span className="shopee-bullet-circle" /><span className="shopee-bullet-text">Giờ 13:00 chỉ áp dụng cho lượt chấm công của nhân viên chính thức phát sinh từ 00:00 ngày {formatDatePadded(selected.effectiveAt)}.</span></div>
+                                        <div className="shopee-bullet-item"><span className="shopee-bullet-circle" /><span className="shopee-bullet-text">Các khoản phạt, thưởng và dữ liệu kỳ cũ không bị tính lại theo lịch mới.</span></div>
+                                    </div>
+                                </section>
+                            ) : isAttendancePolicy ? (
+                                <section className="shopee-section-block">
+                                    <h2 className="shopee-section-heading">1. QUY TẮC VÀ QUYỀN LỢI CHUYÊN CẦN</h2>
+                                    <p className="shopee-section-subtext">
+                                        Chính sách được tính tự động từ dữ liệu chấm công và lịch làm việc thực tế của từng nhân viên.
+                                    </p>
+                                    <div className="shopee-table-wrapper">
+                                        <table className="shopee-spec-table attendance-policy-table">
+                                            <thead>
+                                                <tr>
+                                                    <th className="th-navy" style={{ width: '48px' }}>STT</th>
+                                                    <th className="th-navy">Điều kiện</th>
+                                                    <th className="th-navy">Quyền lợi nhận được</th>
+                                                    <th className="th-navy">Phạm vi áp dụng</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody>
+                                                <tr className="tr-data-row">
+                                                    <td className="td-center td-stt">1</td>
+                                                    <td className="td-level"><b>Đi làm đúng giờ liên tiếp 3 ngày</b></td>
+                                                    <td>Mở huy hiệu “Đúng giờ” để ghi nhận thành tích.</td>
+                                                    <td>Tất cả nhân viên</td>
+                                                </tr>
+                                                <tr className="tr-data-row">
+                                                    <td className="td-center td-stt">2</td>
+                                                    <td className="td-level"><b>Đi làm đúng giờ liên tiếp 7 ngày</b></td>
+                                                    <td>Nhận 1 lượt miễn phạt mức Nhẹ nếu đi muộn 6–15 phút, tối đa 1 lần trong kỳ.</td>
+                                                    <td>Tất cả nhân viên</td>
+                                                </tr>
+                                                <tr className="tr-data-row">
+                                                    <td className="td-center td-stt">3</td>
+                                                    <td className="td-level"><b>Đạt tối thiểu 24/26 ngày đúng giờ (92,3%) khi kỳ kết thúc</b></td>
+                                                    <td><b>Nhận 200.000đ thưởng chuyên cần</b> trong kỳ lương tương ứng.</td>
+                                                    <td>Chỉ nhân viên chính thức</td>
+                                                </tr>
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                    <div className="shopee-bullets-container">
+                                        <div className="shopee-bullet-item"><span className="shopee-bullet-circle" /><span className="shopee-bullet-text">5 phút đầu mỗi ca vẫn được tính đúng giờ.</span></div>
+                                        <div className="shopee-bullet-item"><span className="shopee-bullet-circle" /><span className="shopee-bullet-text">Nghỉ phép được duyệt không làm đứt chuỗi; ngày nghỉ, ngày lễ và ngày không có lịch làm không được tính vào chuỗi.</span></div>
+                                        <div className="shopee-bullet-item"><span className="shopee-bullet-circle" /><span className="shopee-bullet-text">Lần đi muộn được miễn phạt vẫn làm đứt chuỗi đúng giờ và ảnh hưởng tỷ lệ chuyên cần tháng.</span></div>
+                                    </div>
+                                </section>
+                            ) : parsedOfficialArticles.map((art, aIdx) => (
                                 <section key={aIdx} className="shopee-section-block">
                                     <h2 className="shopee-section-heading">
                                         {aIdx + 1}. {art.title.toUpperCase()}
@@ -638,9 +793,9 @@ export default function NotificationCenter({ inbox, isAdmin = false, initialSele
                         onCancel={() => setRecipientSetupOpen(false)}
                         onOk={saveRecipientSetup}
                     >
-                        <p>Chọn nhân viên chính thức bắt buộc nhận và xác nhận thông báo này. Người đã đọc sẽ được khóa để không phát hành lại; admin vẫn xem và theo dõi nhưng không cần xác nhận.</p>
+                        <p>Chọn nhân viên bắt buộc nhận và xác nhận thông báo này. Người đã đọc sẽ được khóa để không phát hành lại; admin vẫn xem và theo dõi nhưng không cần xác nhận.</p>
                         <div className="notification-recipient-setup">
-                            {recipientSetupLoading ? <div className="notification-acknowledgements__state"><Spin size="small" /> Đang tải nhân viên chính thức...</div> : recipients.map(recipient => {
+                            {recipientSetupLoading ? <div className="notification-acknowledgements__state"><Spin size="small" /> Đang tải nhân viên...</div> : recipients.map(recipient => {
                                 const alreadyRead = Boolean(recipient.readAt || recipient.acknowledgedAt);
                                 return (
                                     <Checkbox
@@ -656,7 +811,7 @@ export default function NotificationCenter({ inbox, isAdmin = false, initialSele
                                     </Checkbox>
                                 );
                             })}
-                            {!recipientSetupLoading && recipients.length === 0 && <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="Không có nhân viên chính thức để chọn" />}
+                            {!recipientSetupLoading && recipients.length === 0 && <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="Không có nhân viên để chọn" />}
                         </div>
                     </Modal>
                 </main>

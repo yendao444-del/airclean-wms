@@ -272,21 +272,30 @@ export default function FeeCalculator() {
 
     const saveFees = async (fees: Fee[]) => {
         const key = platform === 'shopee' ? 'shopee_fees_v3' : 'tiktok_fees_v3';
+        const result = await window.electronAPI.appConfig.set(key, fees);
+        if (!result?.success) throw new Error(result?.error || 'Không thể lưu cấu hình phí.');
         if (platform === 'shopee') setShopeeFees(fees); else setTiktokFees(fees);
-        await window.electronAPI.appConfig.set(key, fees);
     };
-    const updateFee = (id: string, patch: Partial<Fee>) => void saveFees(currentFees.map((fee) => fee.id === id ? { ...fee, ...patch } : fee));
+    const updateFee = (id: string, patch: Partial<Fee>) => {
+        void saveFees(currentFees.map((fee) => fee.id === id ? { ...fee, ...patch } : fee))
+            .catch((error) => message.error(error instanceof Error ? error.message : 'Không thể lưu cấu hình phí.'));
+    };
     const updateOperating = (id: string, patch: Partial<OperatingFee>) => setOperatingFees((fees) => fees.map((fee) => fee.id === id ? { ...fee, ...patch } : fee));
-    const chooseCategory = (id: string) => {
+    const chooseCategory = async (id: string) => {
         const category = CATEGORIES[platform].find((item) => item.id === id);
         if (!category) return;
-        setCategoryId((items) => ({ ...items, [platform]: id }));
         const commissionId = platform === 'shopee' ? 'phiCoDinh' : 'phiHoaHong';
         const nextFees = currentFees.map((fee) => fee.id === commissionId ? { ...fee, value: category.feeRate, enabled: true } : fee);
-        if (platform === 'shopee') setShopeeFees(nextFees); else setTiktokFees(nextFees);
         const key = platform === 'shopee' ? 'shopee_fees_v3' : 'tiktok_fees_v3';
-        void window.electronAPI.appConfig.set(key, nextFees);
-        message.success(`Đã áp dụng phí hoa hồng ${category.feeRate}% cho ${category.name}`);
+        try {
+            const result = await window.electronAPI.appConfig.set(key, nextFees);
+            if (!result?.success) throw new Error(result?.error || 'Không thể áp dụng phí hoa hồng.');
+            setCategoryId((items) => ({ ...items, [platform]: id }));
+            if (platform === 'shopee') setShopeeFees(nextFees); else setTiktokFees(nextFees);
+            message.success(`Đã áp dụng phí hoa hồng ${category.feeRate}% cho ${category.name}`);
+        } catch (error) {
+            message.error(error instanceof Error ? error.message : 'Không thể áp dụng phí hoa hồng.');
+        }
     };
 
     const handleSaveEditedFee = async () => {

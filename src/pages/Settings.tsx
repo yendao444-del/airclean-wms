@@ -30,7 +30,7 @@ import {
 
   ReloadOutlined,
   DeleteOutlined,
-  CloudUploadOutlined,
+  ExperimentOutlined,
   FolderOpenOutlined,
   FileZipOutlined,
 
@@ -53,11 +53,11 @@ import {
 } from '@ant-design/icons';
 import dayjs from 'dayjs';
 import { useAuth } from '../contexts/AuthContext';
-import type { AttendanceDevice } from '../types/electron';
+import type { AttendanceApprovedNetwork, AttendanceDevice, AttendanceDeviceAccessLog } from '../types/electron';
 
 const SystemLogsPage = lazy(() => import('./SystemLogs'));
 const PermissionsPage = lazy(() => import('./Permissions'));
-const R2StorageLab = lazy(() => import('./R2StorageLab'));
+const TestingLab = lazy(() => import('./TestingLab'));
 
 const { Text } = Typography;
 
@@ -121,17 +121,35 @@ const Settings = () => {
   const [loadingAttendanceDevices, setLoadingAttendanceDevices] = useState(false);
   const [attendanceDeviceSearch, setAttendanceDeviceSearch] = useState('');
   const [attendanceDeviceStatus, setAttendanceDeviceStatus] = useState('all');
+  const [selectedAttendanceDevice, setSelectedAttendanceDevice] = useState<AttendanceDevice | null>(null);
+  const [attendanceDeviceHistory, setAttendanceDeviceHistory] = useState<AttendanceDeviceAccessLog[]>([]);
+  const [loadingAttendanceDeviceHistory, setLoadingAttendanceDeviceHistory] = useState(false);
+  const [networkConfigOpen, setNetworkConfigOpen] = useState(false);
+  const [attendanceNetworks, setAttendanceNetworks] = useState<AttendanceApprovedNetwork[]>([]);
+  const [loadingAttendanceNetworks, setLoadingAttendanceNetworks] = useState(false);
+  const [savingAttendanceNetworks, setSavingAttendanceNetworks] = useState(false);
+  const [activeSettingsTab, setActiveSettingsTab] = useState(isAdmin ? 'devices' : 'update');
 
-  // Load danh sách backups + version + update history khi component mount
+  // Load only the data needed by the currently visible tab. Several of these
+  // calls touch the database or filesystem and should not all start at once.
   useEffect(() => {
-    loadBackups();
-    loadCurrentVersion();
-    loadUpdateHistory();
-    loadSystemInfo();
-    if (isAdmin) loadAttendanceDevices();
-    // Auto check update
-    handleCheckUpdate(true);
+    setActiveSettingsTab(isAdmin ? 'devices' : 'update');
   }, [isAdmin]);
+
+  useEffect(() => {
+    if (activeSettingsTab === 'update') {
+      void loadBackups();
+      void loadCurrentVersion();
+      void loadUpdateHistory();
+      return;
+    }
+    if (activeSettingsTab === 'devices' && isAdmin) {
+      void loadSystemInfo();
+      void loadAttendanceDevices();
+      return;
+    }
+    if (activeSettingsTab === 'sysinfo') void loadSystemInfo();
+  }, [activeSettingsTab, isAdmin]);
 
   const loadAttendanceDevices = async () => {
     if (!isAdmin || typeof window.electronAPI?.attendanceDevices?.list !== 'function') return;
@@ -158,6 +176,63 @@ const Settings = () => {
       await loadAttendanceDevices();
     } catch (error: any) {
       message.error(error?.message || 'Không thể cập nhật thiết bị.');
+    }
+  };
+
+  const openAttendanceDeviceDetail = async (device: AttendanceDevice) => {
+    setSelectedAttendanceDevice(device);
+    setAttendanceDeviceHistory([]);
+    setLoadingAttendanceDeviceHistory(true);
+    try {
+      if (typeof window.electronAPI?.attendanceDevices?.history !== 'function') {
+        throw new Error('Electron đang chạy preload cũ. Hãy đóng ứng dụng và chạy lại START.bat một lần.');
+      }
+      const result = await window.electronAPI.attendanceDevices.history({ deviceId: device.deviceId, limit: 100 });
+      if (!result.success || !result.data) throw new Error(result.error || 'Không thể tải lịch sử truy cập.');
+      setAttendanceDeviceHistory(result.data.history || []);
+    } catch (error: any) {
+      message.error(error?.message || 'Không thể tải lịch sử truy cập.');
+    } finally {
+      setLoadingAttendanceDeviceHistory(false);
+    }
+  };
+
+  const openAttendanceNetworkConfig = async () => {
+    if (typeof window.electronAPI?.attendanceDevices?.getNetworkConfig !== 'function') {
+      message.warning('Electron đang chạy preload cũ. Hãy đóng ứng dụng và chạy lại START.bat một lần.');
+      return;
+    }
+    setNetworkConfigOpen(true);
+    setLoadingAttendanceNetworks(true);
+    try {
+      const result = await window.electronAPI.attendanceDevices.getNetworkConfig();
+      if (!result.success) throw new Error(result.error || 'Không thể tải cấu hình mạng.');
+      setAttendanceNetworks(result.data || []);
+    } catch (error: any) {
+      message.error(error?.message || 'Không thể tải cấu hình mạng.');
+    } finally {
+      setLoadingAttendanceNetworks(false);
+    }
+  };
+
+  const saveAttendanceNetworkConfig = async () => {
+    setSavingAttendanceNetworks(true);
+    try {
+      const normalized = attendanceNetworks.map((network) => ({
+        ...network,
+        name: network.name.trim(),
+        publicIps: network.publicIps.map((ip) => ip.trim()).filter(Boolean),
+      })).filter((network) => network.name && network.publicIps.length > 0);
+      const result = await window.electronAPI.attendanceDevices.saveNetworkConfig(normalized);
+      if (!result.success) throw new Error(result.error || 'Không thể lưu cấu hình mạng.');
+      setAttendanceNetworks(result.data || normalized);
+      setNetworkConfigOpen(false);
+      message.success('Đã cập nhật mạng chấm công được xác minh.');
+      await loadAttendanceDevices();
+    } catch (error: any) {
+      message.error(error?.message || 'Không thể lưu cấu hình mạng.');
+    } finally {
+      setSavingAttendanceNetworks(false);
     }
   };
 
@@ -845,78 +920,83 @@ const Settings = () => {
 
   const attendanceDeviceColumns = [
     {
-      title: 'Máy tính / Hostname',
+      title: 'Máy tính',
       key: 'machine',
-      width: 155,
+      width: 170,
       render: (_: unknown, device: AttendanceDevice) => (
         <div className="settings-device-machine">
           <DesktopOutlined />
-          <span><strong>{device.machineName}</strong><small>{device.machineName}</small></span>
+          <span><strong>{device.machineName}</strong><small><UserOutlined /> {device.requesterName || 'Chưa xác định'}</small></span>
         </div>
       ),
     },
     {
-      title: 'Device ID',
+      title: 'Nhận diện',
       key: 'device',
-      width: 120,
-      render: (_: unknown, device: AttendanceDevice) => <div><Text code>{device.deviceCode}</Text><small className="settings-device-subline">{device.macAddress || 'MAC tham chiếu'}</small></div>,
-    },
-    {
-      title: 'Người sử dụng',
-      key: 'requester',
-      width: 110,
-      render: (_: unknown, device: AttendanceDevice) => <span><UserOutlined /> {device.requesterName || 'Chưa xác định'}</span>,
-    },
-    {
-      title: 'IP & mạng',
-      key: 'network',
-      width: 110,
-      render: (_: unknown, device: AttendanceDevice) => <div><span>{device.publicIp || 'Chưa có IP'}</span><small className={device.networkVerified ? 'settings-device-network is-ok' : 'settings-device-network'}><WifiOutlined /> {device.networkVerified ? 'Trong mạng văn phòng' : (device.networkName || 'Chưa xác minh')}</small></div>,
-    },
-    {
-      title: 'Bằng chứng tin cậy',
-      key: 'trust',
       width: 145,
-      render: (_: unknown, device: AttendanceDevice) => <span className={device.keyProvider === 'windows-dpapi' ? 'settings-device-trust is-ok' : 'settings-device-trust'}>{device.keyProvider === 'windows-dpapi' ? <SafetyCertificateOutlined /> : <ExclamationCircleOutlined />} {device.tpmAvailable ? 'TPM hợp lệ' : 'Khóa Windows bảo vệ'}</span>,
+      render: (_: unknown, device: AttendanceDevice) => <div><Text code>{device.deviceCode}</Text><small className="settings-device-subline">MAC: {device.macAddress || 'Chưa có'}</small></div>,
     },
     {
-      title: 'Phiên bản',
-      dataIndex: 'appVersion',
-      key: 'version',
-      width: 64,
-      render: (value: string | null) => value ? `v${value}` : '—',
+      title: 'Mạng & bảo mật',
+      key: 'network',
+      width: 190,
+      render: (_: unknown, device: AttendanceDevice) => <div>
+        <span>{device.publicIp || 'Chưa có IP'}</span>
+        <small className={device.networkVerified ? 'settings-device-network is-ok' : 'settings-device-network'}><WifiOutlined /> {device.networkVerified ? (device.networkName || 'Mạng đã xác minh') : 'Chưa xác minh'}</small>
+        <small className={device.keyProvider === 'windows-dpapi' ? 'settings-device-trust is-ok' : 'settings-device-trust'}>{device.keyProvider === 'windows-dpapi' ? <SafetyCertificateOutlined /> : <ExclamationCircleOutlined />} {device.tpmAvailable ? 'TPM hợp lệ' : 'Khóa Windows bảo vệ'}</small>
+      </div>,
     },
     {
-      title: 'Lần đầu yêu cầu',
-      dataIndex: 'firstSeenAt',
-      key: 'firstSeen',
-      width: 96,
-      render: (value: string | Date) => dayjs(value).format('DD/MM/YYYY HH:mm'),
-    },
-    {
-      title: 'Lần cuối thấy',
-      dataIndex: 'lastSeenAt',
-      key: 'lastSeen',
-      width: 96,
-      render: (value: string | Date) => dayjs(value).format('DD/MM/YYYY HH:mm'),
+      title: 'Hoạt động gần nhất',
+      key: 'activity',
+      width: 140,
+      render: (_: unknown, device: AttendanceDevice) => <div><span>{dayjs(device.lastSeenAt).format('DD/MM/YYYY HH:mm')}</span><small className="settings-device-subline">Phiên bản {device.appVersion ? `v${device.appVersion}` : '—'}</small></div>,
     },
     {
       title: 'Trạng thái',
       key: 'status',
-      width: 108,
+      width: 110,
       render: (_: unknown, device: AttendanceDevice) => <div><Tag color={attendanceDeviceStatusColor(device.status)}>{attendanceDeviceStatusLabel(device.status)}</Tag><small className={Date.now() - new Date(device.lastSeenAt).getTime() < 15 * 60 * 1000 ? 'settings-device-online is-online' : 'settings-device-online'}>{Date.now() - new Date(device.lastSeenAt).getTime() < 15 * 60 * 1000 ? '● Online' : '● Offline'}</small></div>,
     },
     {
       title: 'Thao tác',
       key: 'actions',
-      width: 160,
+      width: 140,
       render: (_: unknown, device: AttendanceDevice) => <Space size={4} wrap>
-        <Button size="small" icon={<EyeOutlined />} onClick={() => Modal.info({ title: `Chi tiết ${device.machineName}`, content: <Descriptions column={1} size="small"><Descriptions.Item label="Device ID">{device.deviceId}</Descriptions.Item><Descriptions.Item label="Mã thiết bị">{device.deviceCode}</Descriptions.Item><Descriptions.Item label="Khóa bảo mật">{device.keyFingerprint || '—'}</Descriptions.Item><Descriptions.Item label="Nền tảng">{device.platform || '—'}</Descriptions.Item></Descriptions> })}>Xem chi tiết</Button>
+        <Button size="small" icon={<EyeOutlined />} onClick={() => openAttendanceDeviceDetail(device)}>Xem</Button>
         {device.status === 'unregistered' && <><Button size="small" type="primary" onClick={() => updateAttendanceDevice(device, 'approve')}>Cấp quyền</Button><Button size="small" danger onClick={() => updateAttendanceDevice(device, 'reject')}>Từ chối</Button></>}
-        {device.status === 'approved' && <Popconfirm title="Thu hồi quyền máy này?" onConfirm={() => updateAttendanceDevice(device, 'revoke')}><Button size="small" danger>Thu hồi</Button></Popconfirm>}
+        {device.status === 'approved' && <Popconfirm title="Thu hồi quyền máy này?" description="Trong giai đoạn hiện tại, máy vẫn có thể chấm công vì chế độ khóa chưa được bật." onConfirm={() => updateAttendanceDevice(device, 'revoke')}><Button size="small" danger>Thu hồi</Button></Popconfirm>}
       </Space>,
     },
   ];
+
+  const systemInfoPanel = (
+    <section className="settings-system-panel">
+      <div className="settings-system-panel-heading">
+        <div><InfoCircleOutlined /><span><strong>Thông tin hệ thống</strong><small>Trạng thái máy đang mở ứng dụng</small></span></div>
+        <Button size="small" icon={<SyncOutlined />} onClick={loadSystemInfo} loading={loadingSystemInfo}>Làm mới</Button>
+      </div>
+      {loadingSystemInfo && !systemInfo ? (
+        <div className="page-loading-center"><Spin /></div>
+      ) : systemInfo ? (
+        <>
+          <Row gutter={[10, 10]}>
+            <Col xs={24} md={8}><div className="settings-system-metric"><ApiOutlined /><span><small>Kết nối Database</small><Badge status={systemInfo.dbStatus === 'connected' ? 'success' : 'error'} text={systemInfo.dbStatus === 'connected' ? 'Đã kết nối' : 'Mất kết nối'} /></span></div></Col>
+            <Col xs={24} md={8}><div className="settings-system-metric"><DesktopOutlined /><span><small>Tên máy tính</small><strong>{systemInfo.machineName}</strong></span></div></Col>
+            <Col xs={24} md={8}><div className="settings-system-metric"><CheckCircleOutlined /><span><small>Môi trường</small><strong>{systemInfo.environment}</strong></span></div></Col>
+          </Row>
+          <div className="settings-system-technical">
+            <span>Ứng dụng <strong>v{systemInfo.appVersion}</strong></span>
+            <span>Hệ điều hành <strong>{systemInfo.platform}</strong></span>
+            <span>Electron <strong>{systemInfo.electronVersion}</strong></span>
+            <span>Node.js <strong>{systemInfo.nodeVersion}</strong></span>
+          </div>
+        </>
+      ) : (
+        <Alert message="Không thể tải thông tin hệ thống" description={sysInfoError || 'Lỗi không xác định'} type="error" showIcon />
+      )}
+    </section>
+  );
 
   // TAB ITEMS
   const tabItems = [
@@ -1056,101 +1136,30 @@ const Settings = () => {
         </div>
       ),
     },
-    {
+    ...(!isAdmin ? [{
       key: 'sysinfo',
       label: (
         <span>
           <InfoCircleOutlined /> Thông tin hệ thống
         </span>
       ),
-      children: (
-        <div>
-          {loadingSystemInfo ? (
-            <div className="page-loading-center"><Spin size="large" /></div>
-          ) : systemInfo ? (
-            <>
-              {/* DB + Machine + Env */}
-              <Row gutter={16} style={{ marginBottom: 24 }}>
-                <Col span={8}>
-                  <Card>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-                      <ApiOutlined style={{ fontSize: 32, color: systemInfo.dbStatus === 'connected' ? '#52c41a' : '#ff4d4f' }} />
-                      <div>
-                        <div style={{ fontSize: 12, color: '#8c8c8c' }}>Kết nối Database</div>
-                        <div style={{ marginTop: 4 }}>
-                          <Badge
-                            status={systemInfo.dbStatus === 'connected' ? 'success' : 'error'}
-                            text={
-                              <Text strong style={{ color: systemInfo.dbStatus === 'connected' ? '#52c41a' : '#ff4d4f' }}>
-                                {systemInfo.dbStatus === 'connected' ? 'Đã kết nối' : 'Mất kết nối'}
-                              </Text>
-                            }
-                          />
-                        </div>
-                      </div>
-                    </div>
-                  </Card>
-                </Col>
-                <Col span={8}>
-                  <Card>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-                      <DesktopOutlined style={{ fontSize: 32, color: '#1890ff' }} />
-                      <div>
-                        <div style={{ fontSize: 12, color: '#8c8c8c' }}>Tên máy tính</div>
-                        <Text strong style={{ fontSize: 16 }}>{systemInfo.machineName}</Text>
-                      </div>
-                    </div>
-                  </Card>
-                </Col>
-                <Col span={8}>
-                  <Card>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-                      <CheckCircleOutlined style={{ fontSize: 32, color: '#722ed1' }} />
-                      <div>
-                        <div style={{ fontSize: 12, color: '#8c8c8c' }}>Môi trường</div>
-                        <Text strong style={{ fontSize: 16, textTransform: 'capitalize' }}>{systemInfo.environment}</Text>
-                      </div>
-                    </div>
-                  </Card>
-                </Col>
-              </Row>
-
-              {/* Chi tiết kỹ thuật */}
-              <Card title="Chi tiết kỹ thuật" size="small">
-                <Descriptions column={2} size="small">
-                  <Descriptions.Item label="Phiên bản ứng dụng">
-                    <Text strong>v{systemInfo.appVersion}</Text>
-                  </Descriptions.Item>
-                  <Descriptions.Item label="Hệ điều hành">
-                    {systemInfo.platform}
-                  </Descriptions.Item>
-                  <Descriptions.Item label="Electron">
-                    {systemInfo.electronVersion}
-                  </Descriptions.Item>
-                  <Descriptions.Item label="Node.js">
-                    {systemInfo.nodeVersion}
-                  </Descriptions.Item>
-                </Descriptions>
-              </Card>
-
-              <div style={{ marginTop: 16, textAlign: 'right' }}>
-                <Button icon={<SyncOutlined />} onClick={loadSystemInfo} loading={loadingSystemInfo}>
-                  Làm mới
-                </Button>
-              </div>
-            </>
-          ) : (
-            <Alert message="Không thể tải thông tin hệ thống" description={sysInfoError || 'Lỗi không xác định'} type="error" showIcon />
-          )}
-        </div>
-      ),
-    },
+      children: systemInfoPanel,
+    }] : []),
     ...(isAdmin ? [{
       key: 'devices',
       label: <span><DesktopOutlined /> Quản trị thiết bị</span>,
       children: (
         <div className="settings-device-admin">
-          <div className="settings-device-phase"><InfoCircleOutlined /> Chế độ quan sát đang bật — máy tự xuất hiện khi mở ứng dụng; chưa khóa chấm công.</div>
+          {systemInfoPanel}
+          <div className="settings-device-mode-banner is-enabled">
+            <div className="settings-device-mode-icon"><SafetyCertificateOutlined /></div>
+            <div className="settings-device-mode-content">
+              <div className="settings-device-mode-title"><Tag color="success">ĐANG ÁP DỤNG</Tag><strong>Khóa chấm công theo thiết bị</strong></div>
+              <p>Chỉ máy có trạng thái “Đã cấp quyền” và xác minh đúng khóa bảo mật mới có thể chấm công.</p>
+              <div className="settings-device-mode-notes"><span><CheckCircleOutlined /> Máy chưa cấp quyền sẽ bị chặn ngay</span><span><SafetyCertificateOutlined /> Kiểm tra khóa Windows trước khi ghi nhận</span></div>
+            </div>
+            <div className="settings-device-mode-state"><small>Trạng thái bảo vệ</small><strong>ĐANG HOẠT ĐỘNG</strong></div>
+          </div>
           {!attendanceDeviceRegistryAvailable && <Alert className="settings-device-schema-warning" type="warning" showIcon message="Chưa kết nối được sổ đăng ký máy" description="Database hiện chưa có bảng quản trị thiết bị. Chấm công vẫn hoạt động bình thường; sau khi cập nhật schema, các máy sẽ tự xuất hiện tại đây." />}
           <Row gutter={[12, 12]} className="settings-device-stats">
             <Col xs={12} sm={6}><Card size="small"><Statistic title="Tổng thiết bị" value={attendanceDeviceCounts.total} prefix={<DesktopOutlined />} /></Card></Col>
@@ -1161,28 +1170,15 @@ const Settings = () => {
           <div className="settings-device-toolbar">
             <Input allowClear prefix={<SearchOutlined />} placeholder="Tìm theo máy, hostname, Device ID..." value={attendanceDeviceSearch} onChange={(event) => setAttendanceDeviceSearch(event.target.value)} />
             <Select value={attendanceDeviceStatus} onChange={setAttendanceDeviceStatus} options={[{ value: 'all', label: 'Tất cả trạng thái' }, { value: 'unregistered', label: 'Chưa cấp quyền' }, { value: 'approved', label: 'Đã cấp quyền' }, { value: 'revoked', label: 'Đã thu hồi' }, { value: 'rejected', label: 'Từ chối' }]} />
+            <Button icon={<WifiOutlined />} onClick={openAttendanceNetworkConfig}>Cấu hình mạng</Button>
             <Button icon={<SyncOutlined />} onClick={loadAttendanceDevices} loading={loadingAttendanceDevices}>Làm mới</Button>
           </div>
           <Card className="settings-device-table-card" bodyStyle={{ padding: 0 }}>
             <Table<AttendanceDevice> rowKey="id" size="small" loading={loadingAttendanceDevices} columns={attendanceDeviceColumns} dataSource={filteredAttendanceDevices} rowClassName={(device) => `settings-device-row settings-device-row-${device.status}`} pagination={{ pageSize: 8, showSizeChanger: false }} />
           </Card>
-          <Alert className="settings-device-note" type="info" showIcon icon={<SafetyCertificateOutlined />} message="Bằng chứng chính: khóa Windows/TPM và server challenge. IP chỉ xác minh vị trí; hostname và MAC chỉ dùng để đối chiếu." />
         </div>
       ),
     }] : []),
-    {
-      key: 'history',
-      label: (
-        <span>
-          <HistoryOutlined /> Lịch sử hệ thống
-        </span>
-      ),
-      children: (
-        <Suspense fallback={<div className="page-loading-center"><Spin size="large" /></div>}>
-          <SystemLogsPage />
-        </Suspense>
-      ),
-    },
     ...(isAdmin ? [{
       key: 'admin',
       label: (
@@ -1191,21 +1187,42 @@ const Settings = () => {
         </span>
       ),
       children: (
-        <Suspense fallback={<div className="page-loading-center"><Spin size="large" /></div>}>
-          <PermissionsPage />
-        </Suspense>
+        <Tabs
+          className="settings-admin-tabs"
+          defaultActiveKey="permissions"
+          items={[
+            {
+              key: 'permissions',
+              label: <span><TeamOutlined /> Phân quyền</span>,
+              children: (
+                <Suspense fallback={<div className="page-loading-center"><Spin size="large" /></div>}>
+                  <PermissionsPage />
+                </Suspense>
+              ),
+            },
+            {
+              key: 'system-history',
+              label: <span><HistoryOutlined /> Nhật ký hệ thống</span>,
+              children: (
+                <Suspense fallback={<div className="page-loading-center"><Spin size="large" /></div>}>
+                  <SystemLogsPage />
+                </Suspense>
+              ),
+            },
+          ]}
+        />
       ),
     }] : []),
     ...(isAdmin ? [{
-      key: 'r2-lab',
+      key: 'testing',
       label: (
         <span>
-          <CloudUploadOutlined /> R2 Test Lab
+          <ExperimentOutlined /> Kiểm thử
         </span>
       ),
       children: (
         <Suspense fallback={<div className="page-loading-center"><Spin size="large" /></div>}>
-          <R2StorageLab />
+          <TestingLab />
         </Suspense>
       ),
     }] : []),
@@ -1214,11 +1231,76 @@ const Settings = () => {
   return (
     <div className="settings-page-shell">
       <Tabs
-        defaultActiveKey={isAdmin ? 'devices' : 'update'}
+        activeKey={activeSettingsTab}
+        onChange={setActiveSettingsTab}
         items={tabItems}
         size="large"
         tabBarStyle={{ marginBottom: 24 }}
       />
+      <Modal
+        open={Boolean(selectedAttendanceDevice)}
+        title={`Chi tiết thiết bị${selectedAttendanceDevice ? ` — ${selectedAttendanceDevice.machineName}` : ''}`}
+        width={980}
+        footer={<Space><Button icon={<SyncOutlined />} loading={loadingAttendanceDeviceHistory} onClick={() => selectedAttendanceDevice && openAttendanceDeviceDetail(selectedAttendanceDevice)}>Làm mới lịch sử</Button><Button onClick={() => setSelectedAttendanceDevice(null)}>Đóng</Button></Space>}
+        onCancel={() => setSelectedAttendanceDevice(null)}
+      >
+        {selectedAttendanceDevice && <>
+          <Descriptions className="settings-device-detail-summary" bordered size="small" column={{ xs: 1, sm: 2 }}>
+            <Descriptions.Item label="Mã thiết bị">{selectedAttendanceDevice.deviceCode}</Descriptions.Item>
+            <Descriptions.Item label="Người sử dụng">{selectedAttendanceDevice.requesterName || 'Chưa xác định'}</Descriptions.Item>
+            <Descriptions.Item label="Device ID">{selectedAttendanceDevice.deviceId}</Descriptions.Item>
+            <Descriptions.Item label="MAC">{selectedAttendanceDevice.macAddress || '—'}</Descriptions.Item>
+            <Descriptions.Item label="IP Internet">{selectedAttendanceDevice.publicIp || '—'}</Descriptions.Item>
+            <Descriptions.Item label="Mạng"><Tag color={selectedAttendanceDevice.networkVerified ? 'success' : 'warning'}>{selectedAttendanceDevice.networkVerified ? (selectedAttendanceDevice.networkName || 'Mạng đã xác minh') : 'Chưa xác minh'}</Tag></Descriptions.Item>
+            <Descriptions.Item label="Nền tảng">{selectedAttendanceDevice.platform || '—'}</Descriptions.Item>
+            <Descriptions.Item label="Phiên bản">{selectedAttendanceDevice.appVersion ? `v${selectedAttendanceDevice.appVersion}` : '—'}</Descriptions.Item>
+            <Descriptions.Item label="Lần đầu thấy">{dayjs(selectedAttendanceDevice.firstSeenAt).format('DD/MM/YYYY HH:mm:ss')}</Descriptions.Item>
+            <Descriptions.Item label="Lần cuối thấy">{dayjs(selectedAttendanceDevice.lastSeenAt).format('DD/MM/YYYY HH:mm:ss')}</Descriptions.Item>
+          </Descriptions>
+          <div className="settings-device-history-heading"><HistoryOutlined /> Lịch sử truy cập gần nhất</div>
+          <Table<AttendanceDeviceAccessLog>
+            rowKey="id"
+            size="small"
+            loading={loadingAttendanceDeviceHistory}
+            dataSource={attendanceDeviceHistory}
+            pagination={{ pageSize: 8, showSizeChanger: false }}
+            locale={{ emptyText: 'Chưa phát sinh lịch sử truy cập trên thiết bị này' }}
+            columns={[
+              { title: 'Thời gian', dataIndex: 'occurredAt', render: (value) => dayjs(value).format('DD/MM/YYYY HH:mm:ss') },
+              { title: 'Tài khoản', dataIndex: 'userName', render: (value) => value || 'Chưa đăng nhập' },
+              { title: 'IP Internet', dataIndex: 'publicIp', render: (value) => value || '—' },
+              { title: 'Mạng', key: 'network', render: (_, log) => <Tag color={log.networkVerified ? 'success' : 'warning'}>{log.networkName || 'Chưa xác minh'}</Tag> },
+              { title: 'Phiên bản', dataIndex: 'appVersion', render: (value) => value ? `v${value}` : '—' },
+            ]}
+          />
+        </>}
+      </Modal>
+      <Modal
+        open={networkConfigOpen}
+        title="Mạng chấm công được xác minh"
+        width={760}
+        okText="Lưu cấu hình"
+        cancelText="Hủy"
+        confirmLoading={savingAttendanceNetworks}
+        onOk={saveAttendanceNetworkConfig}
+        onCancel={() => setNetworkConfigOpen(false)}
+      >
+        <Alert className="settings-network-config-note" type="info" showIcon message="Chỉ IP Internet khớp danh sách dưới đây mới được ghi là mạng đã xác minh." />
+        <Spin spinning={loadingAttendanceNetworks}>
+          <div className="settings-network-config-list">
+            {attendanceNetworks.map((network, index) => (
+              <div className="settings-network-config-row" key={network.id}>
+                <Input aria-label="Tên mạng" placeholder="Ví dụ: Mạng văn phòng" value={network.name} onChange={(event) => setAttendanceNetworks((items) => items.map((item, itemIndex) => itemIndex === index ? { ...item, name: event.target.value } : item))} />
+                <Input aria-label="IP Internet" placeholder="IP Internet, nhiều IP cách nhau bằng dấu phẩy" value={network.publicIps.join(', ')} onChange={(event) => setAttendanceNetworks((items) => items.map((item, itemIndex) => itemIndex === index ? { ...item, publicIps: event.target.value.split(',').map((ip) => ip.trim()) } : item))} />
+                <Select aria-label="Trạng thái mạng" value={network.enabled ? 'enabled' : 'disabled'} onChange={(value) => setAttendanceNetworks((items) => items.map((item, itemIndex) => itemIndex === index ? { ...item, enabled: value === 'enabled' } : item))} options={[{ value: 'enabled', label: 'Đang dùng' }, { value: 'disabled', label: 'Tạm tắt' }]} />
+                <Button danger icon={<DeleteOutlined />} aria-label="Xóa mạng" onClick={() => setAttendanceNetworks((items) => items.filter((_, itemIndex) => itemIndex !== index))} />
+              </div>
+            ))}
+            {!attendanceNetworks.length && !loadingAttendanceNetworks && <div className="settings-network-config-empty">Chưa có mạng nào được xác minh.</div>}
+          </div>
+          <Button onClick={() => setAttendanceNetworks((items) => [...items, { id: `network-${Date.now()}`, name: '', publicIps: [], enabled: true }])}>+ Thêm mạng</Button>
+        </Spin>
+      </Modal>
     </div>
   );
 };

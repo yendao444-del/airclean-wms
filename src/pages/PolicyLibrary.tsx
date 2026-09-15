@@ -55,6 +55,9 @@ interface PolicyConfig {
         skuLevels: Record<string, string>;
         customLevels: Array<{ key: string; label: string; unit: string }>;
         history: PackingVersion[];
+        saleDates?: string[];
+        saleMultiplier?: number;
+        saleEffectiveAt?: string;
         updatedAt?: string;
         updatedBy?: string;
     };
@@ -67,6 +70,8 @@ interface PolicyMechanisms {
         seasonal: number[];
         morningStart: string;
         afternoonStart: string;
+        officialAfternoonStart?: string;
+        seasonalAfternoonStart?: string;
     };
     attendanceReward: {
         enabled: boolean;
@@ -164,9 +169,14 @@ const defaultSnapshot: PolicySnapshot = {
 };
 
 const money = (value: number) => `${Math.round(Number(value || 0)).toLocaleString('vi-VN')}đ`;
-const shortDate = (value?: string) => value && !Number.isNaN(new Date(value).getTime())
-    ? new Intl.DateTimeFormat('vi-VN').format(new Date(value))
-    : 'Chưa cập nhật';
+const shortDate = (value?: string) => {
+    if (!value) return 'Chưa cập nhật';
+    if (/^\*-\d{2}$/.test(value)) return `${value.slice(2)} hàng tháng`;
+    if (/^\d{2}-\d{2}$/.test(value)) return value.split('-').reverse().join('/');
+    return !Number.isNaN(new Date(value).getTime())
+        ? new Intl.DateTimeFormat('vi-VN').format(new Date(value))
+        : 'Chưa cập nhật';
+};
 
 const normalizeConfig = (source?: Partial<PolicyConfig> | null): PolicyConfig => {
     const packing = source?.packingCommission || defaultConfig.packingCommission;
@@ -178,6 +188,9 @@ const normalizeConfig = (source?: Partial<PolicyConfig> | null): PolicyConfig =>
             skuLevels: packing.skuLevels || {},
             customLevels: Array.isArray(packing.customLevels) ? packing.customLevels : [],
             history: Array.isArray(packing.history) ? packing.history : [],
+            saleDates: Array.isArray(packing.saleDates) ? packing.saleDates : [],
+            saleMultiplier: Math.max(1, Number(packing.saleMultiplier || 1)),
+            saleEffectiveAt: packing.saleEffectiveAt,
             updatedAt: packing.updatedAt,
             updatedBy: packing.updatedBy,
         },
@@ -534,7 +547,7 @@ export default function PolicyLibrary() {
             formulaTitle="Cách tính hoa hồng"
             formula="Tổng hoa hồng = Σ (Số đơn vị thực tế × Đơn giá cấp độ)"
             formulaNote="Tính theo cấu hình có hiệu lực tại thời điểm hoàn tất đơn."
-            footerNote={`Kỳ lương trước ${shortDate(snapshot.legacyPackingCommission.endsAt)} giữ mức cũ ${money(snapshot.legacyPackingCommission.unitPrice)}/SKU.`}
+            footerNote={`${config.packingCommission.saleDates?.length ? `Ngày sale: ${config.packingCommission.saleDates.map(date => shortDate(date)).join(', ')} · tăng x${config.packingCommission.saleMultiplier || 1}. ` : ''}Kỳ lương trước ${shortDate(snapshot.legacyPackingCommission.endsAt)} giữ mức cũ ${money(snapshot.legacyPackingCommission.unitPrice)}/SKU.`}
         />;
 
         if (activePolicy === 'packingWeeklyReward') return <RewardLandingDetail
@@ -604,7 +617,7 @@ export default function PolicyLibrary() {
                         <span><CheckCircleFilled /> Cơ chế đang áp dụng</span>
                         <h2>Phạt đi làm muộn</h2>
                         <strong>Miễn phạt<br />{late.graceMinutes} phút đầu ca</strong>
-                        <p>Ca sáng bắt đầu <b>{late.morningStart}</b> · Ca chiều bắt đầu <b>{late.afternoonStart}</b></p>
+                        <p>Ca sáng <b>{late.morningStart}</b> · Ca chiều chính thức <b>{late.officialAfternoonStart || late.afternoonStart}</b> · Thời vụ <b>{late.seasonalAfternoonStart || '13:30'}</b></p>
                         <small>Hệ thống chỉ tính phạt sau thời gian miễn trừ.</small>
                     </div>
                     <div className="late-policy-hero__facts">

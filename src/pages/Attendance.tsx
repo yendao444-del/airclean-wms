@@ -1679,8 +1679,8 @@ function calculatePayroll(
                     .filter((leave) => leave.empId === emp.id && leave.exempt)
                     .map((leave) => `${leave.date}|${leave.session}`)
             );
-            let paidLeaveSessions = 0;
-            let unpaidLeaveSessions = 0;
+            let approvedLeaveSessions = 0;
+            let unapprovedLeaveSessions = 0;
             if (attendanceDeductionsReady) {
                 for (let day = 1; day <= daysInPayrollMonth; day++) {
                     const date = dayjs(`${yearNum}-${monthNum}-${day}`, 'YYYY-M-D');
@@ -1690,14 +1690,17 @@ function calculatePayroll(
                         const key = `${dateStr}|${session}`;
                         if (workedSessions.has(key)) return;
                         if (exemptSessions.has(key)) return;
-                        if (requestedSessions.has(key)) paidLeaveSessions++;
-                        else unpaidLeaveSessions++;
+                        if (requestedSessions.has(key)) approvedLeaveSessions++;
+                        else unapprovedLeaveSessions++;
                     });
                 }
             }
             const dailySalary = emp.baseSalary / STANDARD_WORK_DAYS;
-            leaveDeduction = Math.round((paidLeaveSessions * 0.5 * dailySalary) + (unpaidLeaveSessions * 0.5 * dailySalary * 2));
-            absentDays = (paidLeaveSessions + unpaidLeaveSessions) / 2;
+            const absentSessions = approvedLeaveSessions + unapprovedLeaveSessions;
+            // Mỗi ca là nửa ngày lương. Trước đây ca không phép bị nhân thêm 2,
+            // khiến nghỉ đủ một ngày bị khấu trừ thành hai ngày lương.
+            leaveDeduction = Math.round(absentSessions * 0.5 * dailySalary);
+            absentDays = absentSessions / 2;
             if (employmentEnd && employmentEnd.isValid() && employmentEnd.isBefore(payrollStart.add(daysInPayrollMonth), 'day')) {
                 let eligibleWorkDays = 0;
                 for (let day = 1; day <= daysInPayrollMonth; day++) {
@@ -4773,7 +4776,7 @@ export default function Attendance() {
         try {
             const api = (window as any).electronAPI;
             const response = api?.attendance?.getSalesBonusSummary
-                ? await api.attendance.getSalesBonusSummary({ from, to })
+                ? await api.attendance.getSalesBonusSummary({ from, to, force: Boolean(options?.force) })
                 : isAttendanceUiTest
                     ? {
                         success: true,
@@ -4826,9 +4829,9 @@ export default function Attendance() {
     }, [isAttendanceUiTest, overviewDateRange, salesBonusReadyKey, salesBonusSummary]);
 
     useEffect(() => {
-        if (!isDbLoaded || (activeTab !== 'overview' && activeTab !== 'bonuses')) return;
+        if (!isDbLoaded || !isBackgroundSyncComplete || (activeTab !== 'overview' && activeTab !== 'bonuses')) return;
         void loadSalesBonusSummary(overviewDateRange).catch(() => undefined);
-    }, [activeTab, isDbLoaded, loadSalesBonusSummary, overviewDateRange]);
+    }, [activeTab, isBackgroundSyncComplete, isDbLoaded, loadSalesBonusSummary, overviewDateRange]);
 
     const [packingOrderLogsData, setPackingOrderLogsData] = useState<PackingOrderLog[]>([]);
     const [packingRewardNow, setPackingRewardNow] = useState(() => dayjs());
@@ -4838,7 +4841,12 @@ export default function Attendance() {
     const packingOrderCacheRef = useRef<Map<string, PackingOrderLog[]>>(new Map());
     const packingRequestKeyRef = useRef('');
     const packingLoadCountRef = useRef(0);
-    const loadPackingPromiseRef = useRef<{ key: string; promise: Promise<PackingOrderLog[]> } | null>(null);
+    const loadPackingPromiseRef = useRef<{
+        key: string;
+        sinceMs: number;
+        untilMs: number;
+        promise: Promise<PackingOrderLog[]>;
+    } | null>(null);
     const [packingReadyKey, setPackingReadyKey] = useState('');
     const [packingLoadError, setPackingLoadError] = useState('');
     const [packingOrdersLoading, setPackingOrdersLoading] = useState(false);
@@ -4855,7 +4863,32 @@ export default function Attendance() {
         const comparisonRange = getPackingComparisonRange(requestedRange);
         const sinceVal = since || getPackingLoadStart(options?.includeComparison ? comparisonRange[0] : requestedRange[0]).toISOString();
         const untilVal = requestedRange[1].endOf('day').toISOString();
-        const requestKey = `${dayjs(sinceVal).startOf('day').valueOf()}-${dayjs(untilVal).endOf('day').valueOf()}`;
+        const requestStartMs = dayjs(sinceVal).startOf('day').valueOf();
+        const requestEndMs = dayjs(untilVal).endOf('day').valueOf();
+        const requestKey = `${requestStartMs}-${requestEndMs}`;
+        const filterRequestedRange = (rows: PackingOrderLog[]) => rows.filter(order => {
+            const timestamp = Date.parse(order.timestamp);
+            return Number.isFinite(timestamp) && timestamp >= requestStartMs && timestamp <= requestEndMs;
+        });
+        const commitPackingRows = (rows: PackingOrderLog[]) => {
+            const sorted = [...rows].sort((a, b) =>
+                (Date.parse(b.timestamp) || 0) - (Date.parse(a.timestamp) || 0),
+            );
+            packingOrderCacheRef.current.set(requestKey, sorted);
+            if (packingOrderCacheRef.current.size > 6) {
+                const oldestKey = packingOrderCacheRef.current.keys().next().value;
+                if (oldestKey) packingOrderCacheRef.current.delete(oldestKey);
+            }
+            if (packingRequestKeyRef.current === requestKey) {
+                packingOrderLogsRef.current = sorted;
+                startBackgroundTransition(() => {
+                    setPackingOrderLogsData(sorted);
+                    setPackingReadyKey(requestKey);
+                    setPackingLoadError('');
+                });
+            }
+            return sorted;
+        };
         // A stale background refresh must never replace the range the user is
         // currently viewing.
         if (options?.silent && packingRequestKeyRef.current !== requestKey) {
@@ -4870,6 +4903,22 @@ export default function Attendance() {
             } catch (error) {
                 if (options?.strict) throw error;
                 return packingOrderLogsRef.current;
+            }
+        }
+
+        // The overview normally requests the whole month before the user opens
+        // Đóng gói. Reuse that wider request for the weekly range instead of
+        // starting another expensive read of the same orders.
+        const widerRequest = loadPackingPromiseRef.current;
+        if (!options?.force
+            && widerRequest
+            && widerRequest.sinceMs <= requestStartMs
+            && widerRequest.untilMs >= requestEndMs) {
+            try {
+                const widerRows = await widerRequest.promise;
+                return commitPackingRows(filterRequestedRange(widerRows));
+            } catch (error) {
+                if (options?.strict) throw error;
             }
         }
 
@@ -4889,6 +4938,17 @@ export default function Attendance() {
                     void loadPackingOrders(since, { ...options, silent: true, force: true });
                 }, 0);
                 return cached;
+            }
+
+            for (const [cachedKey, cachedRows] of packingOrderCacheRef.current) {
+                const [cachedStartMs, cachedEndMs] = cachedKey.split('-').map(Number);
+                if (cachedStartMs <= requestStartMs && cachedEndMs >= requestEndMs) {
+                    const requestedRows = commitPackingRows(filterRequestedRange(cachedRows));
+                    window.setTimeout(() => {
+                        void loadPackingOrders(since, { ...options, silent: true, force: true });
+                    }, 0);
+                    return requestedRows;
+                }
             }
         }
 
@@ -4917,26 +4977,6 @@ export default function Attendance() {
                     p.then(r => { console.log(`[PACKING] ✅ ${label}:`, r?.data?.length || 0); return r; }),
                     new Promise((_, reject) => setTimeout(() => reject(`${label} TIMEOUT (${ms}ms)`), ms))
                 ]).catch(e => { console.warn(`[PACKING] ⚠️ ${label} failed:`, e); return { success: false, error: String(e) }; });
-
-            const commitPackingRows = (rows: PackingOrderLog[]) => {
-                const sorted = [...rows].sort((a, b) =>
-                    (Date.parse(b.timestamp) || 0) - (Date.parse(a.timestamp) || 0),
-                );
-                if (packingRequestKeyRef.current === requestKey) {
-                    packingOrderLogsRef.current = sorted;
-                    packingOrderCacheRef.current.set(requestKey, sorted);
-                    if (packingOrderCacheRef.current.size > 6) {
-                        const oldestKey = packingOrderCacheRef.current.keys().next().value;
-                        if (oldestKey) packingOrderCacheRef.current.delete(oldestKey);
-                    }
-                    startBackgroundTransition(() => {
-                        setPackingOrderLogsData(sorted);
-                        setPackingReadyKey(requestKey);
-                        setPackingLoadError('');
-                    });
-                }
-                return sorted;
-            };
 
             // Prefer the main-process read model: it parses JSON once, keeps a
             // revision-aware cache across tab remounts, and transfers only the
@@ -5090,7 +5130,12 @@ export default function Attendance() {
         }
         })();
 
-        loadPackingPromiseRef.current = { key: requestKey, promise: task };
+        loadPackingPromiseRef.current = {
+            key: requestKey,
+            sinceMs: requestStartMs,
+            untilMs: requestEndMs,
+            promise: task,
+        };
         if (!options?.silent) {
             packingLoadCountRef.current += 1;
             setPackingOrdersLoading(true);
@@ -5185,6 +5230,8 @@ export default function Attendance() {
     const [liveAttendanceLogs, setLiveAttendanceLogs] = useState<any[]>([]);
     const [overviewAttendanceLogs, setOverviewAttendanceLogs] = useState<any[]>([]);
     const [overviewAttendanceLogsKey, setOverviewAttendanceLogsKey] = useState('');
+    const [overviewAttendanceLoadError, setOverviewAttendanceLoadError] = useState('');
+    const overviewAttendanceRequestRef = useRef(0);
     const attendanceMatrixWrapRef = useRef<HTMLDivElement | null>(null);
 
     // === State cho đóng gói + lịch sử ===
@@ -5291,10 +5338,11 @@ export default function Attendance() {
         };
     }, [isDbLoaded, overviewDateRange, activeTab, fineSourcesRangeKey]);
 
-    // Overview tải tuần tự: hoàn tất nguồn phạt + danh mục trước, sau đó mới
-    // đọc hàng nghìn đơn đóng gói vào lúc renderer rảnh.
+    // Packing is independent from the auxiliary fine sources. Start it as soon
+    // as the primary attendance snapshot is ready so the overview does not sit
+    // in "Đang tổng hợp" while unrelated endpoints finish.
     useEffect(() => {
-        if (!isDbLoaded || activeTab !== 'overview' || !areFineSourcesReady || !packingCatalogReady) return;
+        if (!isDbLoaded || activeTab !== 'overview') return;
         let cancelled = false;
         let timeoutId: number | null = null;
         let idleId: number | null = null;
@@ -5314,7 +5362,7 @@ export default function Attendance() {
                 (window as any).cancelIdleCallback(idleId);
             }
         };
-    }, [activeTab, areFineSourcesReady, isDbLoaded, overviewDateRange, packingCatalogReady]);
+    }, [activeTab, isDbLoaded, overviewDateRange]);
 
     // Đóng gói dùng khoảng tuần riêng; không thay đổi kỳ tháng của các tab còn lại.
     useEffect(() => {
@@ -6218,31 +6266,65 @@ export default function Attendance() {
     // Tổng quát và Điểm danh đang dùng cùng kỳ, nên chỉ truy vấn log một lần.
     const fetchMonthLogs = async () => {
         const monthStr = `${selectedYear}-${String(selectedMonth).padStart(2, '0')}`;
-        try {
-            const api = (window as any).electronAPI;
-            if (!api?.attendance) {
-                const previewLogs = isAttendanceUiTest ? [
-                    { id: 1, userId: 1, date: `${monthStr}-07`, timestamp: `${monthStr}-07T07:56:00+07:00`, checkType: 'morning_in', confidence: .98 },
-                    { id: 2, userId: 1, date: `${monthStr}-07`, timestamp: `${monthStr}-07T13:33:00+07:00`, checkType: 'afternoon_in', confidence: .98 },
-                    { id: 3, userId: 1, date: `${monthStr}-08`, timestamp: `${monthStr}-08T08:04:00+07:00`, checkType: 'morning_in', confidence: .97 },
-                    { id: 4, userId: 2, date: `${monthStr}-07`, timestamp: `${monthStr}-07T08:03:00+07:00`, checkType: 'morning_in', confidence: .96 },
-                    { id: 5, userId: 2, date: `${monthStr}-07`, timestamp: `${monthStr}-07T13:34:00+07:00`, checkType: 'afternoon_in', confidence: .96 },
-                    { id: 6, userId: 2, date: `${monthStr}-08`, timestamp: `${monthStr}-08T08:12:00+07:00`, checkType: 'morning_in', confidence: .95 },
-                    { id: 7, userId: 2, date: `${monthStr}-08`, timestamp: `${monthStr}-08T13:34:00+07:00`, checkType: 'afternoon_in', confidence: .95 },
-                    { id: 8, userId: 3, date: `${monthStr}-09`, timestamp: `${monthStr}-09T08:03:00+07:00`, checkType: 'morning_in', confidence: .94 },
-                ] : [];
-                setLiveAttendanceLogs(previewLogs);
-                setOverviewAttendanceLogs(previewLogs);
-                setOverviewAttendanceLogsKey(monthStr);
-                return;
-            }
-            const res = await api.attendance.getLogs({ month: monthStr });
-            const logs = res?.success ? (res.data || []) : [];
-            setLiveAttendanceLogs(logs);
-            setOverviewAttendanceLogs(logs);
+        const requestId = ++overviewAttendanceRequestRef.current;
+        setOverviewAttendanceLoadError('');
+        const api = (window as any).electronAPI;
+        if (!api?.attendance) {
+            const previewLogs = isAttendanceUiTest ? [
+                { id: 1, userId: 1, date: `${monthStr}-07`, timestamp: `${monthStr}-07T07:56:00+07:00`, checkType: 'morning_in', confidence: .98 },
+                { id: 2, userId: 1, date: `${monthStr}-07`, timestamp: `${monthStr}-07T13:33:00+07:00`, checkType: 'afternoon_in', confidence: .98 },
+                { id: 3, userId: 1, date: `${monthStr}-08`, timestamp: `${monthStr}-08T08:04:00+07:00`, checkType: 'morning_in', confidence: .97 },
+                { id: 4, userId: 2, date: `${monthStr}-07`, timestamp: `${monthStr}-07T08:03:00+07:00`, checkType: 'morning_in', confidence: .96 },
+                { id: 5, userId: 2, date: `${monthStr}-07`, timestamp: `${monthStr}-07T13:34:00+07:00`, checkType: 'afternoon_in', confidence: .96 },
+                { id: 6, userId: 2, date: `${monthStr}-08`, timestamp: `${monthStr}-08T08:12:00+07:00`, checkType: 'morning_in', confidence: .95 },
+                { id: 7, userId: 2, date: `${monthStr}-08`, timestamp: `${monthStr}-08T13:34:00+07:00`, checkType: 'afternoon_in', confidence: .95 },
+                { id: 8, userId: 3, date: `${monthStr}-09`, timestamp: `${monthStr}-09T08:03:00+07:00`, checkType: 'morning_in', confidence: .94 },
+            ] : [];
+            setLiveAttendanceLogs(previewLogs);
+            setOverviewAttendanceLogs(previewLogs);
             setOverviewAttendanceLogsKey(monthStr);
-        } catch (err) {
-            console.error('Lỗi tải logs tháng:', err);
+            return;
+        }
+
+        let lastError = '';
+        for (let attempt = 0; attempt < 2; attempt += 1) {
+            try {
+                const res = await api.attendance.getLogs({ month: monthStr });
+                if (!res?.success || !Array.isArray(res.data)) {
+                    throw new Error(res?.error || 'Dữ liệu điểm danh trả về không hợp lệ.');
+                }
+                const monthStart = dayjs(`${monthStr}-01`).startOf('day');
+                const yesterday = dayjs().subtract(1, 'day').startOf('day');
+                const monthEnd = monthStart.endOf('month').startOf('day');
+                const elapsedEnd = yesterday.isBefore(monthEnd, 'day') ? yesterday : monthEnd;
+                let hasElapsedWorkday = false;
+                for (let cursor = monthStart; !cursor.isAfter(elapsedEnd, 'day'); cursor = cursor.add(1, 'day')) {
+                    if (cursor.day() !== 0 && !isPublicHoliday(cursor)) {
+                        hasElapsedWorkday = true;
+                        break;
+                    }
+                }
+                if (res.data.length === 0 && employees.length > 0 && hasElapsedWorkday) {
+                    throw new Error(`Không nhận được bản ghi điểm danh tháng ${monthStr}.`);
+                }
+                if (requestId !== overviewAttendanceRequestRef.current) return;
+                setLiveAttendanceLogs(res.data);
+                setOverviewAttendanceLogs(res.data);
+                setOverviewAttendanceLogsKey(monthStr);
+                setOverviewAttendanceLoadError('');
+                return;
+            } catch (err) {
+                lastError = err instanceof Error ? err.message : String(err);
+                if (attempt === 0) await new Promise(resolve => window.setTimeout(resolve, 300));
+            }
+        }
+
+        if (requestId === overviewAttendanceRequestRef.current) {
+            // Không đánh dấu "ready" với mảng rỗng khi IPC lỗi: việc đó từng
+            // khiến toàn bộ ngày đã qua bị hiểu nhầm là nghỉ không phép.
+            setOverviewAttendanceLogsKey('');
+            setOverviewAttendanceLoadError(lastError || 'Không tải được dữ liệu điểm danh.');
+            console.error('Lỗi tải logs tháng:', lastError);
         }
     };
 
@@ -7256,6 +7338,18 @@ const openConfigModal = () => {
     // TAB 1: TỔNG QUÁT
     // ============================================
     const renderOverview = () => {
+        if (!isCurrentPeriodLocked && overviewAttendanceLoadError) {
+            return (
+                <Alert
+                    type="error"
+                    showIcon
+                    message="Chưa tải được dữ liệu điểm danh"
+                    description="Hệ thống đã tạm dừng tính khấu trừ nghỉ để tránh hiển thị sai lương."
+                    action={<Button size="small" onClick={() => void fetchMonthLogs()}>Thử lại</Button>}
+                />
+            );
+        }
+
         // Nhân viên chỉ xem bảng lương cá nhân theo layout riêng; quản trị vẫn
         // dùng bảng tổng hợp nhiều nhân viên bên dưới.
         if (!isAdmin) {

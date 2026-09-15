@@ -24,10 +24,7 @@ import {
 import { EditOutlined, DeleteOutlined, SendOutlined, FormOutlined, FileExcelOutlined, ScanOutlined, MoreOutlined, DownloadOutlined, BarcodeOutlined, FolderOpenOutlined, SettingOutlined, SearchOutlined, UserOutlined } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
 import dayjs from 'dayjs';
-import customParseFormat from 'dayjs/plugin/customParseFormat';
 import './EcommerceExport.css';
-
-dayjs.extend(customParseFormat);
 
 const { Title, Text } = Typography;
 const { TextArea } = Input;
@@ -66,7 +63,13 @@ interface EcommerceExport {
     status: string;
     createdBy?: string;
     pickedBy?: string; // �x� Người �óng gói/pickup
+    trackingNumber?: string;
     orderPlacedAt?: string;
+    slaDeadlineAt?: string;
+    completedAt?: string;
+    mismatchAt?: string;
+    mismatchReason?: string;
+    lastSeenImportBatchId?: number;
     createdAt?: Date;
     updatedAt?: Date | string;
 }
@@ -97,29 +100,89 @@ function getRowValue(row: any, candidates: string[]): any {
     return matchedHeader ? row[matchedHeader] : undefined;
 }
 
-function parseMarketplaceOrderTime(value: any, XLSX: any): string | undefined {
+function parseMarketplaceNumber(value: any): number {
+    if (typeof value === 'number') return Number.isFinite(value) ? value : 0;
+    const parsed = Number(String(value || '').replace(/,/g, '').trim());
+    return Number.isFinite(parsed) ? parsed : 0;
+}
+
+type MarketplaceDateOrder = 'DMY' | 'MDY';
+
+function bangkokLocalPartsToIso(parts: {
+    year: number;
+    month: number;
+    day: number;
+    hour: number;
+    minute: number;
+    second: number;
+}): string | undefined {
+    const { year, month, day, hour, minute, second } = parts;
+    if (![year, month, day, hour, minute, second].every(Number.isInteger)) return undefined;
+    if (month < 1 || month > 12 || day < 1 || day > 31 || hour < 0 || hour > 23 || minute < 0 || minute > 59 || second < 0 || second > 59) {
+        return undefined;
+    }
+
+    const timestamp = Date.UTC(year, month - 1, day, hour, minute, second) - 7 * 60 * 60 * 1000;
+    const parsed = new Date(timestamp);
+    const localCheck = new Date(timestamp + 7 * 60 * 60 * 1000);
+    if (Number.isNaN(parsed.getTime())
+        || localCheck.getUTCFullYear() !== year
+        || localCheck.getUTCMonth() + 1 !== month
+        || localCheck.getUTCDate() !== day
+        || localCheck.getUTCHours() !== hour
+        || localCheck.getUTCMinutes() !== minute
+        || localCheck.getUTCSeconds() !== second) {
+        return undefined;
+    }
+    return parsed.toISOString();
+}
+
+function parseMarketplaceOrderTime(value: any, XLSX: any, dateOrder: MarketplaceDateOrder): string | undefined {
     if (value instanceof Date && !Number.isNaN(value.getTime())) return value.toISOString();
     if (typeof value === 'number') {
         const parsed = XLSX?.SSF?.parse_date_code?.(value);
         if (parsed) {
-            const date = dayjs(`${parsed.y}-${String(parsed.m).padStart(2, '0')}-${String(parsed.d).padStart(2, '0')} ${String(parsed.H || 0).padStart(2, '0')}:${String(parsed.M || 0).padStart(2, '0')}:${String(Math.floor(parsed.S || 0)).padStart(2, '0')}`, 'YYYY-MM-DD HH:mm:ss', true);
-            if (date.isValid()) return date.toISOString();
+            return bangkokLocalPartsToIso({
+                year: Number(parsed.y),
+                month: Number(parsed.m),
+                day: Number(parsed.d),
+                hour: Number(parsed.H || 0),
+                minute: Number(parsed.M || 0),
+                second: Math.floor(Number(parsed.S || 0)),
+            });
         }
     }
 
     const text = String(value || '').trim();
     if (!text) return undefined;
-    const formats = [
-        'DD/MM/YYYY HH:mm:ss', 'DD/MM/YYYY HH:mm', 'DD/MM/YYYY',
-        'YYYY-MM-DD HH:mm:ss', 'YYYY-MM-DD HH:mm', 'YYYY-MM-DD',
-        'M/D/YYYY H:mm:ss', 'M/D/YYYY H:mm', 'M/D/YYYY',
-    ];
-    for (const format of formats) {
-        const parsed = dayjs(text, format, true);
-        if (parsed.isValid()) return parsed.toISOString();
+
+    // Marketplace exports contain local Bangkok time without an offset. Parse
+    // those common formats explicitly so SLA does not depend on Windows timezone.
+    const explicitOffsetMatch = text.match(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})$/i);
+    if (explicitOffsetMatch) {
+        const parsed = new Date(text);
+        return Number.isNaN(parsed.getTime()) ? undefined : parsed.toISOString();
     }
-    const fallback = dayjs(text);
-    return fallback.isValid() ? fallback.toISOString() : undefined;
+
+    const localMatch = text.match(/^(\d{1,2})[\/-](\d{1,2})[\/-](\d{4})(?:[ T](\d{1,2}):(\d{2})(?::(\d{2}))?)?$/);
+    const isoLocalMatch = text.match(/^(\d{4})[\/-](\d{1,2})[\/-](\d{1,2})(?:[ T](\d{1,2}):(\d{2})(?::(\d{2}))?)?$/);
+    const parts = isoLocalMatch
+        ? { year: Number(isoLocalMatch[1]), month: Number(isoLocalMatch[2]), day: Number(isoLocalMatch[3]), hour: Number(isoLocalMatch[4] || 0), minute: Number(isoLocalMatch[5] || 0), second: Number(isoLocalMatch[6] || 0) }
+        : localMatch
+            ? (() => {
+                const first = Number(localMatch[1]);
+                const second = Number(localMatch[2]);
+                return {
+                    year: Number(localMatch[3]),
+                    month: dateOrder === 'MDY' ? first : second,
+                    day: dateOrder === 'MDY' ? second : first,
+                    hour: Number(localMatch[4] || 0),
+                    minute: Number(localMatch[5] || 0),
+                    second: Number(localMatch[6] || 0),
+                };
+            })()
+            : null;
+    return parts ? bangkokLocalPartsToIso(parts) : undefined;
 }
 
 function withImportTimeout<T>(promise: Promise<T>, timeoutMs: number, errorMessage: string): Promise<T> {
@@ -130,10 +193,64 @@ function withImportTimeout<T>(promise: Promise<T>, timeoutMs: number, errorMessa
     return Promise.race([promise, timeout]).finally(() => clearTimeout(timeoutId));
 }
 
+async function copyTextToClipboard(text: string): Promise<void> {
+    try {
+        if (navigator.clipboard?.writeText) {
+            await navigator.clipboard.writeText(text);
+            return;
+        }
+    } catch {
+        // Electron may reject Clipboard API access when the renderer has no focus.
+    }
+
+    const textarea = document.createElement('textarea');
+    textarea.value = text;
+    textarea.setAttribute('readonly', '');
+    textarea.style.position = 'fixed';
+    textarea.style.opacity = '0';
+    textarea.style.pointerEvents = 'none';
+    document.body.appendChild(textarea);
+    textarea.focus();
+    textarea.select();
+    try {
+        if (!document.execCommand('copy')) throw new Error('Fallback copy failed');
+    } finally {
+        textarea.remove();
+    }
+}
+
+function getWorksheetHeaders(worksheet: any, XLSX: any): string[] {
+    const rows = XLSX.utils.sheet_to_json(worksheet, { header: 1, defval: '' }) as any[][];
+    return (rows[0] || []).map((value: any) => String(value || '').trim()).filter(Boolean);
+}
+
+function detectMarketplaceFromWorksheet(worksheet: any, XLSX: any, firstRow: any): 'Shopee' | 'TikTok' | null {
+    const headers = getWorksheetHeaders(worksheet, XLSX);
+    const names = new Set([...Object.keys(firstRow || {}), ...headers]);
+    if (names.has('Order ID') || names.has('Cancelled Time') || names.has('Created Time')) return 'TikTok';
+    if (names.has('Mã đơn hàng') || names.has('Đơn Vị Vận Chuyển') || names.has('Đơn vị vận chuyển') || names.has('Ngày đặt hàng')) return 'Shopee';
+    return null;
+}
+
 const TIKTOK_ORDER_TIME_HEADERS = [
     'Created Time', 'Order Created Time', 'Order Creation Time', 'Order creation time',
     'Order Date', 'Order Created Date',
 ];
+
+/** Infer slash-date order from an unambiguous value in the export. */
+function inferTikTokDateOrder(rows: any[]): MarketplaceDateOrder {
+    for (const row of rows || []) {
+        const raw = getRowValue(row, TIKTOK_ORDER_TIME_HEADERS);
+        const match = String(raw || '').trim().match(/^(\d{1,2})[\/-](\d{1,2})[\/-]\d{4}/);
+        if (!match) continue;
+        const first = Number(match[1]);
+        const second = Number(match[2]);
+        if (first > 12 && second <= 12) return 'DMY';
+        if (second > 12 && first <= 12) return 'MDY';
+    }
+    // Keep the previous default for files whose dates are all ambiguous (01-12).
+    return 'MDY';
+}
 
 const SHOPEE_ORDER_TIME_HEADERS = [
     'Thời gian tạo đơn hàng', 'Ngày đặt hàng', 'Ngày tạo đơn hàng', 'Thời gian đặt hàng',
@@ -147,11 +264,41 @@ function getShopeeSkuHeader(worksheet: any, jsonData: any[]): string {
     const ref = 'T1';
     const fixedSkuCell = worksheet[ref];
     const fixedSkuHeader = fixedSkuCell ? (fixedSkuCell.v || fixedSkuCell.w || '') : '';
-    if (fixedSkuHeader && jsonData.length > 0 && fixedSkuHeader in (jsonData[0] as any)) {
-        return fixedSkuHeader;
-    }
+    // sheet_to_json omits blank cells, so the first data row may not contain
+    // column T even though the header is present and later rows have values.
+    if (fixedSkuHeader) return fixedSkuHeader;
 
     return '';
+}
+
+function isShopeeGiftOrPromotionLine(productName: any): boolean {
+    const normalized = normalizeHeaderText(productName);
+    return normalized.includes('qua chi tang khong ban')
+        || (normalized.includes('qua tang') && normalized.includes('khong ban'));
+}
+
+function hasUsableTracking(value: any): boolean {
+    const tracking = String(value || '').trim();
+    return Boolean(tracking) && !['n/a', '-', '—', 'null', 'undefined'].includes(tracking.toLowerCase());
+}
+
+function getUsableTracking(record: Partial<EcommerceExport>): string {
+    if (hasUsableTracking(record.trackingNumber)) return String(record.trackingNumber).trim();
+    const match = record.notes?.match(/Tracking: ([^|]+)/);
+    return match && hasUsableTracking(match[1]) ? match[1].trim() : '';
+}
+
+function getOrderCreatedAt(record: Partial<EcommerceExport>): string {
+    // Imported marketplace orders use the source-created timestamp. Manually
+    // created legacy rows fall back to their export date so the table is never blank.
+    return record.orderPlacedAt || record.ecommerceExportDate || '';
+}
+
+function calculateImportedOrderTotal(orderItems: any[]): number {
+    if (orderItems[0]?.customerName === 'TikTok') {
+        return Math.max(0, ...orderItems.map(entry => parseMarketplaceNumber(entry.totalAmount)));
+    }
+    return orderItems.reduce((sum, entry) => sum + parseMarketplaceNumber(entry.totalAmount), 0);
 }
 
 export default function EcommerceExportPage() {
@@ -164,7 +311,6 @@ export default function EcommerceExportPage() {
     const [loading, setLoading] = useState(false);
     const [saving, setSaving] = useState(false);
     const [hasMoreExports, setHasMoreExports] = useState(false);
-    const [offlinePending, setOfflinePending] = useState(0); // Số đơn chờ sync
     const [modalVisible, setModalVisible] = useState(false);
     const [methodModalVisible, setMethodModalVisible] = useState(false);
     const [editingEcommerceExport, setEditingEcommerceExport] = useState<EcommerceExport | null>(null);
@@ -176,6 +322,8 @@ export default function EcommerceExportPage() {
 
     // ✨ State cho chọn nhiều để xóa
     const [selectedRowKeys, setSelectedRowKeys] = useState<number[]>([]);
+    const [tablePage, setTablePage] = useState(1);
+    const [tablePageSize, setTablePageSize] = useState(10);
 
     // 📦 State cho quét mã vận đơn (inline - không dùng modal)
     const [scanStatus, setScanStatus] = useState<{
@@ -184,17 +332,23 @@ export default function EcommerceExportPage() {
     }>({ type: 'idle', message: 'Sẵn sàng quét mã...' });
     const [scanValue, setScanValue] = useState('');
     const scanInputRef = useRef<any>(null);
-    const tempPendingIdRef = useRef(-1);
+    const scannerBufferRef = useRef('');
+    const scannerStartedAtRef = useRef(0);
+    const scannerLastKeyAtRef = useRef(0);
+    const scannerMaxGapRef = useRef(0);
+    const scannerTargetRef = useRef<{ element: HTMLInputElement | HTMLTextAreaElement; value: string } | null>(null);
+    const handleScanRef = useRef<(code: string) => void>(() => undefined);
     const inFlightScanKeysRef = useRef<Set<string>>(new Set());
     const saveInFlightRef = useRef(false);
     // 🚀 In-memory mirror giống allOrders của tool gốc — không await DB mỗi lần quét
     const exportsRef = useRef<EcommerceExport[]>([]);
     // 🗺️ O(1) Tracking lookup Map — tracking → record ID (không dùng index vì index sẽ stale sau reload)
     const trackingMapRef = useRef<Map<string, number>>(new Map());
+    const ambiguousTrackingKeysRef = useRef<Set<string>>(new Set());
     // ⏱️ Debounced background sync — coalesce nhiều scan liên tiếp thành 1 DB reload
     const bgSyncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const requestIdRef = useRef(0);
-    const statusFilterRef = useRef<'all' | 'pending' | 'completed' | 'overdue' | 'cancelled' | 'no_data'>('pending');
+    const statusFilterRef = useRef<'all' | 'pending' | 'completed' | 'overdue' | 'mismatch' | 'cancelled'>('all');
     const searchKeywordRef = useRef('');
     // ⚡ Persistent JSON parse cache — parse 1 lần duy nhất mỗi record, giữ nguyên qua re-render
     const itemsCacheRef = useRef<Map<number, { raw: string; parsed: ExportItem[] }>>(new Map());
@@ -204,10 +358,12 @@ export default function EcommerceExportPage() {
     const alertBufRef = useRef<AudioBuffer | null>(null);
 
     // 🔍 State cho bộ lọc trạng thái
-    const [statusFilter, setStatusFilter] = useState<'all' | 'pending' | 'completed' | 'overdue' | 'cancelled' | 'no_data'>('pending');
+    const [statusFilter, setStatusFilter] = useState<'all' | 'pending' | 'completed' | 'overdue' | 'mismatch' | 'cancelled'>('all');
 
     // 🚫 Danh sách tracking ID scan nhưng không có trong data
     const [unmatchedScans, setUnmatchedScans] = useState<{ trackingId: string; scannedAt: string }[]>([]);
+    const [slaNow, setSlaNow] = useState(() => Date.now());
+    const [operationalCounts, setOperationalCounts] = useState({ total: 0, pending: 0, completed: 0, mismatch: 0, overdue: 0, cancelled: 0 });
     const unmatchedDateRef = useRef(dayjs().format('YYYY-MM-DD')); // Ngày hiện tại để auto-reset
 
 
@@ -271,7 +427,7 @@ export default function EcommerceExportPage() {
         const refreshOpenOrders = () => {
             if (
                 document.visibilityState === 'visible' &&
-                statusFilterRef.current === 'pending' &&
+                (statusFilterRef.current === 'pending' || statusFilterRef.current === 'all') &&
                 !searchKeywordRef.current.trim()
             ) {
                 loadEcommerceExports(true);
@@ -283,8 +439,10 @@ export default function EcommerceExportPage() {
         };
         document.addEventListener('visibilitychange', handleVisibilityChange);
 
-        // ⚡ Auto-reset danh sách lệch đơn khi sang ngày mới (check mỗi phút)
+        // Refresh SLA-derived tabs and reset the separate unknown-scan log.
         const dailyResetInterval = setInterval(() => {
+            setSlaNow(Date.now());
+            void loadOperationalCounts();
             const today = dayjs().format('YYYY-MM-DD');
             if (today !== unmatchedDateRef.current) {
                 unmatchedDateRef.current = today;
@@ -293,43 +451,9 @@ export default function EcommerceExportPage() {
             }
         }, 60000);
 
-        // ─── Offline Queue: kiểm tra pending khi mở trang ───────────────────
-        const checkOfflinePending = async () => {
-            try {
-                const res = await (window as any).electronAPI.offlineQueue.status();
-                if (res.success) setOfflinePending(res.pendingCount || 0);
-            } catch { }
-        };
-        checkOfflinePending();
-
-        // Auto-sync khi mạng khôi phục
-        const handleOnline = async () => {
-            const res = await (window as any).electronAPI.offlineQueue.status();
-            if (!res.success || res.pendingCount === 0) return;
-            message.loading({ content: `Đang đồng bộ ${res.pendingCount} đơn chờ...`, key: 'offlineSync', duration: 0 });
-            const syncRes = await (window as any).electronAPI.offlineQueue.sync();
-            if (syncRes.success) {
-                setOfflinePending(syncRes.remaining || 0);
-                if (syncRes.synced > 0) {
-                    message.success({ content: `Đã đồng bộ ${syncRes.synced} đơn thành công!`, key: 'offlineSync', duration: 3 });
-                    loadEcommerceExports(true);
-                }
-                if (syncRes.failed > 0) {
-                    const reason = syncRes.errors?.[0]?.error;
-                    message.warning({
-                        content: `${syncRes.failed} đơn chưa đồng bộ được${reason ? `: ${reason}` : ''}. Dữ liệu vẫn được giữ để xử lý lại.`,
-                        key: 'offlineSync',
-                        duration: 6,
-                    });
-                }
-            }
-        };
-        window.addEventListener('online', handleOnline);
-
         return () => {
             clearInterval(interval);
             clearInterval(dailyResetInterval);
-            window.removeEventListener('online', handleOnline);
             document.removeEventListener('visibilitychange', handleVisibilityChange);
             // 🧹 Cleanup debounced sync timer
             if (bgSyncTimerRef.current) clearTimeout(bgSyncTimerRef.current);
@@ -390,16 +514,24 @@ export default function EcommerceExportPage() {
     // 🔊 Play từ decoded buffer — zero delay, hỗ trợ overlap
     const playBuf = (buf: AudioBuffer | null) => {
         const ctx = audioCtxRef.current;
-        if (!ctx || !buf) return;
+        if (!ctx) return;
         try {
             const doPlay = () => {
                 const src = ctx.createBufferSource();
-                src.buffer = buf;
+                if (buf) {
+                    src.buffer = buf;
+                } else {
+                    // Keep scanner feedback instant even while WAV assets load.
+                    const fallback = ctx.createBuffer(1, Math.max(1, Math.floor(ctx.sampleRate * 0.045)), ctx.sampleRate);
+                    const samples = fallback.getChannelData(0);
+                    for (let i = 0; i < samples.length; i += 1) samples[i] = Math.sin((i / ctx.sampleRate) * Math.PI * 2 * 880) * (1 - i / samples.length);
+                    src.buffer = fallback;
+                }
                 src.connect(ctx.destination);
                 src.start(0);
             };
             if (ctx.state === 'suspended') {
-                ctx.resume().then(doPlay);
+                void ctx.resume().then(doPlay);
             } else {
                 doPlay();
             }
@@ -412,13 +544,19 @@ export default function EcommerceExportPage() {
     // Lưu tracking → record.id (KHÔNG phải index, vì index stale sau reload/import)
     const rebuildTrackingMap = useCallback((data: EcommerceExport[]) => {
         const map = new Map<string, number>();
+        const ambiguous = new Set<string>();
         for (const record of data) {
-            if (record.notes) {
-                const m = record.notes.match(/Tracking: ([^|]+)/);
-                if (m) map.set(m[1].trim(), record.id);
+            const tracking = getUsableTracking(record);
+            if (!tracking) continue;
+            if (map.has(tracking) || ambiguous.has(tracking)) {
+                map.delete(tracking);
+                ambiguous.add(tracking);
+            } else {
+                map.set(tracking, record.id);
             }
         }
         trackingMapRef.current = map;
+        ambiguousTrackingKeysRef.current = ambiguous;
     }, []);
 
     const getOrderKey = useCallback((record: Partial<EcommerceExport>) => {
@@ -426,46 +564,11 @@ export default function EcommerceExportPage() {
     }, []);
 
     const getTrackingKey = useCallback((record: Partial<EcommerceExport>) => {
-        const match = record.notes?.match(/Tracking: ([^|]+)/);
-        return match ? match[1].trim() : '';
+        return getUsableTracking(record);
     }, []);
 
     const normalizeDbExports = useCallback((records: EcommerceExport[]) => {
         return records;
-    }, []);
-
-    const mergeDbWithLocalPending = useCallback((dbRecords: EcommerceExport[], currentRecords: EcommerceExport[]) => {
-        const localPending = currentRecords.filter(r => r.status === 'pending');
-        const merged = [...localPending, ...dbRecords];
-        exportsRef.current = merged;
-        rebuildTrackingMap(merged);
-        setEcommerceExports(merged);
-    }, [rebuildTrackingMap]);
-
-    const loadCompletedOrderKeys = useCallback(async (keys: string[] = []) => {
-        // Chỉ load 365 ngày gần nhất — đủ để check trùng, tránh load toàn bộ DB
-        const uniqueKeys = [...new Set(keys.map(key => String(key || '').trim()).filter(Boolean))];
-        if (uniqueKeys.length === 0) return new Set<string>();
-
-        const existing = new Set<string>();
-        for (let i = 0; i < uniqueKeys.length; i += 1000) {
-            const chunk = uniqueKeys.slice(i, i + 1000);
-            const result = await withImportTimeout(
-                window.electronAPI.ecommerceExports.checkExistingKeys({
-                    orderNumbers: chunk,
-                    ecommerceExportCodes: chunk,
-                }),
-                20000,
-                'Kiểm tra đơn TMDT đã tồn tại quá lâu. Vui lòng thử lại.'
-            );
-            if (!result?.success) {
-                throw new Error(result?.error || 'Khong kiem tra duoc danh sach TMDT da ton tai.');
-            }
-            for (const key of result.data?.orderNumbers || []) existing.add(String(key).trim());
-            for (const key of result.data?.ecommerceExportCodes || []) existing.add(String(key).trim());
-        }
-
-        return existing;
     }, []);
 
     const normalizeFolderImportError = useCallback((error?: string) => {
@@ -479,50 +582,6 @@ export default function EcommerceExportPage() {
         }
         return text;
     }, []);
-
-    const appendPendingToLocalQueue = useCallback((records: EcommerceExport[], persistedCompletedKeys?: Set<string>) => {
-        const existingCompletedKeys = new Set(
-            exportsRef.current
-                .filter(r => r.status === 'completed')
-                .map(r => getOrderKey(r))
-                .filter(Boolean)
-        );
-        for (const key of persistedCompletedKeys || []) {
-            existingCompletedKeys.add(key);
-        }
-        const existingPendingKeys = new Set(
-            exportsRef.current
-                .filter(r => r.status === 'pending')
-                .map(r => getOrderKey(r))
-                .filter(Boolean)
-        );
-
-        const accepted: EcommerceExport[] = [];
-        let skipped = 0;
-
-        for (const record of records) {
-            const key = getOrderKey(record);
-            if (!key || existingCompletedKeys.has(key) || existingPendingKeys.has(key)) {
-                skipped++;
-                continue;
-            }
-            accepted.push({
-                ...record,
-                id: tempPendingIdRef.current--,
-                status: 'pending',
-            });
-            existingPendingKeys.add(key);
-        }
-
-        if (accepted.length > 0) {
-            const nextRecords = [...accepted, ...exportsRef.current];
-            exportsRef.current = nextRecords;
-            rebuildTrackingMap(nextRecords);
-            setEcommerceExports(nextRecords);
-        }
-
-        return { count: accepted.length, skipped };
-    }, [getOrderKey, rebuildTrackingMap]);
 
     const buildEcommerceExportFilters = (append = false) => {
         const keyword = searchKeywordRef.current.trim();
@@ -540,25 +599,72 @@ export default function EcommerceExportPage() {
         if (currentStatus === 'completed') {
             base.statusIn = ['completed'];
             base.limit = base.limit || 500;
-            base.since = dayjs().subtract(7, 'day').startOf('day').toISOString();
+            base.sinceField = 'completedAt';
+            base.since = dayjs().startOf('day').toISOString();
         } else if (currentStatus === 'cancelled') {
             base.statusIn = ['cancelled'];
             base.limit = base.limit || 500;
-            base.since = dayjs().subtract(30, 'day').startOf('day').toISOString();
+            delete base.until;
+        } else if (currentStatus === 'overdue') {
+            // Một tab "Đơn trễ" duy nhất: gồm đơn quá SLA và đơn không còn trong file mới.
+            base.statusIn = ['pending', 'mismatch'];
+            base.limit = base.limit || 500;
+            delete base.until;
         } else if (currentStatus === 'all') {
             base.limit = base.limit || 1000;
-            base.since = dayjs().subtract(7, 'day').startOf('day').toISOString();
         } else {
-            base.statusNotIn = ['completed', 'cancelled'];
+            base.statusIn = ['pending'];
             base.limit = base.limit || 1000;
-            base.since = dayjs().subtract(30, 'day').startOf('day').toISOString();
+            delete base.until;
         }
 
         return base;
     };
 
+    const loadOperationalCounts = async () => {
+        const loadedRecords = exportsRef.current;
+        const fallbackCounts = loadedRecords.reduce((counts, record) => {
+            counts.total += 1;
+            if (record.status === 'completed') counts.completed += 1;
+            else if (record.status === 'cancelled') counts.cancelled += 1;
+            else if (record.status === 'mismatch') counts.mismatch += 1;
+            else if (record.status === 'pending' && record.slaDeadlineAt && dayjs(record.slaDeadlineAt).isBefore(dayjs())) counts.overdue += 1;
+            else if (record.status === 'pending') counts.pending += 1;
+            return counts;
+        }, { total: 0, pending: 0, completed: 0, mismatch: 0, overdue: 0, cancelled: 0 });
+        try {
+            const getCounts = window.electronAPI.ecommerceExports.getOperationalCounts;
+            if (typeof getCounts !== 'function') {
+                setOperationalCounts(fallbackCounts);
+                return;
+            }
+            const result = await getCounts();
+            if (result.success && result.data) {
+                setOperationalCounts(result.data);
+                return;
+            }
+            console.error('Không tải được số lượng tab TMĐT:', result?.error);
+            setOperationalCounts(fallbackCounts);
+        } catch (error) {
+            console.error('Lỗi tải số lượng tab TMĐT:', error);
+            setOperationalCounts(fallbackCounts);
+        }
+    };
+
+    const confirmEmptySnapshot = (source: string): Promise<boolean> =>
+        new Promise(resolve => {
+            Modal.confirm({
+                title: `File ${source} không có đơn chờ lấy hàng`,
+                content: 'Nếu tiếp tục, mọi đơn đang chờ lấy hàng của sàn này nhưng không có trong file sẽ chuyển sang Đơn trễ và bị chặn pickup. Chỉ tiếp tục khi đây là snapshot rỗng chính xác.',
+                okText: 'Xác nhận snapshot rỗng',
+                okType: 'danger',
+                cancelText: 'Hủy',
+                onOk: () => resolve(true),
+                onCancel: () => resolve(false),
+            });
+        });
+
     const loadEcommerceExports = async (silent = false, append = false) => {
-        if (statusFilterRef.current === 'no_data') return;
         const myRequestId = ++requestIdRef.current;
         if (!silent) setLoading(true);
         try {
@@ -571,19 +677,14 @@ export default function EcommerceExportPage() {
                     if (existing?.status === 'completed' && item.status !== 'completed') return existing;
                     return item;
                 }));
-                const localPending = exportsRef.current.filter(r => r.id < 0);
-                const localKeys = new Set(localPending.map(r => getOrderKey(r)).filter(Boolean));
-                const mergedDb = localPending.length > 0
-                    ? normalizedDb.filter((r: any) => !localKeys.has(getOrderKey(r)))
-                    : normalizedDb;
-                const shouldKeepLocalPending = statusFilterRef.current === 'pending' && !searchKeywordRef.current.trim();
                 const nextRecords = append
                     ? [...exportsRef.current, ...normalizedDb]
-                    : (shouldKeepLocalPending ? [...localPending, ...mergedDb] : normalizedDb);
+                    : normalizedDb;
                 exportsRef.current = nextRecords;
                 rebuildTrackingMap(nextRecords);
                 setEcommerceExports(nextRecords);
                 setHasMoreExports(!!result.hasMore);
+                void loadOperationalCounts();
             }
         } catch (error) {
             if (myRequestId !== requestIdRef.current) return;
@@ -594,7 +695,7 @@ export default function EcommerceExportPage() {
     };
 
     useEffect(() => {
-        if (statusFilter === 'no_data') return;
+        setTablePage(1);
         const timer = setTimeout(() => {
             loadEcommerceExports(false);
         }, searchKeyword.trim() ? 400 : 0);
@@ -603,21 +704,17 @@ export default function EcommerceExportPage() {
 
     const purgeCancelledExports = async (silent = true) => {
         try {
-            const cancelledIds = ecommerceExports
-                .filter(r => r.status === 'cancelled')
-                .map(r => r.id);
-
-            if (cancelledIds.length === 0) {
+            if (operationalCounts.cancelled === 0) {
                 if (!silent) message.info('Không có đơn TMDT đã hủy để xóa.');
                 return 0;
             }
 
-            const result = await window.electronAPI.ecommerceExports.bulkDelete(cancelledIds);
+            const result = await window.electronAPI.ecommerceExports.deleteCancelled();
             if (!result?.success) {
-                if (!silent) message.error(result?.error || 'Không thỒ xóa �ơn TMDT �ã hủy');
+                if (!silent) message.error(result?.error || 'Không thể xóa đơn TMDT đã hủy');
                 return 0;
             }
-            const deletedCount = result.data || cancelledIds.length;
+            const deletedCount = result.data || 0;
             if (!silent && deletedCount > 0) {
                 message.success(`Đã xóa ${deletedCount} đơn TMDT đã hủy`);
             }
@@ -698,14 +795,6 @@ export default function EcommerceExportPage() {
             okType: 'danger',
             cancelText: 'Hủy',
             onOk: async () => {
-                if (ecommerceExportRecord.status === 'pending') {
-                    const nextRecords = ecommerceExports.filter(r => r.id !== ecommerceExportRecord.id);
-                    exportsRef.current = nextRecords;
-                    rebuildTrackingMap(nextRecords);
-                    setEcommerceExports(nextRecords);
-                    message.success('Đã xóa đơn chờ khỏi danh sách tạm!');
-                    return;
-                }
                 try {
                     const result = await window.electronAPI.ecommerceExports.delete(ecommerceExportRecord.id);
                     if (result.success) {
@@ -736,12 +825,17 @@ export default function EcommerceExportPage() {
         }
 
         const selectedecommerceExports = ecommerceExports.filter(r => selectedRowKeys.includes(r.id));
+        const completedSelected = selectedecommerceExports.filter(r => r.status === 'completed');
+        if (completedSelected.length > 0) {
+            message.error('Không thể xóa đơn đã gửi. Hãy bỏ chọn các đơn Đã gửi trước khi xóa.');
+            return;
+        }
 
         Modal.confirm({
             title: `Xác nhận xóa ${selectedRowKeys.length} phiếu xuất?`,
             content: (
                 <div>
-                    <p>Ban co chac muon xoa cac phieu xuat sau:</p>
+                    <p>Bạn có chắc muốn xóa các phiếu xuất sau?</p>
                     <div style={{ maxHeight: 200, overflowY: 'auto', padding: 8, background: '#f5f5f5', borderRadius: 4 }}>
                         {selectedecommerceExports.map(r => (
                             <div key={r.id} style={{ padding: '4px 0' }}>
@@ -751,9 +845,9 @@ export default function EcommerceExportPage() {
                     </div>
                 </div>
             ),
-            okText: 'Xoa tat ca',
+             okText: 'Xóa tất cả',
             okType: 'danger',
-            cancelText: 'Huy',
+             cancelText: 'Hủy',
             width: 600,
             onOk: async () => {
                 try {
@@ -779,13 +873,13 @@ export default function EcommerceExportPage() {
             return;
         }
 
-        if (statusCounts.cancelled === 0) {
+        if (operationalCounts.cancelled === 0) {
             message.info('Không có đơn TMDT đã hủy để xóa.');
             return;
         }
 
         Modal.confirm({
-            title: `Xóa ${statusCounts.cancelled} �ơn TMDT �ã hủy?`,
+            title: `Xóa ${operationalCounts.cancelled} đơn TMDT đã hủy?`,
             content: 'Thao tác này sẽ xóa toàn bộ đơn có trạng thái cancelled trong Xuất hàng TMDT. Không ảnh hưởng đơn đã hoàn thành ở mục Đơn hàng.',
             okText: 'Xóa đơn hủy',
             okType: 'danger',
@@ -794,7 +888,7 @@ export default function EcommerceExportPage() {
                 const deletedCount = await purgeCancelledExports(false);
                 if (deletedCount > 0) {
                     await loadEcommerceExports();
-                    if (statusFilter === 'cancelled') setStatusFilter('all');
+                    if (statusFilter === 'cancelled') setStatusFilter('pending');
                 }
             },
         });
@@ -816,7 +910,7 @@ export default function EcommerceExportPage() {
             const source = isTikTok ? 'TIKTOK' : 'SHOPEE';
 
             // Lấy tracking number
-            const trackingNumber = ecommerceExport.notes?.match(/Tracking: ([^|]+)/)?.[1]?.trim() || 'N/A';
+            const trackingNumber = getUsableTracking(ecommerceExport) || 'N/A';
 
             const counterResult = await window.electronAPI.ecommerceExports.nextTelegramOrderCounter();
             if (!counterResult?.success || !counterResult.data) {
@@ -865,8 +959,10 @@ Thời gian: ${currentTime}`;
 
     // 📦 Xử lý quét mã vận đơn — TỐI ƯU: O(1) lookup + surgical state update
     const handleScan = async (code: string) => {
+        const scanStartedAt = performance.now();
         const trimmed = code.trim();
         if (!trimmed) return;
+        console.info(`[PickupPerf] scan-received code=${trimmed} t=0ms`);
         if (inFlightScanKeysRef.current.has(trimmed)) {
             setScanStatus({
                 type: 'warning',
@@ -884,17 +980,17 @@ Thời gian: ${currentTime}`;
 
         // 🚀 O(1) lookup từ Map → fallback .find() nếu map bị lệch (dữ liệu cũ/trùng)
         let foundEcommerceExport: EcommerceExport | undefined;
-        const recordId = trackingMapRef.current.get(trimmed);
+        const ambiguousTracking = ambiguousTrackingKeysRef.current.has(trimmed);
+        const recordId = ambiguousTracking ? undefined : trackingMapRef.current.get(trimmed);
         if (recordId !== undefined) {
             foundEcommerceExport = exportsRef.current.find(r => r.id === recordId);
         }
         // 🔄 Fallback 1: Map miss → scan toàn bộ exportsRef theo Tracking hoặc Order ID
         if (!foundEcommerceExport) {
             foundEcommerceExport = exportsRef.current.find((r: any) => {
-                const trackingMatch = r.notes?.match(/Tracking: ([^|]+)/);
-                const tracking = trackingMatch ? trackingMatch[1].trim() : '';
+                const tracking = getUsableTracking(r);
                 const orderId = (r.orderNumber || r.ecommerceExportCode || '').trim();
-                return tracking === trimmed || orderId === trimmed;
+                return (!ambiguousTracking && tracking === trimmed) || orderId === trimmed;
             });
             if (foundEcommerceExport) {
                 console.warn(`⚠️ trackingMap miss nhưng .find() tìm thấy — rebuild map. Input: ${trimmed}`);
@@ -904,10 +1000,9 @@ Thời gian: ${currentTime}`;
         // 🔄 Fallback 2: exportsRef miss → scan state theo Tracking hoặc Order ID
         if (!foundEcommerceExport) {
             foundEcommerceExport = ecommerceExports.find((r: any) => {
-                const trackingMatch = r.notes?.match(/Tracking: ([^|]+)/);
-                const tracking = trackingMatch ? trackingMatch[1].trim() : '';
+                const tracking = getUsableTracking(r);
                 const orderId = (r.orderNumber || r.ecommerceExportCode || '').trim();
-                return tracking === trimmed || orderId === trimmed;
+                return (!ambiguousTracking && tracking === trimmed) || orderId === trimmed;
             });
             if (foundEcommerceExport) {
                 console.warn(`⚠️ exportsRef miss nhưng state tìm thấy — resync ref. Input: ${trimmed}`);
@@ -916,15 +1011,46 @@ Thời gian: ${currentTime}`;
             }
         }
 
-        if (foundEcommerceExport) {
-            // 🚨 CHẶN CỨNG: Đơn đã bị hủy trên sàn → KHÔNG CHO GIAO
-            if (foundEcommerceExport.status === 'cancelled') {
+        // Mỗi tab chỉ tải một phần trạng thái, nên tra cứu database khi cache
+        // không có mã để vẫn chặn đúng đơn trễ/hủy và nhận biết đơn đã pickup.
+        if (!foundEcommerceExport) {
+            // A bad code must never leave the operator waiting on a slow DB
+            // round-trip. Give lookup a short budget and fail audibly first.
+            let lookup: any;
+            try {
+                lookup = await withImportTimeout(
+                    window.electronAPI.ecommerceExports.findByScanCode(trimmed),
+                    700,
+                    'Tra cứu quá lâu',
+                );
+            } catch {
+                playAlert();
+                setScanStatus({ type: 'error', message: `KHÔNG TÌM THẤY - Mã quét: ${trimmed}` });
+                message.warning(`Không tìm thấy đơn hàng với mã: ${trimmed}`);
+                return;
+            }
+            if (!lookup.success) {
                 playAlert();
                 setScanStatus({
                     type: 'error',
-                    message: `ĐƠN ĐÃ HỦY - ${foundEcommerceExport.orderNumber || foundEcommerceExport.ecommerceExportCode}`,
+                    message: `LỖI DATABASE: ${lookup.error || 'Không tra cứu được mã quét'}`,
                 });
-                message.error(`Đơn đã bị hủy trên sàn, không được giao: ${foundEcommerceExport.orderNumber || foundEcommerceExport.ecommerceExportCode}`);
+                message.error(lookup.error || 'Không tra cứu được mã quét trên hệ thống.');
+                return;
+            }
+            foundEcommerceExport = lookup.data || undefined;
+        }
+
+        if (foundEcommerceExport) {
+            console.info(`[PickupPerf] lookup-done code=${trimmed} ms=${Math.round(performance.now() - scanStartedAt)}`);
+            // 🚨 CHẶN CỨNG: Đơn đã bị hủy trên sàn → KHÔNG CHO GIAO
+            if (foundEcommerceExport.status === 'mismatch' || foundEcommerceExport.status === 'cancelled') {
+                playAlert();
+                setScanStatus({
+                    type: 'error',
+                message: `FAIL - ${foundEcommerceExport.status === 'cancelled' ? 'ĐƠN HỦY' : 'ĐƠN TRỄ'} - ${foundEcommerceExport.orderNumber || foundEcommerceExport.ecommerceExportCode}`,
+                });
+                message.error(`${foundEcommerceExport.status === 'cancelled' ? 'ĐƠN HỦY' : 'ĐƠN TRỄ'} - phải giữ lại để kiểm tra: ${foundEcommerceExport.orderNumber || foundEcommerceExport.ecommerceExportCode}`);
             } else if (foundEcommerceExport.status === 'completed') {
                 // ⚠️ Đơn hàng đã được bàn giao DVVC rồi
                 playAlert();
@@ -934,10 +1060,20 @@ Thời gian: ${currentTime}`;
                 });
                 message.warning(`Đơn ${foundEcommerceExport.orderNumber || foundEcommerceExport.ecommerceExportCode} đã gửi rồi!`);
             } else {
+                const currentTracking = getTrackingKey(foundEcommerceExport);
+                if (!hasUsableTracking(currentTracking)) {
+                    playAlert();
+                    setScanStatus({
+                        type: 'error',
+                        message: `CHƯA CÓ MÃ VẬN ĐƠN - ${foundEcommerceExport.orderNumber || foundEcommerceExport.ecommerceExportCode}`,
+                    });
+                    message.error('Đơn chưa có mã vận đơn, chưa thể xác nhận pickup.');
+                    return;
+                }
                 // ✅ Đơn hàng chưa pickup → Cập nhật thành "Đã bàn giao DVVC" + TRỪ Tá»'N KHO
                 const targetId = foundEcommerceExport.id;
                 const orderKey = getOrderKey(foundEcommerceExport);
-                const trackingKey = getTrackingKey(foundEcommerceExport);
+                const trackingKey = currentTracking;
                 const requestKeys = [trimmed, orderKey, trackingKey].filter(Boolean);
                 for (const key of requestKeys) {
                     inFlightScanKeysRef.current.add(key);
@@ -951,12 +1087,14 @@ Thời gian: ${currentTime}`;
                     pickedBy: pickerName
                 };
 
-                // 🔊 PHÁT ÂM THANH NGAY để không bị delay
-                playSuccess();
                 setScanStatus({
-                    type: 'success',
-                    message: `SẼ CẬP NHẬT - ${foundEcommerceExport.orderNumber || foundEcommerceExport.ecommerceExportCode}`,
+                    type: 'warning',
+                    message: `ĐANG CẬP NHẬT HỆ THỐNG - ${foundEcommerceExport.orderNumber || foundEcommerceExport.ecommerceExportCode}`,
                 });
+                // Match the old local pickup behavior: once the code has been
+                // validated, acknowledge it immediately before the DB commit.
+                playSuccess();
+                console.info(`[PickupPerf] success-sound code=${trimmed} validatedMs=${Math.round(performance.now() - scanStartedAt)}`);
 
                 // 🚀 Cập nhật ref ngay lập tức để scan tiếp không bị stale
 
@@ -964,12 +1102,15 @@ Thời gian: ${currentTime}`;
                 // React sẽ chỉ re-render đúng row thay đổi (shallow compare từng item)
 
                 // Sau đó mới chạy async operations (không block UI)
-                (async () => {
+                await (async () => {
                     try {
                         let savedRecord: any = null;
                         const createRes = targetId < 0
                             ? await window.electronAPI.ecommerceExports.create(completedPayload)
-                            : await window.electronAPI.ecommerceExports.update(foundEcommerceExport.id, completedPayload);
+                            : await window.electronAPI.ecommerceExports.completePickup(foundEcommerceExport.id, {
+                                updatedAt: foundEcommerceExport.updatedAt,
+                                pickedBy: pickerName || undefined,
+                            });
                         const createResAny = createRes as any;
                         const updateRes = createRes as any;
                         const updateResAny = createResAny;
@@ -1010,35 +1151,28 @@ Thời gian: ${currentTime}`;
                             return;
                         }
 
-                        if (updateResAny.queued) {
-                            setOfflinePending(updateResAny.pendingCount || 0);
-                            setScanStatus({
-                                type: 'success',
-                                message: `PENDING SYNC - ${foundEcommerceExport.orderNumber || foundEcommerceExport.ecommerceExportCode}`
-                            });
-                            message.warning(`Mất mạng - đơn ${foundEcommerceExport.orderNumber || foundEcommerceExport.ecommerceExportCode} đã lưu tạm.`);
-                            return;
-                        }
-
                         savedRecord = createRes.data || createResAny?.data || completedPayload;
                         const normalizedSaved = savedRecord.ecommerceExportDate
                             ? { ...savedRecord, ecommerceExportDate: typeof savedRecord.ecommerceExportDate === 'string' ? savedRecord.ecommerceExportDate : dayjs(savedRecord.ecommerceExportDate).toISOString() }
                             : completedPayload;
-                        const nextRecords = [
-                            ...exportsRef.current.filter(r => r.id !== targetId),
-                            normalizedSaved,
-                        ];
+                        const nextRecords = exportsRef.current.filter(r => r.id !== targetId);
+                        if (statusFilterRef.current === 'completed' || statusFilterRef.current === 'all') {
+                            nextRecords.push(normalizedSaved);
+                        }
                         exportsRef.current = nextRecords;
                         rebuildTrackingMap(nextRecords);
                         setEcommerceExports(nextRecords);
 
                         console.log(`Updated status to completed for order #${foundEcommerceExport.id}`);
+                        console.info(`[PickupPerf] db-complete code=${trimmed} totalMs=${Math.round(performance.now() - scanStartedAt)}`);
                         setScanStatus({
                             type: 'success',
                             message: `THÀNH CÔNG - ${foundEcommerceExport.orderNumber || foundEcommerceExport.ecommerceExportCode}`
                         });
                         message.success(`Đơn ${foundEcommerceExport.orderNumber || foundEcommerceExport.ecommerceExportCode} gửi hàng thành công ✓`);
-                        await sendTelegramNotification(normalizedSaved);
+                        // Telegram is auxiliary; never hold the scanner lane on
+                        // network latency or rate limits.
+                        void sendTelegramNotification(normalizedSaved);
                         scheduleBgSync();
                     } catch (error) {
                         console.error('Error updating stock/status:', error);
@@ -1114,25 +1248,22 @@ Thời gian: ${currentTime}`;
                     // Nếu không tìm thấy bằng keyword, hỏi người dùng hoặc lấy cột đầu tiên có vẻ chứa tracking
                     if (!trackingKey) {
                         trackingKey = Object.keys(firstRow)[0]; // Fallback lấy cột đầu tiên
-                        message.info(`Khong tim thay cot Tracking ID, dang dung cot: [${trackingKey}]`);
+                        message.info(`Không tìm thấy cột mã vận đơn chuẩn, đang dùng cột: [${trackingKey}]`);
                     }
 
                     const trackings = [...new Set(json.map(row => String(row[trackingKey] || '').trim()).filter(Boolean))];
 
                     if (trackings.length === 0) {
-                        message.error('Khong tim thay du lieu Tracking ID trong file!');
+                        message.error('Không tìm thấy dữ liệu mã vận đơn trong file!');
                         return;
                     }
 
-                    message.loading({ content: `Dang xu ly ${trackings.length} ma van don...`, key: 'bulkScan' });
+                    message.loading({ content: `Đang xử lý ${trackings.length} mã vận đơn...`, key: 'bulkScan' });
 
                     let successCount = 0;
                     let errorCount = 0;
 
                     for (const tracking of trackings) {
-                        // Chúng ta chạy tuần tự để Backend không bị Rate Limit / Race Condition trên SQLite/Supabase
-                        await new Promise(r => setTimeout(r, 100)); // Delay nhỏ để tránh spam API
-
                         // Fake input ref value to avoid rewriting handleScan
                         if (scanInputRef.current?.input) scanInputRef.current.input.value = tracking;
 
@@ -1140,11 +1271,11 @@ Thời gian: ${currentTime}`;
                         await handleScan(tracking);
                     }
 
-                    message.success({ content: `Da xu ly xong file Excel (${trackings.length} ma).`, key: 'bulkScan', duration: 4 });
+                    message.success({ content: `Đã xử lý xong file Excel (${trackings.length} mã).`, key: 'bulkScan', duration: 4 });
 
                 } catch (error) {
                     console.error('Scan Excel Error:', error);
-                    message.error({ content: 'Loi doc file Excel!', key: 'bulkScan' });
+                    message.error({ content: 'Lỗi đọc file Excel!', key: 'bulkScan' });
                 }
             };
             if (file.name.toLowerCase().endsWith('.csv')) {
@@ -1197,14 +1328,18 @@ Thời gian: ${currentTime}`;
                 return {
                     'STT': index + 1,
                     'Nguồn đơn hàng': ecommerceExport.customerName,
-                    'Order ID': ecommerceExport.orderNumber || ecommerceExport.ecommerceExportCode,
-                    'Tracking ID': tracking,
+                    'Mã đơn hàng': ecommerceExport.orderNumber || ecommerceExport.ecommerceExportCode,
+                    'Mã vận đơn': tracking,
                     'Số SKU': items.length,
                     'Lý do hoàn': ecommerceExport.ecommerceExportReason,
-                    'Ngày hoàn': dayjs(ecommerceExport.ecommerceExportDate).format('DD/MM/YYYY'),
-                    'Shipping Provider': shipping,
+                    'Thời gian tạo đơn hàng': dayjs(getOrderCreatedAt(ecommerceExport)).format('DD/MM/YYYY HH:mm'),
+                    'Đơn vị vận chuyển': shipping,
                     'Tổng tiền': ecommerceExport.totalAmount,
-                    'Trạng thái': ecommerceExport.status === 'completed' ? 'Hoàn thành' : 'Đang xử lý',
+                    'Trạng thái': ecommerceExport.status === 'completed'
+                        ? 'Đã gửi'
+                        : ecommerceExport.status === 'mismatch'
+                            ? 'Đơn trễ'
+                            : 'Chờ lấy hàng',
                     'Ghi chú': ecommerceExport.notes,
                 };
             });
@@ -1230,7 +1365,7 @@ Thời gian: ${currentTime}`;
             ];
 
             // Tạo tên file với timestamp
-            const filterLabel = filterStatus === 'all' ? 'TatCa' : filterStatus === 'completed' ? 'DaHoan' : 'DangXuLy';
+            const filterLabel = filterStatus === 'all' ? 'TatCa' : filterStatus === 'completed' ? 'DaGui' : 'ChoLayHang';
             const fileName = `XuatHangTMDT_${filterLabel}_${dayjs().format('YYYYMMDD_HHmmss')}.xlsx`;
 
             // Xuất file
@@ -1278,7 +1413,7 @@ Thời gian: ${currentTime}`;
             let oldStatus = '';
 
             if (values.status === 'pending') {
-                message.error('Khong duoc tao pending thu cong. Pending chi duoc nap tu file Excel.');
+                message.error('Không được tạo đơn chờ lấy hàng thủ công. Trạng thái này chỉ được nạp từ file Excel.');
                 return;
             }
 
@@ -1335,22 +1470,22 @@ Thời gian: ${currentTime}`;
             if (editingEcommerceExport) {
                 const saveResult = await (window as any).electronAPI.ecommerceExports.update(editingEcommerceExport.id, updatedEcommerceExports.find((r: any) => r.id === editingEcommerceExport.id));
                 if (!saveResult?.success) {
-                    message.error(saveResult?.error || 'Loi cap nhat don!');
+                    message.error(saveResult?.error || 'Lỗi cập nhật đơn!');
                     return;
                 }
             } else {
                 const newRecord = updatedEcommerceExports[0];
                 const saveResult = await (window as any).electronAPI.ecommerceExports.create(newRecord);
                 if (!saveResult?.success) {
-                    message.error(saveResult?.error || 'Loi tao don moi!');
+                    message.error(saveResult?.error || 'Lỗi tạo đơn mới!');
                     return;
                 }
             }
             loadEcommerceExports();
 
             const successMsg = editingEcommerceExport
-                ? '�S& Đã cập nhật phiếu xuất!' + (shouldUpdateStock ? ' + Trừ t�n kho!' : '')
-                : '�S& Đã tạo phiếu xuất m�:i!' + (shouldUpdateStock ? ' + Trừ t�n kho!' : '');
+                ? 'Đã cập nhật phiếu xuất!' + (shouldUpdateStock ? ' + Đã trừ tồn kho!' : '')
+                : 'Đã tạo phiếu xuất mới!' + (shouldUpdateStock ? ' + Đã trừ tồn kho!' : '');
 
             message.success(successMsg);
             setModalVisible(false);
@@ -1365,6 +1500,79 @@ Thời gian: ${currentTime}`;
             setSaving(false);
         }
     };
+
+    // Hardware scanners emit a fast key sequence followed by Enter. Capture
+    // that sequence at tab level so a stray click cannot redirect it into a
+    // search/filter field. Human typing is left untouched by the timing gate.
+    handleScanRef.current = handleScan;
+    useEffect(() => {
+        const onScannerKeyDown = (event: KeyboardEvent) => {
+            if (event.defaultPrevented || event.ctrlKey || event.altKey || event.metaKey) return;
+            const target = event.target as HTMLElement | null;
+            if (target?.closest('.ecommerce-scan-input-wrap')) return;
+            const now = performance.now();
+            if (event.key === 'Enter') {
+                const code = scannerBufferRef.current.trim();
+                const duration = scannerStartedAtRef.current ? now - scannerStartedAtRef.current : Infinity;
+                const averageGap = code.length > 1 ? duration / (code.length - 1) : Infinity;
+                const looksLikeScanner = code.length >= 6 && averageGap <= 90 && scannerMaxGapRef.current <= 120;
+                const capturedTarget = scannerTargetRef.current;
+                scannerBufferRef.current = '';
+                scannerStartedAtRef.current = 0;
+                scannerLastKeyAtRef.current = 0;
+                scannerMaxGapRef.current = 0;
+                scannerTargetRef.current = null;
+                if (looksLikeScanner) {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    if (capturedTarget?.element.isConnected) {
+                        const prototype = capturedTarget.element instanceof HTMLTextAreaElement
+                            ? HTMLTextAreaElement.prototype
+                            : HTMLInputElement.prototype;
+                        Object.getOwnPropertyDescriptor(prototype, 'value')?.set?.call(capturedTarget.element, capturedTarget.value);
+                        capturedTarget.element.dispatchEvent(new Event('input', { bubbles: true }));
+                    }
+                    void handleScanRef.current(code);
+                }
+                return;
+            }
+            if (event.key.length !== 1) return;
+            const gap = scannerLastKeyAtRef.current ? now - scannerLastKeyAtRef.current : 0;
+            if (!scannerLastKeyAtRef.current || gap > 120) {
+                scannerBufferRef.current = '';
+                scannerStartedAtRef.current = now;
+                scannerMaxGapRef.current = 0;
+                scannerTargetRef.current = target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement
+                    ? { element: target, value: target.value }
+                    : null;
+            } else {
+                scannerMaxGapRef.current = Math.max(scannerMaxGapRef.current, gap);
+            }
+            scannerLastKeyAtRef.current = now;
+            scannerBufferRef.current = `${scannerBufferRef.current}${event.key}`.slice(-120);
+        };
+        const resetScannerBuffer = (event?: PointerEvent) => {
+            scannerBufferRef.current = '';
+            scannerStartedAtRef.current = 0;
+            scannerLastKeyAtRef.current = 0;
+            scannerMaxGapRef.current = 0;
+            scannerTargetRef.current = null;
+            const target = event?.target as HTMLElement | null;
+            const keepsOwnFocus = target?.closest(
+                '.ecommerce-scan-input-wrap, input, textarea, [contenteditable="true"], .ant-select-selector, .ant-picker, .ant-modal, .ant-drawer',
+            );
+            if (keepsOwnFocus) return;
+            // Keep the scanner ready without moving the viewport when the
+            // click was on pagination or another control lower on the page.
+            window.setTimeout(() => scanInputRef.current?.focus?.({ preventScroll: true }), 0);
+        };
+        window.addEventListener('keydown', onScannerKeyDown, true);
+        window.addEventListener('pointerdown', resetScannerBuffer, true);
+        return () => {
+            window.removeEventListener('keydown', onScannerKeyDown, true);
+            window.removeEventListener('pointerdown', resetScannerBuffer, true);
+        };
+    }, []);
 
     // Add item to ecommerceExport
     const handleAddItem = () => {
@@ -1422,7 +1630,6 @@ Thời gian: ${currentTime}`;
 
         reader.onload = async (e) => {
             try {
-                const persistedCompletedKeys = new Set<string>();
                 const data = e.target?.result;
                 const isCSV = file.name.toLowerCase().endsWith('.csv');
                 const XLSX = await import('xlsx');
@@ -1435,21 +1642,20 @@ Thời gian: ${currentTime}`;
 
                 // 🔍 Phát hiện nguồn dữ liệu (TikTok vs Shopee)
                 const firstRow: any = jsonData[0] || {};
-                const isTikTok = 'Order ID' in firstRow || 'Cancelled Time' in firstRow;
-                const isShopee = !!(
-                    getRowValue(firstRow, ['Mã đơn hàng']) !== undefined ||
-                    getRowValue(firstRow, ['Đơn Vị Vận Chuyển', 'Đơn vị vận chuyển']) !== undefined
-                );
+                const detectedSource = detectMarketplaceFromWorksheet(worksheet, XLSX, firstRow);
+                const isTikTok = detectedSource === 'TikTok';
+                const isShopee = detectedSource === 'Shopee';
 
                 console.log('🔍 Detected source:', { isTikTok, isShopee });
 
                 if (!isTikTok && !isShopee) {
-                    message.error('File Excel khong dung dinh dang TikTok hoac Shopee!');
+                    message.error('File Excel không đúng định dạng TikTok hoặc Shopee!');
                     return;
                 }
 
                 // Group by Order ID to combine items from same order
                 const orderMap = new Map<string, any[]>();
+                const invalidOrders: string[] = [];
 
                 // Shopee: column T is the only source of truth for SKU.
                 const shopeeSkuHeader = isShopee ? getShopeeSkuHeader(worksheet, jsonData) : '';
@@ -1462,6 +1668,7 @@ Thời gian: ${currentTime}`;
                 if (isTikTok) {
                     // ===== XỬ LÝ TIKTOK =====
                     console.log('📱 Processing TikTok data...');
+                    const tikTokDateOrder = inferTikTokDateOrder(jsonData);
                     // Debug: log keys của row đầu tiên
                     if (jsonData[0]) {
                         const firstRow = jsonData[0] as any;
@@ -1475,12 +1682,13 @@ Thời gian: ${currentTime}`;
                         const productName = row['Product Name'] || '';
                         const variation = row['Variation'] || '';
                         const sku = row['Seller SKU'] || '';
-                        const quantity = parseInt(row['Quantity'] || row['Quantity of return'] || row['Quantity of Return'] || '1');
+                        const quantity = parseMarketplaceNumber(row['Quantity'] || row['Quantity of return'] || row['Quantity of Return'] || 1);
                         const cancelledTime = row['Cancelled Time'] || row['Cancelled time'] || '';
-                        const orderPlacedAt = parseMarketplaceOrderTime(getRowValue(row, TIKTOK_ORDER_TIME_HEADERS), XLSX);
+                        const orderPlacedAt = parseMarketplaceOrderTime(getRowValue(row, TIKTOK_ORDER_TIME_HEADERS), XLSX, tikTokDateOrder);
                         const shippingProvider = row['Shipping Provider Name'] || '';
                         const trackingId = row['Tracking ID'] || '';
-                        const orderAmount = parseFloat(row['Order Amount'] || '0');
+                        const orderAmount = parseMarketplaceNumber(row['Order Amount']);
+                        const skuSubtotal = parseMarketplaceNumber(row['SKU Subtotal After Discount'] || row['SKU Subtotal Before Discount']);
 
                         // 🚫 Skip TikTok description row
                         if (orderId.includes('Platform unique') || trackingId.includes("order's tracking")) {
@@ -1489,13 +1697,7 @@ Thời gian: ${currentTime}`;
                         }
 
                         if (!orderId || !productName) {
-                            console.warn('⚠️ Skip row: missing Order ID or Product Name', row);
-                            return;
-                        }
-
-                        // 🚫 Skip nếu thiếu Tracking ID (file không đúng cấu trúc)
-                        if (!trackingId) {
-                            console.warn('⚠️ Skip row: missing Tracking ID', row);
+                            if (orderId) invalidOrders.push(`${orderId}: thiếu tên sản phẩm`);
                             return;
                         }
 
@@ -1506,8 +1708,8 @@ Thời gian: ${currentTime}`;
                             color: variation || undefined,
                             variantSku: sku,
                             quantity: quantity,
-                            unitPrice: orderAmount / quantity || 0,
-                            total: orderAmount || 0,
+                            unitPrice: quantity > 0 ? skuSubtotal / quantity : 0,
+                            total: skuSubtotal,
                         };
 
                         // Group by order
@@ -1539,9 +1741,9 @@ Thời gian: ${currentTime}`;
                         const productName = getRowValue(row, ['Tên sản phẩm', 'Tên Sản Phẩm']) || '';
                         const variation = getRowValue(row, ['Tên phân loại hàng', 'Phân loại hàng']) || '';
                         const sku = row[shopeeSkuHeader] || '';
-                        const quantity = parseInt(getRowValue(row, ['Số lượng', 'Quantity', 'Qty']) || '1');
+                        const quantity = parseMarketplaceNumber(getRowValue(row, ['Số lượng', 'Quantity', 'Qty']) || 1);
                         const cancelledTime = getRowValue(row, ['Ngày gửi hàng', 'Ngày gửi hàng']) || '';
-                        const orderPlacedAt = parseMarketplaceOrderTime(getRowValue(row, SHOPEE_ORDER_TIME_HEADERS), XLSX);
+                        const orderPlacedAt = parseMarketplaceOrderTime(getRowValue(row, SHOPEE_ORDER_TIME_HEADERS), XLSX, 'DMY');
                         const shippingProvider = getRowValue(row, ['Đơn Vị Vận Chuyển', 'Đơn vị vận chuyển']) || '';
                         const trackingId = getRowValue(row, ['Mã vận đơn', 'Mã vận chuyển', 'Số vận đơn']) || '';
                         const ecommerceExportReason = getRowValue(row, ['Trạng Thái Đơn Hàng', 'Trạng thái đơn hàng']) || 'Hủy đơn Shopee';
@@ -1554,15 +1756,14 @@ Thời gian: ${currentTime}`;
                             'Thành tiền',
                             'Tổng cộng'
                         ]) ?? 0;
-                        const totalAmount = typeof rawAmount === 'number' ? rawAmount : parseFloat(String(rawAmount).replace(/,/g, '')) || 0;
+                        const totalAmount = parseMarketplaceNumber(rawAmount);
                         const unitPrice = quantity > 0 ? totalAmount / quantity : totalAmount;
 
+                        // Shopee exports may contain gift/promotion rows without SKU.
+                        if (isShopeeGiftOrPromotionLine(productName)) return;
+
                         if (!orderId || !productName) {
-                            console.warn('⚠️ Skip row: missing Mã đơn hàng or Tên sản phẩm', row);
-                            return;
-                        }
-                        if (!sku) {
-                            console.warn('⚠️ Skip Shopee row: missing column T SKU', row);
+                            if (orderId) invalidOrders.push(`${orderId}: thiếu tên sản phẩm`);
                             return;
                         }
 
@@ -1595,24 +1796,24 @@ Thời gian: ${currentTime}`;
                     });
                 }
 
-                console.log('📦 Grouped orders:', orderMap);
-
-                const persistedKeys = await loadCompletedOrderKeys(Array.from(orderMap.keys()));
-                for (const key of persistedKeys) {
-                    persistedCompletedKeys.add(key);
+                // Validate at order level: metadata can be present on another line of the same order.
+                const missingSkuLabel = isTikTok ? 'Seller SKU' : 'SKU ở cột T';
+                const missingTimeLabel = isTikTok ? 'Created Time (cột Y)' : 'Ngày đặt hàng (cột C)';
+                orderMap.forEach((orderItems, orderId) => {
+                    const validItems = orderItems.filter((entry: any) => String(entry.item?.variantSku || '').trim());
+                    if (validItems.length === 0) invalidOrders.push(`${orderId}: thiếu ${missingSkuLabel}`);
+                    if (!orderItems.some((entry: any) => entry.orderPlacedAt)) invalidOrders.push(`${orderId}: thiếu ${missingTimeLabel}`);
+                    if (validItems.some((entry: any) => !Number.isInteger(entry.item?.quantity) || entry.item.quantity <= 0)) {
+                        invalidOrders.push(`${orderId}: số lượng sản phẩm không hợp lệ`);
+                    }
+                });
+                if (jsonData.length > 0 && orderMap.size === 0 && invalidOrders.length === 0) {
+                    throw new Error('File không có đơn hàng hợp lệ sau khi bỏ qua các dòng quà tặng/mô tả.');
                 }
 
-                const placedTimes = Array.from(orderMap, ([orderNumber, rows]) => ({
-                    orderNumber,
-                    orderPlacedAt: rows[0]?.orderPlacedAt,
-                })).filter(record => record.orderPlacedAt && persistedKeys.has(record.orderNumber));
-                if (placedTimes.length > 0) {
-                    const syncResult = await withImportTimeout(
-                        window.electronAPI.ecommerceExports.syncOrderPlacedAt(placedTimes as Array<{ orderNumber: string; orderPlacedAt: string }>),
-                        20000,
-                        'Đồng bộ thời gian đơn hàng quá lâu. Vui lòng thử lại.'
-                    );
-                    if (!syncResult.success) throw new Error(syncResult.error || 'Không lưu được thời gian phát sinh đơn hàng.');
+                console.log('📦 Grouped orders:', orderMap);
+                if (invalidOrders.length > 0) {
+                    throw new Error(`Không đối soát vì file có dữ liệu thiếu: ${invalidOrders.slice(0, 3).join('; ')}${invalidOrders.length > 3 ? ` và ${invalidOrders.length - 3} dòng khác` : ''}.`);
                 }
 
                 const newEcommerceExports: EcommerceExport[] = [];
@@ -1621,21 +1822,19 @@ Thời gian: ${currentTime}`;
 
                 // Create EcommerceExport for each order
                 orderMap.forEach((orderItems, orderId) => {
-                    // ⛔ KIỂM TRA TRACKING ID - Bỏ qua nếu không có Tracking ID
-                    const firstItem = orderItems[0];
-                    const trackingId = firstItem.trackingId?.toString().trim();
-                    const hasTracking = trackingId && trackingId !== 'N/A' && trackingId !== '—' && trackingId !== '';
-
-                    if (!hasTracking) {
-                        console.warn(`⚠️ Skip order ${orderId} - No Tracking ID`);
+                    const validOrderItems = orderItems.filter((entry: any) => String(entry.item?.variantSku || '').trim());
+                    const firstItem = validOrderItems[0] || orderItems[0];
+                    const trackingData = orderItems.find((entry: any) => hasUsableTracking(entry.trackingId)) || firstItem;
+                    const placedTimeData = orderItems.find((entry: any) => entry.orderPlacedAt) || firstItem;
+                    const trackingId = trackingData?.trackingId?.toString().trim() || '';
+                    if (validOrderItems.length === 0 || !placedTimeData?.orderPlacedAt) {
                         skippedCount++;
-                        return; // Skip order không có Tracking ID
+                        return;
                     }
 
-
-                    const items = orderItems.map(oi => oi.item);
+                    const items = validOrderItems.map((oi: any) => oi.item);
                     const totalQuantity = items.reduce((sum, item) => sum + item.quantity, 0);
-                    const totalAmount = orderItems.reduce((sum, oi) => sum + (oi.totalAmount || 0), 0);
+                    const totalAmount = calculateImportedOrderTotal(validOrderItems);
                     const skuCount = items.length; // Số lượng SKU khác nhau
 
                     const newEcommerceExport: EcommerceExport = {
@@ -1645,9 +1844,10 @@ Thời gian: ${currentTime}`;
                         orderNumber: orderId,
                         ecommerceExportReason: firstItem.ecommerceExportReason,
                         ecommerceExportDate: firstItem.cancelledTime ? dayjs(firstItem.cancelledTime).format('YYYY-MM-DD') : dayjs().format('YYYY-MM-DD'),
-                        orderPlacedAt: firstItem.orderPlacedAt,
+                        orderPlacedAt: placedTimeData.orderPlacedAt,
+                        trackingNumber: trackingId,
                         status: 'pending', // ✅ MẶC ĐỊNH: CHƯA HOÀN
-                        notes: `Shipping: ${firstItem.shippingProvider || 'N/A'} | Tracking: ${firstItem.trackingId || 'N/A'} | ${skuCount} SKU | SL: ${totalQuantity}`,
+                        notes: `Shipping: ${trackingData?.shippingProvider || 'N/A'} | Tracking: ${trackingId || 'N/A'} | ${skuCount} SKU | SL: ${totalQuantity}`,
                         items: JSON.stringify(items),
                         totalAmount: totalAmount,
                         createdAt: new Date(),
@@ -1657,18 +1857,36 @@ Thời gian: ${currentTime}`;
                 });
 
                 let importedCount = 0;
-                if (newEcommerceExports.length > 0) {
+                let skippedCompletedCount = 0;
+                let mismatchCount = 0;
+                if (detectedSource) {
                     try {
-                        const bulkResult = appendPendingToLocalQueue(newEcommerceExports, persistedCompletedKeys);
-                        importedCount = bulkResult.count ?? newEcommerceExports.length;
-                        const skippedInDb = bulkResult.skipped ?? 0;
-                        if (skippedInDb > 0) {
-                            skippedCount += skippedInDb;
+                        const source = isTikTok ? 'TikTok' : 'Shopee';
+                        const allowEmptySnapshot = newEcommerceExports.length === 0
+                            ? await confirmEmptySnapshot(source)
+                            : false;
+                        if (newEcommerceExports.length === 0 && !allowEmptySnapshot) {
+                            message.info('Đã hủy import snapshot rỗng.');
+                            return;
                         }
-                        console.log(`Loaded ${importedCount} pending records into local queue`);
+                        const importResult = await withImportTimeout(
+                            window.electronAPI.ecommerceExports.importSnapshot({
+                                platform: source,
+                                fileNames: [file.name],
+                                records: newEcommerceExports,
+                                allowEmptySnapshot,
+                            }),
+                            120000,
+                            'Đồng bộ dữ liệu lên Supabase quá lâu. Vui lòng thử lại.',
+                        );
+                        if (!importResult.success) throw new Error(importResult.error || 'Không lưu được dữ liệu lên Supabase.');
+                        importedCount = (importResult.data?.created || 0) + (importResult.data?.updated || 0);
+                        skippedCompletedCount = importResult.data?.skippedCompleted || 0;
+                        await loadEcommerceExports(true);
+                        mismatchCount = importResult.data?.mismatch || 0;
                     } catch (dbError) {
-                        console.error('Error loading pending records into local queue:', dbError);
-                        message.error('Lỗi khi nạp dữ liệu vào danh sách pending tạm!');
+                        console.error('Error importing online snapshot:', dbError);
+                        message.error(dbError instanceof Error ? dbError.message : 'Lỗi lưu dữ liệu lên Supabase!');
                         return;
                     }
                 }
@@ -1676,20 +1894,27 @@ Thời gian: ${currentTime}`;
                 const source = isTikTok ? 'TikTok' : 'Shopee';
 
                 if (importedCount === 0) {
-                    if (skippedCount > 0) {
+                    if (mismatchCount > 0) {
+                        message.warning(`Snapshot mới không còn đơn chờ lấy hàng; ${mismatchCount} đơn đã chuyển sang Đơn trễ.`);
+                    } else if (skippedCompletedCount > 0) {
+                        message.warning(`Đã bỏ qua ${skippedCompletedCount} đơn đã gửi, không tạo trùng.`);
+                    } else if (skippedCount > 0) {
                         message.warning(`Tất cả ${skippedCount} đơn hàng đều đã tồn tại trong hệ thống!`);
                     } else {
                         message.warning('Không tìm thấy dữ liệu hợp lệ trong file Excel!');
                     }
                 } else {
                     const parts: string[] = [];
-                    parts.push(`Đã import ${importedCount} đơn mới từ ${source}`);
+                    parts.push(`Đã đồng bộ ${importedCount} đơn từ ${source}`);
                     if (skippedCount > 0) parts.push(`bỏ qua ${skippedCount} đơn trùng`);
-                    message.success(parts.join(' | '));
+                    if (skippedCompletedCount > 0) parts.push(`bỏ qua ${skippedCompletedCount} đơn đã gửi`);
+                    if (mismatchCount > 0) parts.push(`${mismatchCount} đơn chuyển sang Đơn trễ`);
+                    if (mismatchCount > 0) message.warning(parts.join(' | '));
+                    else message.success(parts.join(' | '));
                 }
             } catch (error) {
                 console.error('Import error:', error);
-                message.error(error instanceof Error ? error.message : 'Loi import Excel.');
+                message.error(error instanceof Error ? error.message : 'Lỗi import Excel.');
             }
         };
 
@@ -1717,8 +1942,6 @@ Thời gian: ${currentTime}`;
 
             const folderPath = folderResult.data;
             message.loading({ content: 'Đang đọc file từ thư mục...', key: 'import-folder', duration: 0 });
-            const persistedCompletedKeys = new Set<string>();
-
             // Đọc tất cả file Excel
             const filesResult = await (window as any).electronAPI.ecommerceExports.loadExcelFiles(folderPath);
 
@@ -1730,21 +1953,12 @@ Thời gian: ${currentTime}`;
             const files = filesResult.data;
             let totalImported = 0;
             let totalSkipped = 0;
+            let totalSkippedCompleted = 0;
+            let totalMismatch = 0;
             let processedFiles = 0;
             const failedFiles: Array<{ name: string; error: string }> = [];
-            // 🔧 FIX: Track tất cả orderNumber đã import trong session này để tránh trùng giữa các file
-            const importedOrderNumbers = new Set<string>(
-                ecommerceExports
-                    .filter(r => r.status === 'pending' || r.status === 'completed')
-                    .map(r => getOrderKey(r))
-                    .filter(Boolean)
-            );
-            for (const key of persistedCompletedKeys) {
-                importedOrderNumbers.add(key);
-            }
-            const allOrderIdsBySource = new Map<string, Set<string>>();
-            // 🚫 Thu thập TẤT CẢ Order IDs theo nguồn — dùng cho đối soát sau khi import xong
-
+            const snapshotRecordsBySource = new Map<string, Map<string, EcommerceExport>>();
+            const snapshotFilesBySource = new Map<string, string[]>();
             // Xử lý từng file
             for (const [fileIndex, fileData] of files.entries()) {
                 try {
@@ -1773,61 +1987,53 @@ Thời gian: ${currentTime}`;
 
                     // Detect source
                     const firstRow: any = jsonData[0] || {};
-                    const isTikTok = 'Order ID' in firstRow || 'Cancelled Time' in firstRow;
-                    const isShopee = !!(
-                        getRowValue(firstRow, ['Mã đơn hàng']) !== undefined ||
-                        getRowValue(firstRow, ['Đơn Vị Vận Chuyển', 'Đơn vị vận chuyển']) !== undefined
-                    );
+                    const source = detectMarketplaceFromWorksheet(worksheet, XLSX, firstRow);
+                    const isTikTok = source === 'TikTok';
+                    const isShopee = source === 'Shopee';
 
                     if (!isTikTok && !isShopee) {
-                        console.warn(`⚠️ Skip file ${fileData.name}: không đúng định dạng`);
-                        continue;
+                        throw new Error('Không đúng định dạng TikTok hoặc Shopee.');
                     }
 
                     // 🚫 Thu thập Order IDs cho đối soát (gom từ vòng lặp chính, không cần re-parse)
                     const fileSource = isTikTok ? 'TikTok' : 'Shopee';
-                    if (!allOrderIdsBySource.has(fileSource)) allOrderIdsBySource.set(fileSource, new Set());
-                    const sourceOrderIds = allOrderIdsBySource.get(fileSource)!;
-                    jsonData.forEach((row: any) => {
-                        const oid = isTikTok ? (row['Order ID'] || '') : (getRowValue(row, ['Mã đơn hàng']) || '');
-                        if (oid) sourceOrderIds.add(oid);
-                    });
-
+                    if ((snapshotFilesBySource.get(fileSource)?.length || 0) > 0) {
+                        throw new Error(`Thư mục có nhiều file ${fileSource}. Chỉ giữ một file snapshot mới nhất cho mỗi sàn để đối soát chính xác.`);
+                    }
+                    if (!snapshotFilesBySource.has(fileSource)) snapshotFilesBySource.set(fileSource, []);
+                    snapshotFilesBySource.get(fileSource)!.push(fileData.name);
                     // Process same as handleImportExcel
                     const orderMap = new Map<string, any[]>();
+                    const invalidOrders: string[] = [];
 
                     // Shopee: column T is the only source of truth for SKU.
                     const shopeeSkuHeader = isShopee ? getShopeeSkuHeader(worksheet, jsonData) : '';
                     if (isShopee) console.log('🔑 [Folder] Shopee SKU header detected:', shopeeSkuHeader || '(KHÔNG TÌM THẤY)');
                     if (isShopee && !shopeeSkuHeader) {
-                        console.warn(`⚠️ Skip file ${fileData.name}: thiếu cột T SKU phân loại hàng`);
-                        message.warning(`Bỏ qua ${fileData.name}: thiếu cột T SKU phân loại hàng`);
-                        continue;
+                        throw new Error('File Shopee thiếu cột T: SKU phân loại hàng.');
                     }
 
                     if (isTikTok) {
+                        const tikTokDateOrder = inferTikTokDateOrder(jsonData);
                         jsonData.forEach((row: any) => {
                             const orderId = row['Order ID'] || '';
                             const productName = row['Product Name'] || '';
                             const variation = row['Variation'] || '';
                             const sku = row['Seller SKU'] || '';
-                            const quantity = parseInt(row['Quantity'] || row['Quantity of return'] || row['Quantity of Return'] || '1');
+                            const quantity = parseMarketplaceNumber(row['Quantity'] || row['Quantity of return'] || row['Quantity of Return'] || 1);
                             const cancelledTime = row['Cancelled Time'] || row['Cancelled time'] || '';
-                            const orderPlacedAt = parseMarketplaceOrderTime(getRowValue(row, TIKTOK_ORDER_TIME_HEADERS), XLSX);
+                            const orderPlacedAt = parseMarketplaceOrderTime(getRowValue(row, TIKTOK_ORDER_TIME_HEADERS), XLSX, tikTokDateOrder);
                             const shippingProvider = row['Shipping Provider Name'] || '';
                             const trackingId = row['Tracking ID'] || '';
-                            const orderAmount = parseFloat(row['Order Amount'] || '0');
+                            const orderAmount = parseMarketplaceNumber(row['Order Amount']);
+                            const skuSubtotal = parseMarketplaceNumber(row['SKU Subtotal After Discount'] || row['SKU Subtotal Before Discount']);
 
                             if (orderId.includes('Platform unique') || trackingId.includes("order's tracking")) {
                                 return;
                             }
 
                             if (!orderId || !productName) {
-                                return;
-                            }
-
-                            // 🚫 Skip nếu thiếu Tracking ID
-                            if (!trackingId) {
+                                if (orderId) invalidOrders.push(`${orderId}: thiếu tên sản phẩm`);
                                 return;
                             }
 
@@ -1837,8 +2043,8 @@ Thời gian: ${currentTime}`;
                                 color: variation || undefined,
                                 variantSku: sku,
                                 quantity: quantity,
-                                unitPrice: orderAmount / quantity || 0,
-                                total: orderAmount || 0,
+                                unitPrice: quantity > 0 ? skuSubtotal / quantity : 0,
+                                total: skuSubtotal,
                             };
 
                             if (!orderMap.has(orderId)) {
@@ -1862,9 +2068,9 @@ Thời gian: ${currentTime}`;
                             const productName = getRowValue(row, ['Tên sản phẩm', 'Tên Sản Phẩm']) || '';
                             const variation = getRowValue(row, ['Tên phân loại hàng', 'Phân loại hàng']) || '';
                             const sku = row[shopeeSkuHeader] || '';
-                            const quantity = parseInt(getRowValue(row, ['Số lượng', 'Quantity', 'Qty']) || '1');
+                            const quantity = parseMarketplaceNumber(getRowValue(row, ['Số lượng', 'Quantity', 'Qty']) || 1);
                             const cancelledTime = getRowValue(row, ['Ngày gửi hàng', 'Ngày gửi hàng']) || '';
-                            const orderPlacedAt = parseMarketplaceOrderTime(getRowValue(row, SHOPEE_ORDER_TIME_HEADERS), XLSX);
+                            const orderPlacedAt = parseMarketplaceOrderTime(getRowValue(row, SHOPEE_ORDER_TIME_HEADERS), XLSX, 'DMY');
                             const shippingProvider = getRowValue(row, ['Đơn Vị Vận Chuyển', 'Đơn vị vận chuyển']) || '';
                             const trackingId = getRowValue(row, ['Mã vận đơn', 'Mã vận chuyển', 'Số vận đơn']) || '';
                             const ecommerceExportReason = getRowValue(row, ['Trạng Thái Đơn Hàng', 'Trạng thái đơn hàng']) || 'Hủy đơn Shopee';
@@ -1877,14 +2083,14 @@ Thời gian: ${currentTime}`;
                                 'Thành tiền',
                                 'Tổng cộng'
                             ]) ?? 0;
-                            const totalAmount = typeof rawAmount2 === 'number' ? rawAmount2 : parseFloat(String(rawAmount2).replace(/,/g, '')) || 0;
+                            const totalAmount = parseMarketplaceNumber(rawAmount2);
                             const unitPrice2 = quantity > 0 ? totalAmount / quantity : totalAmount;
 
+                            // Shopee exports may contain gift/promotion rows without SKU.
+                            if (isShopeeGiftOrPromotionLine(productName)) return;
+
                             if (!orderId || !productName) {
-                                return;
-                            }
-                            if (!sku) {
-                                console.warn('⚠️ Skip Shopee row: missing column T SKU', row);
+                                if (orderId) invalidOrders.push(`${orderId}: thiếu tên sản phẩm`);
                                 return;
                             }
 
@@ -1915,24 +2121,22 @@ Thời gian: ${currentTime}`;
                         });
                     }
 
-                    const persistedKeys = await loadCompletedOrderKeys(Array.from(orderMap.keys()));
-                    for (const key of persistedKeys) {
-                        persistedCompletedKeys.add(key);
+                    const missingSkuLabel = isTikTok ? 'Seller SKU' : 'SKU ở cột T';
+                    const missingTimeLabel = isTikTok ? 'Created Time (cột Y)' : 'Ngày đặt hàng (cột C)';
+                    orderMap.forEach((orderItems, orderId) => {
+                        const validItems = orderItems.filter((entry: any) => String(entry.item?.variantSku || '').trim());
+                        if (validItems.length === 0) invalidOrders.push(`${orderId}: thiếu ${missingSkuLabel}`);
+                        if (!orderItems.some((entry: any) => entry.orderPlacedAt)) invalidOrders.push(`${orderId}: thiếu ${missingTimeLabel}`);
+                        if (validItems.some((entry: any) => !Number.isInteger(entry.item?.quantity) || entry.item.quantity <= 0)) {
+                            invalidOrders.push(`${orderId}: số lượng sản phẩm không hợp lệ`);
+                        }
+                    });
+                    if (jsonData.length > 0 && orderMap.size === 0 && invalidOrders.length === 0) {
+                        throw new Error('File không có đơn hàng hợp lệ sau khi bỏ qua các dòng quà tặng/mô tả.');
                     }
 
-                    // New pending rows already carry orderPlacedAt locally. Only
-                    // synchronize rows that are actually persisted in the DB.
-                    const placedTimes = Array.from(orderMap, ([orderNumber, rows]) => ({
-                        orderNumber,
-                        orderPlacedAt: rows[0]?.orderPlacedAt,
-                    })).filter(record => record.orderPlacedAt && persistedKeys.has(record.orderNumber));
-                    if (placedTimes.length > 0) {
-                        const syncResult = await withImportTimeout(
-                            window.electronAPI.ecommerceExports.syncOrderPlacedAt(placedTimes as Array<{ orderNumber: string; orderPlacedAt: string }>),
-                            20000,
-                            `Đồng bộ thời gian trong ${fileData.name} quá lâu. Vui lòng thử lại.`
-                        );
-                        if (!syncResult.success) throw new Error(syncResult.error || 'Không lưu được thời gian phát sinh đơn hàng.');
+                    if (invalidOrders.length > 0) {
+                        throw new Error(`Dữ liệu thiếu: ${invalidOrders.slice(0, 3).join('; ')}${invalidOrders.length > 3 ? ` và ${invalidOrders.length - 3} dòng khác` : ''}.`);
                     }
 
                     const newEcommerceExports: EcommerceExport[] = [];
@@ -1940,26 +2144,17 @@ Thời gian: ${currentTime}`;
                     let skippedCount = 0;
 
                     orderMap.forEach((orderItems, orderId) => {
-                        // 🔧 FIX: Check trùng với các file đã import trong cùng session
-                        const isDuplicateInSession = importedOrderNumbers.has(orderId);
-
-                        if (isDuplicateInSession) {
+                        const validOrderItems = orderItems.filter((entry: any) => String(entry.item?.variantSku || '').trim());
+                        const firstItem = validOrderItems[0] || orderItems[0];
+                        const trackingData = orderItems.find((entry: any) => hasUsableTracking(entry.trackingId)) || firstItem;
+                        const placedTimeData = orderItems.find((entry: any) => entry.orderPlacedAt) || firstItem;
+                        const trackingId = trackingData?.trackingId?.toString().trim() || '';
+                        if (validOrderItems.length === 0 || !placedTimeData?.orderPlacedAt) {
                             skippedCount++;
                             return;
                         }
 
-                        // ⛔ KIỂM TRA TRACKING ID - Bỏ qua nếu không có Tracking ID
-                        const firstItem = orderItems[0];
-                        const trackingId = firstItem.trackingId?.toString().trim();
-                        const hasTracking = trackingId && trackingId !== 'N/A' && trackingId !== '—' && trackingId !== '';
-
-                        if (!hasTracking) {
-                            console.warn(`⚠️ Skip order ${orderId} - No Tracking ID`);
-                            skippedCount++;
-                            return;
-                        }
-
-                        const allItems = orderItems.map(data => data.item);
+                        const allItems = validOrderItems.map((data: any) => data.item);
                         const totalQuantity = allItems.reduce((sum, item) => sum + item.quantity, 0);
                         const skuCount = allItems.length; // Số lượng SKU khác nhau
 
@@ -1969,32 +2164,29 @@ Thời gian: ${currentTime}`;
                             customerName: firstItem.customerName,
                             orderNumber: orderId,
                             ecommerceExportDate: firstItem.cancelledTime ? dayjs(firstItem.cancelledTime).format('YYYY-MM-DD HH:mm:ss') : dayjs().format('YYYY-MM-DD HH:mm:ss'),
-                            orderPlacedAt: firstItem.orderPlacedAt,
-                            notes: `Shipping: ${firstItem.shippingProvider || 'N/A'} | Tracking: ${firstItem.trackingId || 'N/A'} | ${skuCount} SKU | SL: ${totalQuantity}`,
-                            totalAmount: firstItem.totalAmount,
+                            orderPlacedAt: placedTimeData.orderPlacedAt,
+                            trackingNumber: trackingId,
+                            notes: `Shipping: ${trackingData?.shippingProvider || 'N/A'} | Tracking: ${trackingId || 'N/A'} | ${skuCount} SKU | SL: ${totalQuantity}`,
+                            totalAmount: calculateImportedOrderTotal(validOrderItems),
                             items: JSON.stringify(allItems),
                             ecommerceExportReason: firstItem.ecommerceExportReason,
                             status: 'pending',
                         };
 
                         newEcommerceExports.push(ecommerceExportRecord);
-                        // 🔧 FIX: Track order đã import để tránh trùng với file tiếp theo
-                        importedOrderNumbers.add(orderId);
                     });
 
                     totalSkipped += skippedCount;
 
+                    if (!snapshotRecordsBySource.has(fileSource)) {
+                        snapshotRecordsBySource.set(fileSource, new Map());
+                    }
                     if (newEcommerceExports.length > 0) {
-                        try {
-                            const bulkResult = appendPendingToLocalQueue(newEcommerceExports, persistedCompletedKeys);
-                            const insertedCount = bulkResult.count ?? newEcommerceExports.length;
-                            const skippedInDb = bulkResult.skipped ?? 0;
-                            totalImported += insertedCount;
-                            totalSkipped += skippedInDb;
-                            console.log(`Loaded ${insertedCount} pending records into local queue`);
-                        } catch (dbError) {
-                            console.error('Lỗi lưu vào database:', dbError);
-                            throw new Error(`Lỗi lưu ${newEcommerceExports.length} đơn: ${dbError instanceof Error ? dbError.message : 'Unknown'}`);
+                        const sourceRecords = snapshotRecordsBySource.get(fileSource)!;
+                        for (const record of newEcommerceExports) {
+                            const key = getOrderKey(record);
+                            if (sourceRecords.has(key)) totalSkipped++;
+                            sourceRecords.set(key, record);
                         }
                     }
 
@@ -2008,11 +2200,44 @@ Thời gian: ${currentTime}`;
                 }
             }
 
+            if (failedFiles.length === 0) {
+                for (const [source, recordsByOrder] of snapshotRecordsBySource.entries()) {
+                    const records = Array.from(recordsByOrder.values());
+                    const allowEmptySnapshot = records.length === 0
+                        ? await confirmEmptySnapshot(source)
+                        : false;
+                    if (records.length === 0 && !allowEmptySnapshot) {
+                        message.info({ content: `Đã hủy import snapshot rỗng của ${source}.`, key: 'import-folder' });
+                        return;
+                    }
+                    const importResult = await withImportTimeout(
+                        window.electronAPI.ecommerceExports.importSnapshot({
+                            platform: source as 'Shopee' | 'TikTok',
+                            fileNames: snapshotFilesBySource.get(source) || [],
+                            records,
+                            allowEmptySnapshot,
+                        }),
+                        120000,
+                        `Đồng bộ ${source} lên Supabase quá lâu. Vui lòng thử lại.`,
+                    );
+                    if (!importResult.success) {
+                        throw new Error(importResult.error || `Không đồng bộ được dữ liệu ${source}.`);
+                    }
+                    totalImported += (importResult.data?.created || 0) + (importResult.data?.updated || 0);
+                    totalSkippedCompleted += importResult.data?.skippedCompleted || 0;
+                    const mismatchCount = importResult.data?.mismatch || 0;
+                    totalMismatch += mismatchCount;
+                }
+                await loadEcommerceExports(true);
+            }
+
 
             // Thông báo kết quả
             const resultParts: string[] = [];
             if (totalImported > 0) resultParts.push(`Đã import ${totalImported} đơn từ ${processedFiles} file`);
             if (totalSkipped > 0) resultParts.push(`bỏ qua ${totalSkipped} đơn trùng`);
+            if (totalSkippedCompleted > 0) resultParts.push(`bỏ qua ${totalSkippedCompleted} đơn đã gửi`);
+            if (totalMismatch > 0) resultParts.push(`${totalMismatch} đơn chuyển sang Đơn trễ`);
 
             if (failedFiles.length > 0) {
                 const failedNames = failedFiles.slice(0, 3).map(file => file.name).join(', ');
@@ -2028,7 +2253,8 @@ Thời gian: ${currentTime}`;
             } else if (resultParts.length === 0) {
                 message.warning({ content: 'Không có thay đổi nào, tất cả đơn đều đã tồn tại!', key: 'import-folder', duration: 5 });
             } else {
-                message.success({ content: resultParts.join(' | '), key: 'import-folder', duration: 5 });
+                const notify = totalMismatch > 0 ? message.warning : message.success;
+                notify({ content: resultParts.join(' | '), key: 'import-folder', duration: 5 });
             }
 
         } catch (error) {
@@ -2044,13 +2270,13 @@ Thời gian: ${currentTime}`;
 
     const columns: ColumnsType<EcommerceExport> = [
         {
-            title: 'Thời gian bàn giao',
-            dataIndex: 'ecommerceExportDate',
-            key: 'ecommerceExportDate',
+            title: 'Thời gian tạo đơn hàng',
+            dataIndex: 'orderPlacedAt',
+            key: 'orderPlacedAt',
             width: 150,
             className: 'ecommerce-cell ecommerce-cell--date',
-            render: (date) => {
-                const parsed = dayjs(date);
+            render: (_date, record) => {
+                const parsed = dayjs(getOrderCreatedAt(record));
                 // Kiểm tra xem có thời gian cụ thể không (giờ/phút/giây khác 00:00:00)
                 const hasTime = parsed.format('HH:mm:ss') !== '00:00:00';
                 return hasTime ? parsed.format('DD/MM/YYYY HH:mm') : parsed.format('DD/MM/YYYY');
@@ -2110,25 +2336,21 @@ Thời gian: ${currentTime}`;
             },
         },
         {
-            title: 'Order ID / Tracking',
+            title: 'Mã đơn / Mã vận đơn',
             dataIndex: 'orderNumber',
             key: 'orderTracking',
             width: 180,
             className: 'ecommerce-cell ecommerce-cell--order',
             render: (orderNumber, record) => {
-                // Lấy tracking từ notes
-                let tracking = '-';
-                if (record.notes) {
-                    const trackingMatch = record.notes.match(/Tracking: ([^|]+)/);
-                    tracking = trackingMatch ? trackingMatch[1].trim() : '-';
-                }
+                const tracking = getUsableTracking(record) || '-';
 
-                const handleCopy = (text: string, label: string) => {
-                    navigator.clipboard.writeText(text).then(() => {
+                const handleCopy = async (text: string, label: string) => {
+                    try {
+                        await copyTextToClipboard(text);
                         message.success(`Đã copy ${label}: ${text}`);
-                    }).catch(() => {
+                    } catch {
                         message.error('Lỗi khi copy');
-                    });
+                    }
                 };
 
                 return (
@@ -2144,8 +2366,8 @@ Thời gian: ${currentTime}`;
                                         cursor: 'pointer',
                                         userSelect: 'none'
                                     }}
-                                    onDoubleClick={() => handleCopy(orderNumber, 'Order ID')}
-                                    title="Double-click de copy"
+                                    onDoubleClick={() => handleCopy(orderNumber, 'mã đơn')}
+                                    title="Nhấp đúp để sao chép"
                                 >
                                     {orderNumber}
                                 </Tag>
@@ -2164,8 +2386,8 @@ Thời gian: ${currentTime}`;
                                         cursor: 'pointer',
                                         userSelect: 'none'
                                     }}
-                                    onDoubleClick={() => handleCopy(tracking, 'Tracking ID')}
-                                    title="Double-click de copy"
+                                    onDoubleClick={() => handleCopy(tracking, 'mã vận đơn')}
+                                    title="Nhấp đúp để sao chép"
                                 >
                                     {tracking}
                                 </Tag>
@@ -2178,7 +2400,7 @@ Thời gian: ${currentTime}`;
             },
         },
         {
-            title: 'Product Name',
+            title: 'Tên sản phẩm',
             key: 'productName',
             width: 200,
             ellipsis: true,
@@ -2223,7 +2445,7 @@ Thời gian: ${currentTime}`;
             },
         },
         {
-            title: 'Variation',
+            title: 'Phân loại',
             key: 'variation',
             width: 100,
             className: 'ecommerce-cell ecommerce-cell--variation',
@@ -2232,7 +2454,23 @@ Thời gian: ${currentTime}`;
                 const parsed = getParsedItems(record);
                 if (parsed.length === 0) return <span style={{ color: '#bfbfbf' }}>-</span>;
                 const firstItem = parsed[0];
-                return firstItem.color ? <Tag color="purple">{firstItem.color}</Tag> : <span style={{ color: '#bfbfbf' }}>-</span>;
+                return firstItem.color ? (
+                    <Tag
+                        color="purple"
+                        title={firstItem.color}
+                        style={{
+                            display: 'inline-block',
+                            maxWidth: '100%',
+                            marginInlineEnd: 0,
+                            overflow: 'hidden',
+                            textOverflow: 'ellipsis',
+                            whiteSpace: 'nowrap',
+                            verticalAlign: 'middle',
+                        }}
+                    >
+                        {firstItem.color}
+                    </Tag>
+                ) : <span style={{ color: '#bfbfbf' }}>-</span>;
             },
         },
         {
@@ -2242,10 +2480,14 @@ Thời gian: ${currentTime}`;
             width: 120,
             align: 'right',
             className: 'ecommerce-cell ecommerce-cell--amount',
-            render: (amount) => <span style={{ fontWeight: 600 }}>{amount.toLocaleString('vi-VN')} VND</span>,
+            render: (amount) => (
+                <span style={{ fontWeight: 600, whiteSpace: 'nowrap', display: 'inline-block' }}>
+                    {amount.toLocaleString('vi-VN')} VND
+                </span>
+            ),
         },
         {
-            title: 'Shipping Provider',
+            title: 'Đơn vị vận chuyển',
             dataIndex: 'notes',
             key: 'shippingProvider',
             width: 130,
@@ -2257,13 +2499,35 @@ Thời gian: ${currentTime}`;
                 return <Tag color="green">{shipping}</Tag>;
             },
         },
-        // 🔽 Ẩn cột Trạng thái & Người ĐG — đã có filter tabs hiển thị trạng thái
-        // {
-        //     title: 'Trạng thái', ...
-        // },
-        // {
-        //     title: 'Người ĐG', ...
-        // },
+        {
+            title: 'Hạn gửi hàng',
+            dataIndex: 'slaDeadlineAt',
+            key: 'slaDeadlineAt',
+            width: 145,
+            render: (value, record) => {
+                if (!value) return <span style={{ color: '#bfbfbf' }}>Chưa có</span>;
+                const late = record.status === 'pending' && dayjs(value).valueOf() < slaNow;
+                return <Tag color={late ? 'error' : 'blue'}>{dayjs(value).format('DD/MM HH:mm')}</Tag>;
+            },
+        },
+        {
+            title: 'Trạng thái',
+            dataIndex: 'status',
+            key: 'status',
+            width: 120,
+            className: 'ecommerce-cell ecommerce-cell--status',
+            render: (value, record) => {
+                if (value === 'mismatch') return <Tag color="error">ĐƠN TRỄ</Tag>;
+                if (value === 'cancelled') {
+                    return <Tag style={{ background: '#262626', borderColor: '#262626', color: '#fff' }}>Hủy</Tag>;
+                }
+                if (value === 'completed') return <Tag color="success">Đã gửi</Tag>;
+                if (value === 'pending' && record.slaDeadlineAt && dayjs(record.slaDeadlineAt).valueOf() < slaNow) {
+                    return <Tag color="error">ĐƠN TRỄ</Tag>;
+                }
+                return <Tag color="processing">Chờ lấy hàng</Tag>;
+            },
+        },
         {
             title: '',
             key: 'actions',
@@ -2271,22 +2535,26 @@ Thời gian: ${currentTime}`;
             fixed: 'right',
             className: 'ecommerce-cell ecommerce-cell--actions',
             render: (_, record) => {
-                const menuItems = [
-                    {
+                const menuItems: any[] = [];
+                if (record.status !== 'completed' && record.lastSeenImportBatchId == null) {
+                    menuItems.push({
                         key: 'edit',
                         icon: <EditOutlined />,
                         label: 'Sửa',
                         onClick: () => handleEdit(record),
-                    },
-                    {
+                    });
+                }
+                if (isAdmin && record.status !== 'completed') {
+                    menuItems.push({
                         key: 'delete',
                         icon: <DeleteOutlined />,
                         label: 'Xóa',
                         danger: true,
-                        disabled: !isAdmin || record.status === 'completed', // 🔐 Chỉ admin + không xóa đơn đã pickup
                         onClick: () => handleDelete(record),
-                    },
-                ];
+                    });
+                }
+
+                if (menuItems.length === 0) return <span style={{ color: '#bfbfbf' }}>-</span>;
 
                 return (
                     <Dropdown getPopupContainer={getEcommercePopupContainer} menu={{ items: menuItems }} trigger={['click']}>
@@ -2298,6 +2566,18 @@ Thời gian: ${currentTime}`;
             },
         },
     ];
+
+    // Keep the SLA deadline beside the order-created time in every tab so the
+    // operator can compare the two timestamps without scanning across the row.
+    const displayedColumns: ColumnsType<EcommerceExport> = (() => {
+        const deadlineColumn = columns.find(column => column.key === 'slaDeadlineAt');
+        if (!deadlineColumn) return columns;
+        return [
+            columns[0],
+            deadlineColumn,
+            ...columns.slice(1).filter(column => column !== deadlineColumn),
+        ];
+    })();
 
     const itemColumns: ColumnsType<ExportItem> = [
         {
@@ -2358,32 +2638,35 @@ Thời gian: ${currentTime}`;
     // 🔍 Lọc dữ liệu theo trạng thái + Pre-parse items JSON 1 lần
     // ⚡ useMemo — tránh re-filter + re-parse mỗi lần render
     const filteredEcommerceExports = useMemo(() => {
-        const today = dayjs().startOf('day');
         return ecommerceExports.filter(ecommerceExport => {
+            const isLate = ecommerceExport.status === 'pending'
+                && !!ecommerceExport.slaDeadlineAt
+                && dayjs(ecommerceExport.slaDeadlineAt).valueOf() < slaNow;
             // Lọc theo trạng thái
             let statusMatch = true;
-            if (statusFilter === 'pending') statusMatch = ecommerceExport.status !== 'completed' && ecommerceExport.status !== 'cancelled';
+            if (statusFilter === 'pending') statusMatch = ecommerceExport.status === 'pending' && !isLate;
             else if (statusFilter === 'completed') statusMatch = ecommerceExport.status === 'completed';
             else if (statusFilter === 'cancelled') statusMatch = ecommerceExport.status === 'cancelled';
-            else if (statusFilter === 'overdue') {
-                const ecommerceExportDate = dayjs(ecommerceExport.ecommerceExportDate).startOf('day');
-                const isNotToday = ecommerceExportDate.isBefore(today);
-                statusMatch = isNotToday && ecommerceExport.status !== 'completed' && ecommerceExport.status !== 'cancelled';
-            }
+            else if (statusFilter === 'mismatch') statusMatch = ecommerceExport.status === 'mismatch';
+            else if (statusFilter === 'overdue') statusMatch = isLate || ecommerceExport.status === 'mismatch';
             if (!statusMatch) return false;
 
             // 🔎 Lọc theo từ khóa tìm kiếm mã vận đơn đi
             if (searchKeyword.trim()) {
                 const keyword = searchKeyword.trim().toLowerCase();
-                const trackingMatch = ecommerceExport.notes?.match(/Tracking: ([^|]+)/);
-                const tracking = trackingMatch ? trackingMatch[1].trim().toLowerCase() : '';
+                const tracking = getUsableTracking(ecommerceExport).toLowerCase();
                 const orderId = (ecommerceExport.orderNumber || ecommerceExport.ecommerceExportCode || '').toLowerCase();
                 return tracking.includes(keyword) || orderId.includes(keyword);
             }
 
             return true;
         });
-    }, [ecommerceExports, statusFilter, searchKeyword]);
+    }, [ecommerceExports, statusFilter, searchKeyword, slaNow]);
+
+    useEffect(() => {
+        const maxPage = Math.max(1, Math.ceil(filteredEcommerceExports.length / tablePageSize));
+        if (tablePage > maxPage) setTablePage(maxPage);
+    }, [filteredEcommerceExports.length, tablePage, tablePageSize]);
 
     // ⚡ Lazy JSON parse — chỉ parse khi column render GỌI, cache vĩnh viễn trong ref
     // Khác useMemo: KHÔNG parse lại tất cả khi 1 dòng thay đổi status
@@ -2403,29 +2686,26 @@ Thời gian: ${currentTime}`;
         }
     }, []);
 
-    // ⚡ Memoize status counts — tránh .filter() x3 mỗi render
-    const statusCounts = useMemo(() => {
-        const today = dayjs().startOf('day');
-        let pending = 0, overdue = 0, cancelled = 0, completed = 0;
-        for (const r of ecommerceExports) {
-            if (r.status === 'cancelled') {
-                cancelled++;
-            } else if (r.status === 'completed') {
-                completed++;
-            } else {
-                pending++;
-                if (dayjs(r.ecommerceExportDate).startOf('day').isBefore(today)) overdue++;
-            }
-        }
-        return { all: ecommerceExports.length, pending, overdue, completed, cancelled };
-    }, [ecommerceExports]);
-
-
     return (
         <div className="ecommerce-page">
             {/* Dòng 1: Stats + Search + Actions */}
             <div className="ecommerce-toolbar">
                 <div className="ecommerce-status-group">
+                    <Tag
+                    className="ecommerce-status-chip"
+                    onClick={() => setStatusFilter('all')}
+                    style={{
+                        cursor: 'pointer', flexShrink: 0,
+                        padding: '4px 10px', fontSize: 12, fontWeight: 600,
+                        borderRadius: 8, border: 'none',
+                        background: statusFilter === 'all'
+                            ? 'linear-gradient(135deg, #1677ff 0%, #4096ff 100%)'
+                            : 'linear-gradient(135deg, #bae0ff 0%, #e6f4ff 100%)',
+                        color: statusFilter === 'all' ? '#fff' : '#0958d9',
+                    }}
+                >
+                    Tất cả: {operationalCounts.total}
+                    </Tag>
                     <Tag
                     className="ecommerce-status-chip"
                     onClick={() => setStatusFilter('pending')}
@@ -2439,7 +2719,7 @@ Thời gian: ${currentTime}`;
                         color: '#fff',
                     }}
                 >
-                    Pending: {statusCounts.pending}
+                    Chờ lấy hàng: {operationalCounts.pending}
                     </Tag>
                     <Tag
                     className="ecommerce-status-chip"
@@ -2454,22 +2734,37 @@ Thời gian: ${currentTime}`;
                         color: statusFilter === 'completed' ? '#fff' : '#389e0d',
                     }}
                 >
-                    Complete: {statusCounts.completed}
+                    Đã gửi: {operationalCounts.completed}
                     </Tag>
                     <Tag
                     className="ecommerce-status-chip"
-                    onClick={() => setStatusFilter('no_data')}
+                    onClick={() => setStatusFilter('overdue')}
                     style={{
                         cursor: 'pointer', flexShrink: 0,
                         padding: '4px 10px', fontSize: 12, fontWeight: 600,
                         borderRadius: 8, border: 'none',
-                        background: statusFilter === 'no_data'
-                            ? 'linear-gradient(135deg, #8c8c8c 0%, #595959 100%)'
-                            : 'linear-gradient(135deg, #d9d9d9 0%, #bfbfbf 100%)',
+                        background: statusFilter === 'overdue'
+                            ? 'linear-gradient(135deg, #cf1322 0%, #ff4d4f 100%)'
+                            : 'linear-gradient(135deg, #ffccc7 0%, #fff1f0 100%)',
+                        color: statusFilter === 'overdue' ? '#fff' : '#cf1322',
+                    }}
+                >
+                    Đơn trễ: {operationalCounts.overdue + operationalCounts.mismatch}
+                    </Tag>
+                    <Tag
+                    className="ecommerce-status-chip"
+                    onClick={() => setStatusFilter('cancelled')}
+                    style={{
+                        cursor: 'pointer', flexShrink: 0,
+                        padding: '4px 10px', fontSize: 12, fontWeight: 600,
+                        borderRadius: 8, border: 'none',
+                        background: statusFilter === 'cancelled'
+                            ? 'linear-gradient(135deg, #141414 0%, #434343 100%)'
+                            : 'linear-gradient(135deg, #595959 0%, #8c8c8c 100%)',
                         color: '#fff',
                     }}
                 >
-                    Mismatch: {unmatchedScans.length}
+                    Hủy: {operationalCounts.cancelled}
                     </Tag>
                 </div>
 
@@ -2477,19 +2772,19 @@ Thời gian: ${currentTime}`;
                     className="ecommerce-search"
                     value={searchKeyword}
                     onChange={(e) => setSearchKeyword(e.target.value)}
-                    placeholder="Tìm Tracking / Order ID..."
+                    placeholder="Tìm mã vận đơn / mã đơn hàng..."
                     allowClear
                     style={{ flex: 1, minWidth: 0, borderColor: '#1890ff', borderWidth: 2, borderRadius: 8 }}
                     prefix={<SearchOutlined style={{ color: '#1890ff' }} />}
                 />
 
                 <div className="ecommerce-toolbar-actions">
-                    {selectedRowKeys.length > 0 && (
+                    {isAdmin && selectedRowKeys.length > 0 && (
                     <Button className="ecommerce-toolbar-button" danger icon={<DeleteOutlined />} onClick={handleBulkDelete} style={{ flexShrink: 0 }}>
                         Xóa ({selectedRowKeys.length})
                     </Button>
                     )}
-                    {isAdmin && statusCounts.cancelled > 0 && (
+                    {isAdmin && operationalCounts.cancelled > 0 && (
                     <Button
                         className="ecommerce-toolbar-button"
                         danger
@@ -2497,7 +2792,7 @@ Thời gian: ${currentTime}`;
                         onClick={handleDeleteCancelled}
                         style={{ flexShrink: 0 }}
                     >
-                        Xóa đơn hủy ({statusCounts.cancelled})
+                        Xóa đơn hủy ({operationalCounts.cancelled})
                     </Button>
                     )}
                     <Dropdown
@@ -2505,8 +2800,8 @@ Thời gian: ${currentTime}`;
                     menu={{
                         items: [
                             { key: 'all', label: 'Xuất tất cả', onClick: () => handleExportExcel('all') },
-                            { key: 'completed', label: 'Chỉ xuất đã hoàn', onClick: () => handleExportExcel('completed') },
-                            { key: 'processing', label: 'Chỉ xuất đang xử lý', onClick: () => handleExportExcel('processing') },
+                            { key: 'completed', label: 'Chỉ xuất đơn đã gửi', onClick: () => handleExportExcel('completed') },
+                            { key: 'processing', label: 'Chỉ xuất đơn chờ lấy hàng', onClick: () => handleExportExcel('processing') },
                         ],
                     }}
                     trigger={['click']}
@@ -2543,7 +2838,7 @@ Thời gian: ${currentTime}`;
                     }}
                 >
                     <UserOutlined style={{ fontSize: 16, color: '#8c8c8c', flexShrink: 0 }} />
-                    <Text type="secondary" style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.5, flexShrink: 0 }}>Nguoi dong goi:</Text>
+                    <Text type="secondary" style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.5, flexShrink: 0 }}>Người đóng gói:</Text>
                     <div className="ecommerce-packer-list">
                         {packerEmployees.map(emp => {
                             const isActive = activePacker === emp.username;
@@ -2606,41 +2901,6 @@ Thời gian: ${currentTime}`;
                 </div>
             )}
 
-            {/* Badge offline pending */}
-            {offlinePending > 0 && (
-                <div className="ecommerce-offline-banner" style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 14px', background: '#fffbe6', border: '1px solid #ffe58f', borderRadius: 8, marginBottom: 6 }}>
-                    <span style={{ fontSize: 16 }}>Pending</span>
-                    <span style={{ color: '#d48806', fontWeight: 600, fontSize: 13 }}>
-                        {offlinePending} đơn đang chờ đồng bộ (lưu offline khi mất mạng)
-                    </span>
-                    <Button
-                        size="small"
-                        type="primary"
-                        style={{ marginLeft: 'auto', background: '#d48806', borderColor: '#d48806' }}
-                        onClick={async () => {
-                            message.loading({ content: 'Đang đồng bộ...', key: 'manualSync', duration: 0 });
-                            const res = await (window as any).electronAPI.offlineQueue.sync();
-                            setOfflinePending(res.remaining || 0);
-                            if (res.synced > 0) {
-                                message.success({ content: `Đã đồng bộ ${res.synced} đơn!`, key: 'manualSync', duration: 3 });
-                                loadEcommerceExports(true);
-                            } else if (res.failed > 0) {
-                                const reason = res.errors?.[0]?.error;
-                                message.warning({
-                                    content: `Chưa thể đồng bộ${reason ? `: ${reason}` : ''}. Dữ liệu vẫn được giữ, hãy tải lại danh sách nếu có xung đột.`,
-                                    key: 'manualSync',
-                                    duration: 6,
-                                });
-                            } else {
-                                message.info({ content: 'Đơn đang trong thời gian chờ thử lại. Vui lòng thử sau.', key: 'manualSync', duration: 3 });
-                            }
-                        }}
-                    >
-                        Đồng bộ ngay
-                    </Button>
-                </div>
-            )}
-
             {/* Dòng 2: Quét mã vận đơn */}
             <div
                 className="scan-input-wrap ecommerce-scan-bar"
@@ -2660,7 +2920,7 @@ Thời gian: ${currentTime}`;
                         value={scanValue}
                         onChange={(e) => setScanValue(e.target.value)}
                         onKeyDown={handleScanKeyDown}
-                        placeholder={activePacker ? `ĐANG GÁN ĐƠN CHO: [${activePacker.toUpperCase()}] - Quét mã ngay...` : "Quét hoặc nhập Tracking ID để kiểm tra đơn hàng..."}
+                        placeholder={activePacker ? `ĐANG GÁN ĐƠN CHO: [${activePacker.toUpperCase()}] - Quét mã ngay...` : "Quét hoặc nhập mã vận đơn để kiểm tra đơn hàng..."}
                         autoFocus
                         size="large"
                         style={{
@@ -2716,88 +2976,14 @@ Thời gian: ${currentTime}`;
                 </div>
             )}
 
-            {statusFilter === 'no_data' ? (
-                /* Mismatch table */
-                <Card className="ecommerce-table-card" variant="borderless">
-                    <div className="ecommerce-mismatch-heading">
-                        <Title level={5} style={{ margin: 0 }}>
-                            Tracking ID không khớp dữ liệu ({unmatchedScans.length})
-                        </Title>
-                        {unmatchedScans.length > 0 && (
-                            <Button
-                                danger
-                                size="small"
-                                icon={<DeleteOutlined />}
-                                onClick={() => {
-                                    Modal.confirm({
-                                        title: 'Xóa tất cả?',
-                                        content: `Xóa ${unmatchedScans.length} tracking ID không có dữ liệu?`,
-                                        okText: 'Xóa',
-                                        okType: 'danger',
-                                        onOk: () => setUnmatchedScans([]),
-                                    });
-                                }}
-                            >
-                                Xóa tất cả
-                            </Button>
-                        )}
-                    </div>
-                    {unmatchedScans.length === 0 ? (
-                        <div style={{ textAlign: 'center', padding: 40, color: '#8c8c8c' }}>
-                            Không có tracking lệch nào
-                        </div>
-                    ) : (
-                        <Table
-                            className="ecommerce-mismatch-table"
-                            dataSource={unmatchedScans}
-                            rowKey="trackingId"
-                            pagination={false}
-                            size="middle"
-                            columns={[
-                                {
-                                    title: 'STT',
-                                    width: 60,
-                                    align: 'center' as const,
-                                    render: (_: any, __: any, index: number) => index + 1,
-                                },
-                                {
-                                    title: 'Tracking ID',
-                                    dataIndex: 'trackingId',
-                                    render: (id: string) => (
-                                        <Tag color="red" style={{ fontSize: 13, padding: '4px 10px', fontFamily: 'monospace' }}>
-                                            {id}
-                                        </Tag>
-                                    ),
-                                },
-                                {
-                                    title: 'Thoi gian scan',
-                                    dataIndex: 'scannedAt',
-                                    width: 200,
-                                },
-                                {
-                                    title: '',
-                                    width: 60,
-                                    render: (_: any, record: any) => (
-                                        <Button
-                                            type="link"
-                                            size="small"
-                                            danger
-                                            onClick={() => setUnmatchedScans(prev => prev.filter(s => s.trackingId !== record.trackingId))}
-                                        >
-                                            Xóa
-                                        </Button>
-                                    ),
-                                },
-                            ]}
-                        />
-                    )}
-                </Card>
-            ) : (
-                /* 📋 BẢNG ĐƠN HÀNG CHÍNH */
-                <Card className="ecommerce-table-card" variant="borderless">
+            {/* Bảng đơn hàng dùng chung cho tất cả bộ lọc, bao gồm Đơn trễ. */}
+                <Card
+                    className="ecommerce-table-card"
+                    variant="borderless"
+                >
                     <Table
                         className="ecommerce-table"
-                        columns={columns}
+                        columns={displayedColumns}
                         dataSource={filteredEcommerceExports}
                         rowKey="id"
                         loading={loading}
@@ -2809,21 +2995,26 @@ Thời gian: ${currentTime}`;
                                     'ecommerce-table-row',
                                     firstComma !== -1 ? 'multi-sku-row ecommerce-table-row--multi' : '',
                                     `ecommerce-table-row--${record.status || 'pending'}`,
+                                    record.status === 'pending' && record.slaDeadlineAt && dayjs(record.slaDeadlineAt).valueOf() < slaNow
+                                        ? 'ecommerce-table-row--overdue'
+                                        : '',
+                                    !isAdmin ? 'ecommerce-table-row--no-selection' : '',
                                 ].filter(Boolean).join(' ');
                             } catch {
                                 return 'ecommerce-table-row';
                             }
                         }}
-                        rowSelection={{
+                        rowSelection={isAdmin ? {
                             selectedRowKeys,
                             onChange: (selectedKeys) => {
                                 setSelectedRowKeys(selectedKeys as number[]);
                             },
                             columnWidth: 50,
                             getCheckboxProps: (record) => ({
+                                disabled: record.status === 'completed',
                                 name: record.orderNumber || record.ecommerceExportCode || `ecommerceExport-${record.id}`,
                             }),
-                        }}
+                        } : undefined}
                         expandable={{
                             showExpandColumn: false,
                             expandRowByClick: true,
@@ -2856,22 +3047,29 @@ Thời gian: ${currentTime}`;
                             },
                         }}
                         pagination={{
-                            defaultPageSize: 10,
+                            current: tablePage,
+                            pageSize: tablePageSize,
                             showSizeChanger: true,
                             pageSizeOptions: ['10', '20', '50', '100'],
                             showTotal: (total) => `Tổng ${total} phiếu`,
+                            onChange: (page, pageSize) => {
+                                setTablePage(page);
+                                if (pageSize !== tablePageSize) {
+                                    setTablePageSize(pageSize);
+                                    setTablePage(1);
+                                }
+                            },
                         }}
-                        scroll={{ x: 1200 }}
+                        scroll={{ x: 1200, scrollToFirstRowOnChange: false }}
                     />
                     {hasMoreExports && (
                         <div style={{ display: 'flex', justifyContent: 'center', paddingTop: 12 }}>
                             <Button onClick={() => loadEcommerceExports(true, true)} loading={loading}>
-                                Xem thÃªm
+                                Xem thêm
                             </Button>
                         </div>
                     )}
                 </Card>
-            )}
 
             {/* Method Selection Modal */}
             <Modal
@@ -2898,7 +3096,7 @@ Thời gian: ${currentTime}`;
             {/* Manual Input Modal */}
             <Modal
                 className="ecommerce-form-modal"
-                title={editingEcommerceExport ? '�S�️ Sửa phiếu xuất' : '�~" Tạo phiếu xuất m�:i'}
+                title={editingEcommerceExport ? 'Sửa phiếu xuất' : 'Tạo phiếu xuất mới'}
                 open={modalVisible}
                 onCancel={() => { if (!saving) setModalVisible(false); }}
                 maskClosable={!saving}

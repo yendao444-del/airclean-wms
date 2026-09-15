@@ -60,7 +60,7 @@ What the script does
 9. Smoke-test the EXE for a few seconds.
 
 Release behavior
-- `RELEASE.bat` and `RELEASE-ver2.bat` now call `python/build_face_service.ps1`.
+- `updates/RELEASE.bat` and `updates/RELEASE-ver2.bat` call the face-service build step.
 - For convenience they call `python\build_face_service.bat`, which wraps the PowerShell script.
 - If build or verify fails, release stops immediately.
 - No ZIP should be created from a stale or broken EXE.

@@ -1220,25 +1220,29 @@ export default function BusinessReportPage() {
     const handleSaveConfig = async (values: any) => {
         try {
             const newConfig = { ...config, ...values };
-            await window.electronAPI.appConfig.set(CONFIG_KEY_PNL, newConfig);
+            const pnlResult = await window.electronAPI.appConfig.set(CONFIG_KEY_PNL, newConfig);
+            if (!pnlResult?.success) throw new Error(pnlResult?.error || 'Không thể lưu cấu hình P&L.');
             setConfig(newConfig);
 
             // Lưu phí sàn riêng cho từng sàn (v2)
-            await window.electronAPI.appConfig.set('shopee_fees_v3', shopeeFeeConfig);
-            await window.electronAPI.appConfig.set('tiktok_fees_v3', tiktokFeeConfig);
+            const shopeeResult = await window.electronAPI.appConfig.set('shopee_fees_v3', shopeeFeeConfig);
+            if (!shopeeResult?.success) throw new Error(shopeeResult?.error || 'Không thể lưu phí Shopee.');
+            const tiktokResult = await window.electronAPI.appConfig.set('tiktok_fees_v3', tiktokFeeConfig);
+            if (!tiktokResult?.success) throw new Error(tiktokResult?.error || 'Không thể lưu phí TikTok Shop.');
             const nextCalculatorInputs = {
                 ...calculatorInputsConfig,
                 feePolicyVersion: FEE_POLICY_VERSION,
                 categories: platformCategoryIds,
             };
-            await window.electronAPI.appConfig.set('calculator_inputs_v2', nextCalculatorInputs);
+            const calculatorResult = await window.electronAPI.appConfig.set('calculator_inputs_v2', nextCalculatorInputs);
+            if (!calculatorResult?.success) throw new Error(calculatorResult?.error || 'Không thể lưu dữ liệu máy tính lợi nhuận.');
             setCalculatorInputsConfig(nextCalculatorInputs);
 
             feeConfigSnapshotRef.current = null;
             setConfigModalOpen(false);
             message.success('Đã lưu cấu hình P&L!');
         } catch (err) {
-            message.error('Lỗi lưu cấu hình');
+            message.error(err instanceof Error ? err.message : 'Lỗi lưu cấu hình');
         }
     };
 

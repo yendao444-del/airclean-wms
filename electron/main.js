@@ -2,6 +2,17 @@ const { app, BrowserWindow, Menu, ipcMain, shell, session, screen } = require('e
 const path = require('path');
 const fs = require('fs');
 const { spawn } = require('child_process');
+const startupStartedAt = Date.now();
+const startupMark = (label) => {
+    const elapsed = Date.now() - startupStartedAt;
+    console.log(`[perf] ${label}: ${elapsed}ms`);
+    return elapsed;
+};
+startupMark('main module loaded');
+const http = require('http');
+const os = require('os');
+const crypto = require('crypto');
+const { WebSocketServer } = require('ws');
 
 function getDevelopmentServerUrl() {
     const fallback = 'http://127.0.0.1:5173';
@@ -16,6 +27,7 @@ function getDevelopmentServerUrl() {
 }
 
 const DEVELOPMENT_SERVER_URL = getDevelopmentServerUrl();
+const USE_BUILT_RENDERER = process.env.DBYPOS_USE_DIST === '1';
 
 // The packaged app can be started by an updater/launcher whose stdout and
 // stderr pipes are closed immediately afterwards. Any later console.* call
@@ -55,8 +67,124 @@ Module._resolveFilename = function (request, parent, isMain, options) {
 };
 
 let mainWindow;
+let mobileScanServer = null;
+let mobileScanSession = null;
+let mobileScanSockets = new Map();
+let mobileScanTunnel = null;
+
+function getLanAddress() {
+    const interfaces = os.networkInterfaces();
+    for (const entries of Object.values(interfaces)) {
+        for (const entry of entries || []) {
+            if (entry.family === 'IPv4' && !entry.internal && !entry.address.startsWith('169.254.')) return entry.address;
+        }
+    }
+    return '127.0.0.1';
+}
+
+function startMobileScanServer() {
+    if (mobileScanServer) return;
+    mobileScanServer = http.createServer((request, response) => {
+        const url = new URL(request.url || '/', 'http://localhost');
+        const headers = { 'Cache-Control': 'no-store', 'Access-Control-Allow-Origin': '*' };
+        if (request.method === 'GET' && url.pathname === '/') {
+            response.writeHead(200, { ...headers, 'Content-Type': 'text/html; charset=utf-8' });
+            response.end(fs.readFileSync(path.join(__dirname, 'mobile-scanner-test.html')));
+            return;
+        }
+        if (request.method === 'GET' && url.pathname === '/zxing.js') {
+            response.writeHead(200, { ...headers, 'Content-Type': 'application/javascript; charset=utf-8' });
+            response.end(fs.readFileSync(path.join(__dirname, '..', 'node_modules/@zxing/browser/umd/zxing-browser.min.js')));
+            return;
+        }
+        response.writeHead(404, headers); response.end('Not found');
+    });
+    const socketServer = new WebSocketServer({ server: mobileScanServer, path: '/socket' });
+    socketServer.on('connection', (socket, request) => {
+        const query = new URL(request.url || '/', 'http://localhost');
+        if (!mobileScanSession || query.searchParams.get('session') !== mobileScanSession.token) { socket.close(1008, 'Phiên không hợp lệ'); return; }
+        let deviceId;
+        socket.on('message', raw => { try { const payload = JSON.parse(raw.toString()); if (payload.type === 'hello') { deviceId = String(payload.deviceId || crypto.randomBytes(8).toString('hex')); mobileScanSockets.set(deviceId, socket); mainWindow?.webContents.send('mobileScan:device', { deviceId, employee: String(payload.employee || 'Nhân viên'), connected: true }); return; } if (payload.type !== 'scan' || !deviceId) return; const code = String(payload.code || '').trim(); if (!code) return; const duplicate = mobileScanSession.recentCodes.has(code); const status = /^fail/i.test(code) || duplicate ? 'fail' : 'success'; if (!duplicate) mobileScanSession.recentCodes.set(code, Date.now()); const message = duplicate ? 'Mã đã được quét trong phiên này' : status === 'success' ? 'Quét thành công' : 'Mã lỗi mô phỏng'; const result = { type:'result', code, status, message, sentAt: Number(payload.sentAt) || Date.now() }; socket.send(JSON.stringify(result)); mainWindow?.webContents.send('mobileScan:received', { code, employee: String(payload.employee || 'Nhân viên'), deviceId, status, message, at: new Date().toISOString() }); } catch {} });
+        socket.on('close', () => { if (deviceId) { mobileScanSockets.delete(deviceId); mainWindow?.webContents.send('mobileScan:device', { deviceId, connected: false }); } });
+    });
+    mobileScanServer.listen(47821, '0.0.0.0');
+}
+
+ipcMain.handle('mobileScan:start', async () => {
+    startMobileScanServer();
+    if (mobileScanTunnel) { mobileScanTunnel.kill(); mobileScanTunnel = null; }
+    for (const socket of mobileScanSockets.values()) socket.close(1000, 'Phiên mới');
+    mobileScanSockets = new Map();
+    mobileScanSession = { token: crypto.randomBytes(12).toString('hex'), recentCodes: new Map() };
+    const sessionToken = mobileScanSession.token;
+    const localOrigin = `http://${getLanAddress()}:47821`;
+    const cloudflaredPath = path.join(__dirname, '..', 'node_modules', 'cloudflared', 'bin', process.platform === 'win32' ? 'cloudflared.exe' : 'cloudflared');
+    if (!fs.existsSync(cloudflaredPath)) return { success: true, url: `${localOrigin}/?session=${sessionToken}`, token: sessionToken, address: getLanAddress(), secure: false };
+    return await new Promise((resolve) => {
+        let settled = false;
+        let tunnelOrigin = '';
+        let tunnelConnected = false;
+        const finish = (origin, secure) => { if (settled) return; settled = true; resolve({ success: true, url: `${origin}/?session=${sessionToken}`, token: sessionToken, address: getLanAddress(), secure }); };
+        mobileScanTunnel = spawn(cloudflaredPath, ['tunnel', '--protocol', 'http2', '--url', 'http://127.0.0.1:47821', '--no-autoupdate'], { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+        const inspect = (chunk) => {
+            const output = String(chunk);
+            const match = output.match(/https:\/\/[-a-z0-9]+\.trycloudflare\.com/i);
+            if (match) tunnelOrigin = match[0];
+            if (/Registered tunnel connection/i.test(output)) tunnelConnected = true;
+            if (tunnelOrigin && tunnelConnected) setTimeout(() => finish(tunnelOrigin, true), 5000);
+        };
+        mobileScanTunnel.stdout.on('data', inspect); mobileScanTunnel.stderr.on('data', inspect);
+        mobileScanTunnel.on('error', () => finish(localOrigin, false));
+        mobileScanTunnel.on('exit', () => { mobileScanTunnel = null; if (!settled) finish(localOrigin, false); });
+        setTimeout(() => { if (!settled) { mobileScanTunnel?.kill(); mobileScanTunnel = null; finish(localOrigin, false); } }, 20000);
+    });
+});
+ipcMain.handle('mobileScan:stop', () => { mobileScanSession = null; for (const socket of mobileScanSockets.values()) socket.close(1000, 'Phiên đã dừng'); mobileScanSockets.clear(); if (mobileScanTunnel) { mobileScanTunnel.kill(); mobileScanTunnel = null; } return { success: true }; });
 let pythonProcess = null;
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
+
+// Keep the first paint independent from the large IPC module. Renderer calls
+// are held by preload until this promise resolves, so delaying registration
+// cannot create a race where an API is called before its handler exists.
+let resolveBackendReady;
+let rejectBackendReady;
+const backendReadyPromise = new Promise((resolve, reject) => {
+    resolveBackendReady = resolve;
+    rejectBackendReady = reject;
+});
+let backendLoadStarted = false;
+let backendFallbackTimer = null;
+
+ipcMain.handle('app:waitBackendReady', async () => {
+    try {
+        await backendReadyPromise;
+        return { success: true };
+    } catch (error) {
+        return { success: false, error: error?.message || String(error) };
+    }
+});
+
+function loadBackendHandlers() {
+    if (backendLoadStarted) return;
+    backendLoadStarted = true;
+    if (backendFallbackTimer) {
+        clearTimeout(backendFallbackTimer);
+        backendFallbackTimer = null;
+    }
+    try {
+        startupMark('backend load start');
+        console.time('⚡ ipc-handlers load');
+        require('./ipc-handlers');
+        console.timeEnd('⚡ ipc-handlers load');
+        console.log('✅ IPC handlers loaded');
+        startupMark('backend ready');
+        resolveBackendReady({ success: true });
+    } catch (err) {
+        console.error('❌ IPC handlers failed:', err.message);
+        console.error(err.stack);
+        rejectBackendReady(err);
+    }
+}
 
 if (!hasSingleInstanceLock) {
     app.quit();
@@ -280,6 +408,7 @@ ipcMain.handle('menu:popup', (event, menuName) => {
 });
 
 function createWindow() {
+    startupMark('createWindow start');
     // Ẩn native menu bar — Edit/View được đưa vào React header
     Menu.setApplicationMenu(null);
 
@@ -352,6 +481,7 @@ function createWindow() {
 
     // Open as a centered resizable window; users can maximize when needed.
     mainWindow.once('ready-to-show', () => {
+        startupMark('ready-to-show');
         mainWindow.center();
         mainWindow.show();
         mainWindow.setTitleBarOverlay({
@@ -359,7 +489,24 @@ function createWindow() {
             symbolColor: '#374151',
             height: 40,
         });
+        // Let Chromium paint the login/shell before parsing the 1.3 MB IPC
+        // registry and initializing Prisma/network services.
+        setImmediate(loadBackendHandlers);
     });
+
+    // `ready-to-show` is normally emitted after the first paint, but it is
+    // not guaranteed when the renderer or dev server reports a load error.
+    // Keep the deferred startup optimization bounded so preload IPC cannot
+    // wait forever on a broken page.
+    mainWindow.webContents.once('did-finish-load', () => {
+        startupMark('renderer did-finish-load');
+        if (backendLoadStarted) return;
+        if (backendFallbackTimer) clearTimeout(backendFallbackTimer);
+        backendFallbackTimer = setTimeout(loadBackendHandlers, 2500);
+        backendFallbackTimer.unref?.();
+    });
+    backendFallbackTimer = setTimeout(loadBackendHandlers, 8000);
+    backendFallbackTimer.unref?.();
 
     mainWindow.webContents.setWindowOpenHandler(({ url }) => {
         if (isSafeExternalUrl(url)) void shell.openExternal(url);
@@ -388,7 +535,7 @@ function createWindow() {
 
     // Load React app - auto-detect dev server
     const VITE_DEV_SERVER = DEVELOPMENT_SERVER_URL;
-    const isDev = !app.isPackaged;
+    const isDev = !app.isPackaged && !USE_BUILT_RENDERER;
 
     console.log('isDev:', isDev, '| isPackaged:', app.isPackaged);
 
@@ -432,23 +579,13 @@ function createWindow() {
 
 app.whenReady().then(() => {
     if (!hasSingleInstanceLock) return;
+    startupMark('app ready');
     configureSessionSecurity();
     // Tạo cửa sổ TRƯỚC để luôn hiển thị app
     createWindow();
     // NOTE: Python service được quản lý bởi ipc-handlers.js (ensureFaceService)
     // KHÔNG gọi startPythonService() ở đây — sẽ conflict với kill-port logic của ipc-handlers
     // startPythonService();
-
-    // Import IPC handlers SAU - bọc try-catch để không crash app
-    try {
-        console.time('⚡ ipc-handlers load');
-        require('./ipc-handlers');
-        console.timeEnd('⚡ ipc-handlers load');
-        console.log('✅ IPC handlers loaded');
-    } catch (err) {
-        console.error('❌ IPC handlers failed:', err.message);
-        console.error(err.stack);
-    }
 
     app.on('activate', () => {
         if (BrowserWindow.getAllWindows().length === 0) {
@@ -458,6 +595,12 @@ app.whenReady().then(() => {
 });
 
 app.on('window-all-closed', () => {
+    mobileScanSession = null;
+    for (const socket of mobileScanSockets.values()) socket.close(1000, 'Ứng dụng đã đóng');
+    mobileScanSockets.clear();
+    if (mobileScanTunnel) { mobileScanTunnel.kill(); mobileScanTunnel = null; }
+    mobileScanServer?.close();
+    mobileScanServer = null;
     stopPythonService();
     if (process.platform !== 'darwin') {
         app.quit();

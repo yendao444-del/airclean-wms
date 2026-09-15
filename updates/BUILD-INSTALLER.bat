@@ -1,12 +1,18 @@
 @echo off
 chcp 65001 >nul
 setlocal
-cd /d "%~dp0"
+cd /d "%~dp0.."
 
 echo ============================================
 echo   DBY POS - Build Windows Installer
 echo ============================================
 echo.
+
+call node scripts\release-preflight.cjs full
+if errorlevel 1 (
+    pause
+    exit /b 1
+)
 
 where node >nul 2>&1
 if errorlevel 1 (

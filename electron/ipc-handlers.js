@@ -36541,31 +36541,19 @@ ipcMain.handle("attendance:getRewardSummary", async (_event, periodKey) => {
 
 const SALES_BONUS_RATE = 0.001;
 const SALES_BONUS_EFFECTIVE_AT = new Date("2026-09-01T00:00:00+07:00");
+const SALES_BONUS_CACHE_TTL_MS = 30 * 1000;
+const salesBonusSummaryCache = new Map();
+const salesBonusSummaryInFlight = new Map();
 
-// Staff only receive aggregate figures. Raw orders remain behind the admin APIs.
-ipcMain.handle("attendance:getSalesBonusSummary", async (_event, filters = {}) => {
-  try {
-    requireRole("admin", "manager", "staff");
-    if (!prisma) throw new Error("Prisma not available");
+function isPrismaPoolTimeout(error) {
+  return error?.code === "P2024"
+    || String(error?.message || "").toLowerCase().includes("connection pool");
+}
 
-    const from = new Date(filters.from);
-    const to = new Date(filters.to);
-    if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime()) || from > to) {
-      throw new Error("Khoảng thời gian tính thưởng không hợp lệ.");
-    }
-    if (to.getTime() - from.getTime() > 370 * 24 * 60 * 60 * 1000) {
-      throw new Error("Khoảng thời gian tính thưởng không được vượt quá 370 ngày.");
-    }
-
-    const calculationFrom = new Date(Math.max(from.getTime(), SALES_BONUS_EFFECTIVE_AT.getTime()));
-    let completedRevenue = 0;
-    let returnRevenue = 0;
-    let refundRevenue = 0;
-    let completedOrderCount = 0;
-    let returnCount = 0;
-    let refundCount = 0;
-
-    if (to >= calculationFrom) {
+async function querySalesBonusAggregate(calculationFrom, to) {
+  let lastError;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
       const rows = await prisma.$queryRaw`
         SELECT
           COALESCE((
@@ -36611,21 +36599,56 @@ ipcMain.handle("attendance:getSalesBonusSummary", async (_event, filters = {}) =
               AND "refundDate" <= ${to}
           ), 0)::int AS "refundCount"
       `;
-      const row = rows[0] || {};
-      completedRevenue = Number(row.completedRevenue || 0);
-      returnRevenue = Math.max(0, Number(row.returnRevenue || 0));
-      refundRevenue = Math.max(0, Number(row.refundRevenue || 0));
-      completedOrderCount = Number(row.completedOrderCount || 0);
-      returnCount = Number(row.returnCount || 0);
-      refundCount = Number(row.refundCount || 0);
+      return rows[0] || {};
+    } catch (error) {
+      lastError = error;
+      if (!isPrismaPoolTimeout(error) || attempt === 2) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 300 * (attempt + 1)));
+    }
+  }
+  throw lastError;
+}
+
+// Staff only receive aggregate figures. Raw orders remain behind the admin APIs.
+ipcMain.handle("attendance:getSalesBonusSummary", async (_event, filters = {}) => {
+  let cacheKey = "";
+  try {
+    requireRole("admin", "manager", "staff");
+    if (!prisma) throw new Error("Prisma not available");
+
+    const from = new Date(filters.from);
+    const to = new Date(filters.to);
+    if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime()) || from > to) {
+      throw new Error("Khoảng thời gian tính thưởng không hợp lệ.");
+    }
+    if (to.getTime() - from.getTime() > 370 * 24 * 60 * 60 * 1000) {
+      throw new Error("Khoảng thời gian tính thưởng không được vượt quá 370 ngày.");
     }
 
-    const excludedRevenue = returnRevenue + refundRevenue;
-    const excludedOrderCount = returnCount + refundCount;
-    const eligibleRevenue = Math.max(0, completedRevenue - excludedRevenue);
-    return {
-      success: true,
-      data: {
+    cacheKey = `${from.toISOString()}|${to.toISOString()}`;
+    const cached = salesBonusSummaryCache.get(cacheKey);
+    if (!filters.force && cached && Date.now() - cached.loadedAt < SALES_BONUS_CACHE_TTL_MS) {
+      return { success: true, data: cached.data };
+    }
+    if (salesBonusSummaryInFlight.has(cacheKey)) {
+      return { success: true, data: await salesBonusSummaryInFlight.get(cacheKey) };
+    }
+
+    const calculationFrom = new Date(Math.max(from.getTime(), SALES_BONUS_EFFECTIVE_AT.getTime()));
+    const request = (async () => {
+      const row = to >= calculationFrom
+        ? await querySalesBonusAggregate(calculationFrom, to)
+        : {};
+      const completedRevenue = Number(row.completedRevenue || 0);
+      const returnRevenue = Math.max(0, Number(row.returnRevenue || 0));
+      const refundRevenue = Math.max(0, Number(row.refundRevenue || 0));
+      const completedOrderCount = Number(row.completedOrderCount || 0);
+      const returnCount = Number(row.returnCount || 0);
+      const refundCount = Number(row.refundCount || 0);
+      const excludedRevenue = returnRevenue + refundRevenue;
+      const excludedOrderCount = returnCount + refundCount;
+      const eligibleRevenue = Math.max(0, completedRevenue - excludedRevenue);
+      return {
         rate: SALES_BONUS_RATE,
         effectiveAt: SALES_BONUS_EFFECTIVE_AT.toISOString(),
         requestedFrom: from.toISOString(),
@@ -36641,9 +36664,29 @@ ipcMain.handle("attendance:getSalesBonusSummary", async (_event, filters = {}) =
         completedOrderCount,
         excludedOrderCount,
         bonusAmount: Math.round(eligibleRevenue * SALES_BONUS_RATE),
-      },
-    };
+      };
+    })();
+    salesBonusSummaryInFlight.set(cacheKey, request);
+    try {
+      const data = await request;
+      salesBonusSummaryCache.set(cacheKey, { data, loadedAt: Date.now() });
+      while (salesBonusSummaryCache.size > 12) {
+        salesBonusSummaryCache.delete(salesBonusSummaryCache.keys().next().value);
+      }
+      return { success: true, data };
+    } finally {
+      salesBonusSummaryInFlight.delete(cacheKey);
+    }
   } catch (error) {
+    const cached = cacheKey ? salesBonusSummaryCache.get(cacheKey) : null;
+    if (cached && isPrismaPoolTimeout(error)) {
+      console.warn("[Attendance Sales Bonus] Pool bận, dùng dữ liệu cache gần nhất.");
+      return {
+        success: true,
+        data: { ...cached.data, stale: true },
+        warning: "Đang hiển thị dữ liệu đối soát gần nhất.",
+      };
+    }
     console.error("❌ attendance:getSalesBonusSummary error:", error);
     return { success: false, error: error.message };
   }

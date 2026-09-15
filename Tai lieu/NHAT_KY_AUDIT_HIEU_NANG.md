@@ -1009,7 +1009,7 @@ Trạng thái: **Review tĩnh chỉ đọc đã hoàn tất; không sửa ứng 
 
 ### Script/lệnh tuyệt đối không được chạy trong review
 
-- `RELEASE.bat`, `RELEASE-ver3.bat`, `RELEASE-SUPPERLITE.bat`: đổi version, `git add -A`, commit, push, tạo release, overwrite/cleanup.
+- `updates/RELEASE.bat`, `updates/RELEASE-ver3.bat`, `updates/RELEASE-SUPPERLITE.bat`: đổi version, `git add -A`, commit, push, tạo release, overwrite/cleanup.
 - `rebuild.bat`: kill toàn bộ Electron process và xóa `dist`.
 - `prisma/cleanup-categories.js`: xóa mọi category không được dùng và không chứa “Khẩu”.
 - Các migration SQLite cũ rebuild/drop toàn bảng trong khi datasource hiện tại là PostgreSQL.
@@ -1478,6 +1478,129 @@ Trạng thái: **Review tĩnh chỉ đọc đã hoàn tất; không sửa ứng 
 - `npm run build` → thành công, 4008 module.
 - `git diff --check` trên các file liên quan → không có lỗi whitespace mới; chỉ còn cảnh báo LF/CRLF Windows.
 
+## 54. Rà soát tải `Thông báo > Chính sách` (2026-09-14)
+
+### Nguyên nhân xác định
+
+- Database runtime hiện chưa có các bảng `Announcement`, `AnnouncementRecipient` và `UserNotification`, nên luồng thông báo dùng nhánh fallback tương thích.
+- `policies:getCurrent` và fallback thông báo trước đây đều đọc/parse toàn bộ `appConfig.attendanceData` mỗi lần; bản ghi hiện tại khoảng 5,3 MB. Đo trực tiếp cho thấy một lượt đọc đầy đủ mất khoảng 3,3 giây trong môi trường hiện tại, còn kiểm tra `updatedAt` chỉ khoảng 0,5 giây.
+- Fallback announcement còn lặp lại việc đọc danh sách nhân viên/người nhận cho từng thông báo (N+1), làm tăng độ trễ khi số thông báo chính sách tăng.
+- Bộ ảnh Chính sách gồm 14 PNG, khoảng 22 MB tổng cộng. Chúng được phát hành thành asset riêng; trang chỉ tải ảnh nền của chính sách đang chọn, vì vậy đây là chi phí mạng/giải mã sau khi dữ liệu đã hiển thị, không phải nguyên nhân của lượt đọc cấu hình 3–10 giây.
+
+### Thay đổi an toàn đã thực hiện
+
+- Thêm `getAttendanceDataSnapshot()` dùng cache trong tiến trình và đối chiếu `updatedAt` trước khi tái sử dụng; khi cấu hình đổi, hệ thống tự đọc lại bản ghi mới và parse lại đầy đủ.
+- Cho `policies:getCurrent`, `getFallbackAnnouncements` và `getAttendanceEmployeeUsernames` dùng chung snapshot; không ghi, xóa hoặc biến đổi dữ liệu database.
+- Gom lookup nhân viên và cấu hình audience trong một request fallback để tránh N+1 query.
+- Bổ sung log `[Perf] policies:getCurrent ms=... cached=...` để theo dõi lượt lạnh/lượt nóng trên máy chạy Electron.
+
+### Xác minh
+
+- `node --check electron/ipc-handlers.js` → thành công.
+- `npm run build` → thành công; chunk `NotificationCenter` khoảng 71 KB, ảnh chính sách vẫn là asset riêng.
+- `git diff --check` → không có lỗi whitespace mới.
+- Không chạy mutation, không sửa/xóa bản ghi payroll, attendance, reward, fine, snapshot hoặc announcement.
+
+### Lưu ý còn lại
+
+- Lượt mở Chính sách đầu tiên sau khi khởi động vẫn có thể mất thời gian đọc 5,3 MB nếu cache chưa được làm nóng; các lượt sau dùng kiểm tra phiên bản nhẹ hơn. Nếu cần giảm tiếp lượt đầu, bước tiếp theo là tách cấu hình chính sách thành read-model nhỏ riêng, nhưng phải triển khai migration có kiểm soát và kiểm thử đồng bộ đa máy trước khi áp dụng.
+
+## Review sau triển khai tối ưu Electron (2026-09-13)
+
+### Còn tồn tại
+
+- **P1 — Có thể treo toàn bộ IPC khi khởi động:** `electron/main.js:394-405` chỉ gọi `loadBackendHandlers()` sau `ready-to-show`, trong khi `electron/preload.js:6-14` chờ `app:waitBackendReady` không có timeout. Nếu renderer không phát `ready-to-show` (Vite lỗi, preload lỗi hoặc load trang thất bại), mọi API bị treo vô hạn và không có thông báo lỗi rõ ràng.
+- **P1 — Nguy cơ lệch thưởng đóng gói với SKU lịch sử:** `electron/ipc-handlers.js:6928-6935` lọc `status: "active"`. Sản phẩm đã ngừng hoạt động nhưng vẫn xuất hiện trong đơn cũ sẽ không vào catalog; renderer có thể rơi về cấp đóng gói mặc định, làm sai số gói/hoa hồng khi tính lại kỳ.
+- **P1 — Tối ưu chưa loại bỏ nút thắt chính:** `src/pages/Attendance.tsx:4694-4716` vẫn phân trang và parse tối đa 50.000 đơn ngay trên renderer. Vì vậy các kỳ nhiều đơn vẫn có thể mất nhiều giây dù payload đã compact; chưa đạt mục tiêu mở Bảng công tức thời.
+- **P2 — Bundle shell vẫn tải eager các cảnh báo/ticker:** `src/App.tsx:47-50` import trực tiếp `GlobalTaskAlerts`, `HeaderTaskTicker`, `GlobalNotificationPopup`. NotificationCenter đã lazy nhưng ba module còn lại vẫn nằm trong bundle khởi động.
+- **P2 — Cần smoke-test camera chấm công:** `electron/main.js:8` thêm switch Chromium thay đổi đường đi bộ nhớ của video frame. Không sửa dữ liệu, nhưng có thể đổi mức dùng CPU/khả năng tương thích camera trên máy cũ; hiện chưa có kiểm thử camera thật sau thay đổi.
+
+## 55. Đối chiếu yêu cầu hoa hồng ngày sale (2026-09-14)
+
+- Cơ chế hiện tại đã có luồng thông báo khi Admin lưu thay đổi đơn giá: backend tạo announcement `PKG-REWARD-WEEKLY-v...`, phát `notifications:changed`, user nhận popup “Thông báo mới cần xác nhận”, và có thể xem lại tại `Thông báo → Chính sách`.
+- Tuy nhiên cấu hình hiện tại chỉ lưu đơn giá, SKU/mức đóng gói và lịch sử hiệu lực; chưa có `saleDates` hoặc `saleMultiplier`. Vì vậy các ngày 09/09, 15/09, 25/09 và hệ số tăng 50% chưa được tính tự động.
+- Khi triển khai đúng, cần lưu lịch sale trong cùng version lịch sử hoa hồng, tính `đơn giá ngày sale = đơn giá cơ bản × 1,5` theo ngày vận đơn/hoàn tất đóng gói, và tạo announcement nêu rõ ngày áp dụng, mức tăng và phạm vi nhân viên.
+- Không được sửa lại đơn đã chốt hoặc snapshot lương cũ; lịch sale chỉ áp dụng cho bản ghi chưa chốt và đúng ngày hiệu lực. Đây là yêu cầu cần chốt trước khi code để tránh hồi tố dữ liệu.
+
+## 56. Áp dụng lịch sale hoa hồng từ 14/09/2026 (2026-09-14)
+
+- Mốc hiệu lực được chốt là `14/09/2026` (hôm nay). Ngày `09/09/2026` nằm trước mốc nên giữ cơ chế cũ; chỉ `15/09/2026` và `25/09/2026` được tăng 50%.
+- Bổ sung `saleDates`, `saleMultiplier` và `saleEffectiveAt` vào version lịch sử hoa hồng. Công thức mới là `đơn giá cơ bản × 1,5` đúng ngày sale; ngày thường giữ đơn giá cơ bản.
+- Lịch sale được lưu cùng version khi Admin bấm lưu, nên dữ liệu chốt/snapshot trước mốc không bị hồi tố hoặc tính lại.
+- Khi lịch sale/đơn giá thay đổi, backend tự tạo announcement, phát `notifications:changed`, thêm popup yêu cầu xác nhận và hiển thị lịch sale trong `Thông báo → Chính sách → Hoa hồng đóng gói`.
+- Giao diện cấu hình hiển thị ngày sale và hệ số; ngày có thể nhập theo `DD/MM/YYYY`, hệ thống chuẩn hóa thành `YYYY-MM-DD` và loại giá trị không hợp lệ.
+- Chưa ghi trực tiếp vào database trong lượt này; thay đổi chỉ được lưu khi Admin xác nhận trong giao diện. Không xóa hoặc sửa lịch sử lương, thưởng, phạt hay snapshot đã khóa.
+- **P2 — Cold start `START.bat` vẫn phụ thuộc Vite dev + kiểm tra/generate Prisma:** `scripts/start-electron-dev.js:319-340` luôn quarantine/đối chiếu schema trước khi khởi động và chờ Vite tối đa 30 giây. Đây là lý do thời gian lần chạy đầu vẫn có thể cao; thay đổi hiện tại chủ yếu cải thiện first paint, không biến launcher thành production runtime.
+- **P2 — Bộ kiểm tra data-safety hiện không chạy được:** `node scripts/verify-data-safety.js` dừng tại `scripts/verify-data-safety.js:19` vì `src/pages/R2StorageLab.tsx` đang bị xóa trong working tree. Đây là lỗi kiểm thử/độ bao phủ, không phải thao tác xóa dữ liệu của lần review này.
+- **P3 — Hợp đồng compact chưa nhất quán:** `ecommerceExports:getAll` không select `updatedAt` ở compact mode nhưng formatter vẫn đọc trường này. Hiện tại thành `null` và không ảnh hưởng Attendance, nhưng nên thống nhất contract trước khi module khác dùng lại.
+
+### Xác minh lần review
+
+- `node --check electron/main.js electron/preload.js electron/ipc-handlers.js scripts/start-electron-dev.js` → đạt.
+- `npm run build` → đạt (Vite 7.3.6; cảnh báo chunk lớn vẫn còn, bundle chính khoảng 797 kB minified).
+- Log có sẵn xác nhận nút thắt đóng gói chưa ổn định: 5.652 đơn thường mất khoảng 0,8-7 giây để nhận, từng có một lượt timeout 10 giây; phần parse renderer sau khi nhận khoảng 0,16 giây.
+- `git diff --check` → không có lỗi whitespace mới; chỉ có cảnh báo chuyển LF/CRLF của Windows.
+- Không mở Electron, không gửi email, không xóa/sửa bản ghi và không chạy mutation trên database thật.
+- **Review này chỉ ghi nhận tồn tại, chưa sửa các điểm trên** để tránh thay đổi phạm vi và công thức lương/thưởng/phạt.
+
+## Triển khai sau review hiệu năng (2026-09-13)
+
+- Đã thêm fallback `did-finish-load` và timer 8 giây cho backend IPC; preload có một timeout 30 giây dùng chung. Renderer không còn chờ vô hạn nếu Vite/preload lỗi.
+- `products:getPackingCatalog` không còn lọc sản phẩm `active`, giữ được mapping SKU của sản phẩm lịch sử/ngừng bán. Không đổi dữ liệu sản phẩm.
+- Thêm `ecommerceExports:getPackingReadModel`: main process đọc dữ liệu hoàn tất theo kỳ, parse cấu phần đóng gói, cache theo revision đơn + combo và từ chối snapshot bị thay đổi giữa hai lần đối chiếu. Renderer nhận đúng cấu trúc cũ và vẫn có compatibility path khi bản packaged cũ chưa có API mới.
+- Các component cảnh báo/ticker được lazy-load; bundle entry production giảm từ khoảng 797 kB xuống khoảng 764 kB minified, tách thêm các chunk riêng.
+- Compact export bổ sung `updatedAt`; bộ lọc loại file Prisma `.tmp*` khỏi package. Bản package kiểm tra có 0 file `.tmp*`.
+- Không bật ASAR ở đợt này: ứng dụng hiện còn dùng đường dẫn ghi/khởi chạy tương đối `__dirname` cho backup, face service và update; bật ASAR ngay có thể làm hỏng luồng ghi hoặc executable. Đây là việc riêng cần refactor path + smoke test trước.
+
+### Xác minh sau triển khai
+
+- `node scripts/verify-data-safety.js` → đạt; có cảnh báo rõ rằng `R2StorageLab.tsx` đang bị team khác xóa nên các kiểm tra UI R2 được bỏ qua.
+- `node scripts/verify-packing-read-model.cjs` → đạt.
+- `node scripts/verify-packing-read-model.cjs --live` → đạt trên 15.366 đơn hoàn tất và 835 combo read-only; kết quả mới trùng logic renderer cũ.
+- `npx tsc --noEmit --pretty false`, các `node --check` liên quan và `npm run build` → đạt.
+- `electron-builder --dir` kiểm tra thành công; không có file `.tmp*` trong package, nhưng vẫn giữ `asar: false` vì lý do an toàn đường dẫn nêu trên.
+- Không chạy mutation, không xóa/sửa bản ghi, không gửi email và không thay đổi schema/công thức lương-thưởng-phạt.
+
+## Review cuối sau triển khai tối ưu (2026-09-13)
+
+### Kết quả xác minh
+
+- `node --check` cho `electron/main.js`, `electron/preload.js`, `electron/ipc-handlers.js`, `scripts/start-electron-dev.js` và `electron/packing-read-model.js` → đạt.
+- `node scripts/start-electron-dev.js --verify-fast-build` → đạt; renderer production hiện tại được tái sử dụng trong khoảng 0,0 giây, không mở Electron và không chiếm launcher lock.
+- `node scripts/verify-data-safety.js` → đạt; chỉ bỏ qua kiểm tra UI R2 vì `src/pages/R2StorageLab.tsx` đang được team khác xóa trong working tree.
+- `node scripts/verify-packing-read-model.cjs --live` → đạt trên 15.366 đơn hoàn tất và 835 combo; `npx tsc --noEmit --pretty false`, `npm run build` và `git diff --check` → đạt.
+- Không chạy thao tác ghi/xóa database, không gửi email, không thay đổi schema, snapshot hoặc công thức lương-thưởng-phạt.
+
+### Điểm đã xử lý trong review cuối
+
+- **Đã đóng fallback fail-open:** khi preload mới có `getPackingReadModel` nhưng handler trả lỗi/timeout, `Attendance.tsx` giữ dữ liệu gần nhất và báo lỗi; đường đọc phân trang cũ chỉ còn dùng khi endpoint không tồn tại trên bản packaged cũ. Không còn bypass kiểm tra revision trong bản mới.
+- **Đã giảm tải revision poll:** tab Đóng gói chống request chồng nhau và đổi chu kỳ aggregate từ 2,5 giây thành 15 giây. Sự kiện stock nội bộ và khi tab trở lại visible vẫn refresh ngay, nên không thay đổi logic nghiệp vụ.
+- **Đã giảm cold start khi source stale:** launcher runtime không còn chặn trên bước TypeScript check đầy đủ; nó chỉ chạy Vite để tạo renderer cần mở app. Kiểm tra type vẫn bắt buộc trong `npm run build` trước đóng gói/release. Đo cưỡng bức một lượt stale build: khoảng 10,2 giây, giảm từ khoảng 27,2 giây; lượt kế tiếp tái sử dụng `dist` trong khoảng 0,0 giây.
+- **P3 — ASAR vẫn cố ý chưa bật:** backup/restore, face executable và update còn phụ thuộc đường dẫn ghi/chạy từ `__dirname`; bật ASAR trước khi refactor path có thể làm hỏng các luồng này.
+- **P3 — Smoke package còn hai file khóa tổng khoảng 222 KB:** `tmp/perf-package-check` và `tmp/perf-package-check-final` đã được dọn gần hết; mỗi thư mục chỉ còn một `default_app.asar` khoảng 111 KB đang bị Electron giữ lock. Không ảnh hưởng dữ liệu; sẽ xóa được sau khi đóng tiến trình Electron tương ứng.
+
+### Kết luận an toàn
+
+- Chưa thấy thao tác nào trong đợt tối ưu này có thể xóa, ghi đè hoặc làm mất dữ liệu lương, thưởng đóng gói, phạt hay snapshot đã khóa.
+- Read-model mới chỉ đọc, cache trong bộ nhớ và bỏ kết quả khi revision thay đổi; giới hạn 50.000 đơn vẫn dừng để tránh tính thiếu thưởng.
+- Các điểm P2 về fallback và tải polling đã được xử lý; các mục P3 còn lại là giới hạn đóng gói/triển khai, không phải rủi ro mất dữ liệu.
+
+### Đối chiếu thay đổi song song cuối lượt
+
+- `electron/main.js` được team khác bổ sung tunnel cho máy quét di động trong lúc review. Đã đọc lại current state: phần này không thay thế `DBYPOS_USE_DIST`, deferred `loadBackendHandlers`, timeout backend hoặc đường load `dist` của tối ưu khởi động.
+- `node --check electron/main.js` và đối chiếu Prisma source/generated schema đều đạt sau thay đổi song song.
+- Lần `npm run build` độc lập cuối cùng đạt với 8.578 module, khoảng 9,98 giây cho Vite; entry renderer vẫn khoảng 764,00 kB minified / 248,22 kB gzip.
+- Smoke-package cuối bằng `electron-builder --dir` đạt. Bản unpacked có đủ entry/asset renderer, main/preload/IPC/read-model, Prisma query engine và dependency máy quét; kiểm tra trả về 0 file `.tmp*`.
+- Phần nội dung khoảng 822 MB của smoke-package cuối đã được dọn ngay sau kiểm tra; chỉ còn hardlink `default_app.asar` khoảng 111 KB đang bị Electron hiện tại giữ lock. Không dừng app của người dùng để xóa file này.
+
+### Trạng thái hoàn tất
+
+- Đã triển khai toàn bộ hạng mục hiệu năng đã duyệt trong phạm vi an toàn: fast `START.bat`, `START-DEV.bat`, deferred backend có timeout, renderer lazy chunks, packing read-model/cache/fingerprint, fail-closed khi snapshot lỗi, polling không chồng và package loại Prisma temp.
+- Bộ guard tĩnh hiện kiểm tra cả fast/dev launcher, hành vi đóng Electron không tự mở lại, timeout backend, fingerprint/in-flight/giới hạn 50.000 đơn, fail-closed, chu kỳ polling 15 giây, lazy-load và bộ lọc package.
+- Lượt xác minh cuối: syntax Electron/launcher, data-safety, unit equivalence, live equivalence 15.366 đơn + 835 combo, TypeScript, fresh-renderer reuse và `git diff --check` đều đạt.
+- `npm run build` cuối đạt và hash `electron/main.js` giữ nguyên xuyên suốt lượt build, xác nhận không còn thay đổi song song trong cửa sổ kiểm tra cuối.
+- Không còn lỗi P1/P2 đã biết trong phần tối ưu này. ASAR tiếp tục là hạng mục refactor riêng bị loại khỏi đợt triển khai vì bật ngay có rủi ro làm hỏng backup/restore/update/face executable.
+
 ## 51. Cho phép xóa vĩnh viễn riêng công việc bàn giao (2026-09-01)
 
 ### Điều chỉnh theo nghiệp vụ
@@ -1526,6 +1649,16 @@ Trạng thái: **Review tĩnh chỉ đọc đã hoàn tất; không sửa ứng 
 - `.env` ở thư mục dự án có khóa `DATABASE_URL`; không đọc hoặc ghi giá trị bí mật.
 - `node --check scripts/start-electron-dev.js`, bộ kiểm tra data-safety và kiểm tra whitespace đều đạt.
 - Không khởi động ứng dụng tự động sau khi sửa để tránh kích hoạt các tác vụ nền trên dữ liệu thật; lần chạy `START.bat` tiếp theo sẽ dùng đúng working tree.
+
+## Nhận mã vận đơn dù click lệch vùng trong Xuất hàng TMDT (2026-09-12)
+
+- Trước đây ô quét chỉ dùng `autoFocus`; sau khi click bộ lọc, bảng hoặc control khác, máy quét có thể đưa chuỗi mã vào control đó.
+- Thêm bộ bắt phím ở cấp tab cho chuỗi phím nhanh kết thúc bằng Enter. Khi nhận dạng đúng tốc độ máy quét, hệ thống chặn chuỗi khỏi ô đang focus, khôi phục giá trị cũ của ô và gọi cùng `handleScan` hiện tại.
+- Gõ tay chậm và thao tác trong chính ô quét vẫn giữ nguyên; click chuột sẽ reset bộ đệm đang nhận.
+- Không thay đổi API/database hay logic trừ tồn kho; chỉ chuyển điểm nhận input trong renderer.
+- `npx tsc --noEmit --pretty false` và `npm run build` đạt; không chạy quét thật hoặc mutation dữ liệu.
+- Bổ sung sau kiểm tra thực tế: click vùng thường hoặc chọn xong option sẽ tự focus lại ô quét để dấu nháy xuất hiện. Không giành focus của input/textarea, contenteditable, bộ chọn đang mở, date picker, modal hoặc drawer.
+- Nới nhận dạng máy quét lên tối đa 120 ms giữa hai ký tự và trung bình 90 ms, phù hợp thiết bị keyboard-wedge chậm hơn; vẫn yêu cầu mã tối thiểu 6 ký tự và Enter để hạn chế bắt nhầm thao tác gõ tay.
 
 ## Sửa nút mắt xem giao diện theo vai trò (2026-09-07)
 
@@ -1593,3 +1726,6 @@ Trạng thái: **Review tĩnh chỉ đọc đã hoàn tất; không sửa ứng 
 - `node scripts/verify-data-safety.js` → thành công; có kiểm tra renderer Trả hàng không được ghi đè `attendanceData` và phạt ưu tiên liên kết `returnId`.
 - `npm run build` → thành công, 4008 module; lần build này khoảng 8.77 giây.
 - `git diff --check` trên các file liên quan → không có lỗi whitespace mới; chỉ còn cảnh báo LF/CRLF Windows.
+
+57. 2026-09-14 - Cập nhật lịch sale đóng gói theo chu kỳ tháng: ngày trùng tháng (01/01...12/12) và ngày 15, 25 hàng tháng; vẫn hỗ trợ ngày cụ thể YYYY-MM-DD, không hồi tố dữ liệu/phiếu đã chốt. Chỉ thay đổi biểu diễn và cơ chế tra lịch, không xoá dữ liệu.
+58. 2026-09-14 - Redesign khung cấu hình hoa hồng đóng gói theo Product Design: hero/header rõ ràng, công tắc tăng 50% thay cho ô multiplier thủ công, bố cục responsive. Chỉ thay đổi UI/UX, không tác động dữ liệu nghiệp vụ.

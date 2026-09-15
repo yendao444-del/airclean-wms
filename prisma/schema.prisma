@@ -551,21 +551,30 @@ model Expense {
 // ========================================
 
 model EcommerceExport {
-  id                    Int      @id @default(autoincrement())
+  id                    Int                   @id @default(autoincrement())
   customerName          String // Shopee, TikTok, etc.
   ecommerceExportCode   String? // Mã phiếu xuất
   orderNumber           String? // Mã đơn hàng / Mã vận đơn
   ecommerceExportReason String? // Lý do xuất
   ecommerceExportDate   DateTime // Ngày xuất
   items                 String // JSON array of items
-  totalAmount           Float    @default(0)
+  totalAmount           Float                 @default(0)
   notes                 String?
-  status                String   @default("processing") // processing, completed
-  createdAt             DateTime @default(now())
-  updatedAt             DateTime @updatedAt
+  status                String                @default("processing") // pending, processing, completed, mismatch, cancelled
+  createdAt             DateTime              @default(now())
+  updatedAt             DateTime              @updatedAt
   createdBy             String?
   pickedBy              String? // Người đóng gói/pickup
+  trackingNumber        String?
+  orderPlacedAt         DateTime?
+  slaDeadlineAt         DateTime?
+  completedAt           DateTime?
+  mismatchAt            DateTime?
+  mismatchReason        String?
+  lastSeenImportBatchId Int?
+  lastSeenImportBatch   EcommerceImportBatch? @relation(fields: [lastSeenImportBatchId], references: [id], onDelete: SetNull)
 
+  @@unique([customerName, orderNumber])
   @@index([status])
   @@index([customerName])
   @@index([orderNumber])
@@ -575,6 +584,25 @@ model EcommerceExport {
   @@index([status, ecommerceExportDate])
   @@index([status, createdAt])
   @@index([status, updatedAt])
+  @@index([trackingNumber])
+  @@index([status, slaDeadlineAt])
+  @@index([lastSeenImportBatchId])
+}
+
+model EcommerceImportBatch {
+  id            Int               @id @default(autoincrement())
+  platform      String
+  fileNames     String?
+  importedCount Int               @default(0)
+  createdCount  Int               @default(0)
+  updatedCount  Int               @default(0)
+  mismatchCount Int               @default(0)
+  status        String            @default("completed")
+  createdBy     String?
+  createdAt     DateTime          @default(now())
+  exports       EcommerceExport[]
+
+  @@index([platform, createdAt])
 }
 
 // ========================================
@@ -884,25 +912,25 @@ model AttendanceLog {
 // Attendance workstations discovered automatically when the desktop app is
 // opened. Admin approval is intentionally separate from discovery.
 model AttendanceDevice {
-  id              Int      @id @default(autoincrement())
-  deviceId        String   @unique
-  deviceCode      String   @unique
+  id              Int       @id @default(autoincrement())
+  deviceId        String    @unique
+  deviceCode      String    @unique
   machineName     String
   requesterUserId Int?
   requesterName   String?
   publicKey       String?
   keyFingerprint  String?
-  keyProvider     String   @default("windows-dpapi")
-  tpmAvailable    Boolean  @default(false)
+  keyProvider     String    @default("windows-dpapi")
+  tpmAvailable    Boolean   @default(false)
   macAddress      String?
   publicIp        String?
   networkName     String?
-  networkVerified Boolean  @default(false)
+  networkVerified Boolean   @default(false)
   appVersion      String?
   platform        String?
-  status          String   @default("unregistered")
-  firstSeenAt     DateTime @default(now())
-  lastSeenAt      DateTime @default(now())
+  status          String    @default("unregistered")
+  firstSeenAt     DateTime  @default(now())
+  lastSeenAt      DateTime  @default(now())
   approvedAt      DateTime?
   approvedById    Int?
   approvedByName  String?
@@ -913,8 +941,8 @@ model AttendanceDevice {
   revokedById     Int?
   revokedByName   String?
   note            String?
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
 
   @@index([status, lastSeenAt])
   @@index([requesterUserId])

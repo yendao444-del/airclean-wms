@@ -1,7 +1,10 @@
 @echo off
 chcp 65001 >nul
 setlocal enabledelayedexpansion
-cd /d "%~dp0"
+cd /d "%~dp0.."
+
+call node scripts\release-preflight.cjs full
+if errorlevel 1 ( pause & exit /b 1 )
 
 for /f "tokens=*" %%t in ('gh auth token 2^>nul') do set GH_TOKEN=%%t
 
@@ -41,9 +44,9 @@ echo.
 
 echo [2/6] Building Vite...
 echo ----------------------------------------
-call node_modules\.bin\vite build
-if errorlevel 1 ( echo ❌ Vite build that bai! & pause & exit /b 1 )
-echo ✅ Vite build thanh cong!
+call npm run build
+if errorlevel 1 ( echo ❌ TypeScript hoac Vite build that bai! & pause & exit /b 1 )
+echo ✅ Build thanh cong!
 echo.
 
 echo [3/7] Building Python Face Service EXE...
@@ -124,6 +127,12 @@ copy /Y "python\attendance_service.py"  "_full_temp\resources\app\python\" >nul 
 copy /Y "python\requirements.txt"       "_full_temp\resources\app\python\" >nul 2>&1
 copy /Y "package.json"               "_full_temp\resources\app\package.json"                 >nul 2>&1
 
+rem Never publish development database/service credentials in a patch.
+del /Q "_full_temp\resources\app\electron\config.js" 2>nul
+del /Q "_full_temp\resources\app\electron\supabase-storage.json" 2>nul
+del /Q "_full_temp\resources\app\electron\gdrive-credentials.json" 2>nul
+del /Q "_full_temp\resources\app\electron\gdrive-token.json" 2>nul
+
 cd _full_temp
 powershell -Command "Compress-Archive -Path '*' -DestinationPath '..\DBYPOS-v!NEW_VERSION!.zip' -Force"
 cd ..
@@ -141,6 +150,15 @@ echo.
 
 echo [7/7] Git commit + Push + GitHub Release...
 echo ----------------------------------------
+echo Review every file below. RELEASE will stage all of them:
+git status --short
+set /p "RELEASE_CONFIRM=Type RELEASE to continue: "
+if /I not "!RELEASE_CONFIRM!"=="RELEASE" (
+    echo [CANCELLED] Nothing was committed or published.
+    node scripts\release-version.cjs set !CURRENT_VERSION! >nul
+    pause
+    exit /b 1
+)
 git add -A
 git commit -m "v!NEW_VERSION! - !NOTES!"
 git push origin master > _gh_out.txt 2>&1

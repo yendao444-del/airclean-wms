@@ -9,17 +9,218 @@
   color: #12233f;
 }
 
-.settings-device-phase {
+.settings-system-panel {
+  margin-bottom: 16px;
+  padding: 16px;
+  border: 1px solid #dfe7f0;
+  border-radius: 12px;
+  background: linear-gradient(135deg, #f8fbff 0%, #fff 64%);
+  box-shadow: 0 4px 16px rgba(15, 35, 60, .04);
+}
+
+.settings-system-panel-heading {
   display: flex;
   align-items: center;
-  gap: 8px;
-  margin-bottom: 14px;
-  padding: 10px 14px;
-  border: 1px solid #cfe4ff;
-  border-radius: 8px;
-  background: #f2f8ff;
-  color: #1769aa;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.settings-system-panel-heading > div {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.settings-system-panel-heading > div > svg {
+  color: #1684e8;
+  font-size: 22px;
+}
+
+.settings-system-panel-heading span,
+.settings-system-metric span {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+}
+
+.settings-system-panel-heading strong {
+  color: #12233f;
+  font-size: 14px;
+}
+
+.settings-system-panel-heading small {
+  margin-top: 2px;
+  color: #7b899c;
+  font-size: 11px;
+}
+
+.settings-system-metric {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  height: 100%;
+  min-height: 66px;
+  padding: 12px 14px;
+  border: 1px solid #e6ebf1;
+  border-radius: 9px;
+  background: #fff;
+}
+
+.settings-system-metric > svg {
+  flex: 0 0 auto;
+  color: #1684e8;
+  font-size: 24px;
+}
+
+.settings-system-metric small {
+  margin-bottom: 3px;
+  color: #7b899c;
+  font-size: 10px;
+}
+
+.settings-system-metric strong,
+.settings-system-metric .ant-badge-status-text {
+  overflow: hidden;
+  color: #12233f;
   font-size: 12px;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-system-technical {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 20px;
+  margin-top: 12px;
+  padding: 9px 12px;
+  border-radius: 8px;
+  background: #eef5fc;
+  color: #6e7d91;
+  font-size: 11px;
+}
+
+.settings-system-technical strong {
+  margin-left: 4px;
+  color: #243955;
+}
+
+.settings-device-mode-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  margin-bottom: 14px;
+  padding: 14px 16px;
+  border: 1px solid #ffd591;
+  border-left: 4px solid #fa8c16;
+  border-radius: 10px;
+  background: linear-gradient(90deg, #fff7e6 0%, #fffdf8 100%);
+}
+
+.settings-device-mode-banner.is-enabled {
+  border-color: #9de2bd;
+  border-left-color: #00a85a;
+  background: linear-gradient(90deg, #edfff5 0%, #fbfffd 100%);
+}
+
+.settings-device-mode-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  flex: 0 0 auto;
+  border-radius: 9px;
+  background: #fa8c16;
+  color: #fff;
+  font-size: 17px;
+}
+
+.settings-device-mode-banner.is-enabled .settings-device-mode-icon {
+  background: #00a85a;
+}
+
+.settings-device-mode-content {
+  min-width: 0;
+  flex: 1;
+}
+
+.settings-device-mode-title {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  color: #6d3b00;
+  font-size: 14px;
+}
+
+.settings-device-mode-title .ant-tag {
+  margin: 0;
+  font-size: 10px;
+  font-weight: 800;
+}
+
+.settings-device-mode-banner.is-enabled .settings-device-mode-title {
+  color: #075d35;
+}
+
+.settings-device-mode-content p {
+  margin: 5px 0 7px;
+  color: #80551c;
+  font-size: 12px;
+}
+
+.settings-device-mode-banner.is-enabled .settings-device-mode-content p,
+.settings-device-mode-banner.is-enabled .settings-device-mode-notes {
+  color: #25724e;
+}
+
+.settings-device-mode-notes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 18px;
+  color: #9a681e;
+  font-size: 11px;
+}
+
+.settings-device-mode-state {
+  display: flex;
+  min-width: 118px;
+  flex-direction: column;
+  align-items: center;
+  padding: 8px 12px;
+  border: 1px solid #ffc069;
+  border-radius: 8px;
+  background: #fff;
+}
+
+.settings-device-mode-state small {
+  color: #9a681e;
+  font-size: 10px;
+}
+
+.settings-device-mode-state strong {
+  margin-top: 2px;
+  color: #d46b08;
+  font-size: 12px;
+}
+
+.settings-device-mode-state .ant-btn {
+  min-width: 94px;
+  margin-top: 7px;
+}
+
+.settings-device-mode-banner.is-enabled .settings-device-mode-state {
+  border-color: #9de2bd;
+}
+
+.settings-device-mode-banner.is-enabled .settings-device-mode-state small {
+  color: #39775a;
+}
+
+.settings-device-mode-banner.is-enabled .settings-device-mode-state strong {
+  color: #008f4c;
 }
 
 .settings-device-schema-warning {
@@ -51,7 +252,7 @@
 
 .settings-device-toolbar {
   display: grid;
-  grid-template-columns: minmax(280px, 1fr) 210px auto;
+  grid-template-columns: minmax(260px, 1fr) 190px auto auto;
   gap: 10px;
   margin-bottom: 14px;
 }
@@ -169,9 +370,64 @@
   color: #078b50;
 }
 
-.settings-device-note {
-  margin-top: 12px;
+.settings-device-detail-summary {
+  margin: 8px 0 20px;
+}
+
+.settings-device-detail-summary .ant-descriptions-item-content {
+  overflow-wrap: anywhere;
+}
+
+.settings-device-history-heading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 18px 0 10px;
+  color: #12233f;
+  font-size: 14px;
+  font-weight: 800;
+}
+
+.settings-network-config-note {
+  margin-bottom: 14px;
+}
+
+.settings-network-config-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.settings-network-config-row {
+  display: grid;
+  grid-template-columns: minmax(150px, .8fr) minmax(240px, 1.4fr) 112px 40px;
+  gap: 8px;
+}
+
+.settings-network-config-empty {
+  padding: 24px;
+  border: 1px dashed #d9e1ea;
   border-radius: 8px;
+  color: #7d8a9d;
+  text-align: center;
+}
+
+.settings-admin-tabs > .ant-tabs-nav {
+  margin-bottom: 18px;
+}
+
+.settings-admin-tabs > .ant-tabs-nav::before {
+  border-bottom-color: #e5eaf0;
+}
+
+.settings-admin-tabs > .ant-tabs-nav .ant-tabs-tab {
+  padding: 8px 14px;
+  border-radius: 8px 8px 0 0;
+}
+
+.settings-admin-tabs > .ant-tabs-nav .ant-tabs-tab-active {
+  background: #f2f8ff;
 }
 
 @media (max-width: 900px) {
@@ -180,6 +436,48 @@
   }
 
   .settings-device-toolbar {
+    grid-template-columns: 1fr;
+  }
+
+  .settings-device-mode-banner {
+    flex-wrap: wrap;
+  }
+
+  .settings-device-mode-state {
+    width: 100%;
+  }
+
+  .settings-system-panel {
+    padding: 13px;
+  }
+
+  .settings-system-panel-heading {
+    align-items: flex-start;
+  }
+
+  .settings-system-technical {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .settings-network-config-row {
+    grid-template-columns: 1fr;
+    padding: 12px;
+    border: 1px solid #e4eaf0;
+    border-radius: 8px;
+  }
+}
+
+@media (max-width: 520px) {
+  .settings-system-panel-heading {
+    flex-direction: column;
+  }
+
+  .settings-system-panel-heading .ant-btn {
+    width: 100%;
+  }
+
+  .settings-system-technical {
     grid-template-columns: 1fr;
   }
 }
