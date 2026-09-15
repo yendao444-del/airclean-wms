@@ -932,7 +932,7 @@ export interface ElectronAPI {
   ecommerceExports: {
     getOperationalCounts: () => Promise<{
       success: boolean;
-      data?: { pending: number; completed: number; mismatch: number; overdue: number; cancelled: number };
+      data?: { total: number; pending: number; completed: number; mismatch: number; overdue: number; cancelled: number };
       error?: string;
     }>;
     getAll: (filters?: {

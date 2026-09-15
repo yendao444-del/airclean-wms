@@ -5127,7 +5127,7 @@ async function buildSkuCache(tx) {
  * @param {Array<{sku: string, quantity: number}>} skuChanges - Danh sách {sku, quantity} (quantity < 0 = trừ kho)
  * @param {object} logContext - Context log cho inventory
  */
-async function batchStockUpdate(tx, skuChanges, logContext) {
+async function batchStockUpdate(tx, skuChanges, logContext, options = {}) {
   await lockGlobalInventoryMutation(tx);
   // Rebuild after acquiring the database lock. A cache created before the
   // lock could contain a stale variants JSON document from another client.
@@ -5182,7 +5182,7 @@ async function batchStockUpdate(tx, skuChanges, logContext) {
       let variants = JSON.parse(product.variants);
       oldStock = variants[variantIndex].stock || 0;
       newStock = oldStock + totalQty;
-      if (newStock < 0) {
+      if (newStock < 0 && !options.allowNegative) {
         throw new Error(
           `Không đủ tồn SKU ${sku} (còn ${oldStock}, cần ${Math.abs(totalQty)}).`,
         );
@@ -5205,7 +5205,7 @@ async function batchStockUpdate(tx, skuChanges, logContext) {
       product.variants = updatedVariantsStr;
     } else {
       oldStock = product.stock || 0;
-      if (oldStock + totalQty < 0) {
+      if (oldStock + totalQty < 0 && !options.allowNegative) {
         throw new Error(
           `Không đủ tồn SKU ${sku} (còn ${oldStock}, cần ${Math.abs(totalQty)}).`,
         );
@@ -5276,10 +5276,11 @@ async function deductItemOrCombo(
   }
 }
 
-async function assertSaleStockAvailable(tx, sku, quantity) {
+async function assertSaleStockAvailable(tx, sku, quantity, options = {}) {
   const requested = Number(quantity);
   if (!Number.isFinite(requested) || requested <= 0)
     throw new Error(`Số lượng xuất không hợp lệ cho SKU ${sku}.`);
+  if (options.allowNegative) return;
   const combo = await tx.comboProduct.findUnique({
     where: { sku },
     select: { items: true },
@@ -5395,7 +5396,7 @@ async function updateProductStockInTx(
 
     oldStock = variants[variantIndex].stock || 0;
     newStock = oldStock + quantity;
-    if (newStock < 0) {
+    if (newStock < 0 && !options.allowNegative) {
       throw new Error(
         `Không đủ tồn SKU ${sku} (còn ${oldStock}, cần ${Math.abs(quantity)}).`,
       );
@@ -5416,7 +5417,7 @@ async function updateProductStockInTx(
   } else {
     // [VÁ LỖI RACE CONDITION] Dùng cơ chế Atomic Increment của Database cho trường Integer Native
     oldStock = product.stock || 0;
-    if (oldStock + quantity < 0) {
+    if (oldStock + quantity < 0 && !options.allowNegative) {
       throw new Error(
         `Không đủ tồn SKU ${sku} (còn ${oldStock}, cần ${Math.abs(quantity)}).`,
       );
@@ -22559,7 +22560,8 @@ ipcMain.handle("ecommerceExports:getOperationalCounts", async () => {
     const todayStart = new Date(
       Date.UTC(Number(parts.year), Number(parts.month) - 1, Number(parts.day), -7),
     );
-    const [pending, completed, mismatch, overdue, cancelled] = await Promise.all([
+    const [total, pending, completed, mismatch, overdue, cancelled] = await Promise.all([
+      prisma.ecommerceExport.count(),
       prisma.ecommerceExport.count({
         where: {
           status: "pending",
@@ -22584,7 +22586,7 @@ ipcMain.handle("ecommerceExports:getOperationalCounts", async () => {
       }),
       prisma.ecommerceExport.count({ where: { status: "cancelled" } }),
     ]);
-    return { success: true, data: { pending, completed, mismatch, overdue, cancelled } };
+    return { success: true, data: { total, pending, completed, mismatch, overdue, cancelled } };
   } catch (error) {
     console.error("Get ecommerce operational counts error:", error);
     return { success: false, error: error.message };
@@ -22882,6 +22884,7 @@ ipcMain.handle("ecommerceExports:create", async (event, data) => {
                   tx,
                   item.variantSku,
                   item.quantity,
+                  { allowNegative: true },
                 );
                 await deductItemOrCombo(tx, item.variantSku, -item.quantity, {
                   type: "ecom_sale",
@@ -22892,7 +22895,7 @@ ipcMain.handle("ecommerceExports:create", async (event, data) => {
                     "Lưu thủ công",
                   note: `Xuất hàng TMDT: ${data.customerName}`,
                   createdBy: data.createdBy || "System",
-                });
+                }, { allowNegative: true });
               }
             }
             await ensureMarketplaceOrderInTx(
@@ -23437,6 +23440,7 @@ async function execEcommerceExportUpdate(id, data, { snapshotPickup = false } = 
                 tx,
                 item.variantSku,
                 item.quantity,
+                { allowNegative: true },
               );
               await deductItemOrCombo(tx, item.variantSku, -item.quantity, {
                 type: "ecom_sale",
@@ -23449,7 +23453,7 @@ async function execEcommerceExportUpdate(id, data, { snapshotPickup = false } = 
                   "Tao/Sua don TMDT: " +
                   (data.customerName || oldRecord.customerName || "TMDT"),
                 createdBy: data.createdBy || "System",
-              });
+              }, { allowNegative: true });
             }
           }
         }
@@ -23589,12 +23593,14 @@ ipcMain.handle("ecommerceExports:update", async (event, id, data) => {
 });
 
 ipcMain.handle("ecommerceExports:completePickup", async (event, id, data = {}) => {
+  const pickupStartedAt = Date.now();
   try {
     requireRole("admin", "manager");
     const result = await execEcommerceExportUpdate(id, data, {
       snapshotPickup: true,
     });
     const record = result.data;
+    console.info(`[PickupPerf] completePickup id=${id} dbMs=${Date.now() - pickupStartedAt}`);
     if (!result.skipped) {
       const items =
         typeof record.items === "string"
@@ -24197,6 +24203,7 @@ ipcMain.handle("ecommerceExports:bulkCreate", async (event, records) => {
                   note: `Tạo hàng loạt ${completedRecords.length} đơn TMDT completed`,
                   createdBy: dedupedRecords[0]?.createdBy || "System",
                 },
+                { allowNegative: true },
               );
             }
           }
