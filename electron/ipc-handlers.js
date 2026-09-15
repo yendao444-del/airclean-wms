@@ -22575,33 +22575,41 @@ ipcMain.handle("ecommerceExports:getOperationalCounts", async () => {
     const todayStart = new Date(
       Date.UTC(Number(parts.year), Number(parts.month) - 1, Number(parts.day), -7),
     );
-    const [total, pending, completed, mismatch, overdue, cancelled] = await Promise.all([
-      prisma.ecommerceExport.count(),
-      prisma.ecommerceExport.count({
-        where: {
-          status: "pending",
-          OR: [
-            { slaDeadlineAt: null },
-            { slaDeadlineAt: { gte: now } },
-          ],
-        },
-      }),
-      prisma.ecommerceExport.count({
-        where: {
-          status: "completed",
-          OR: [
-            { completedAt: { gte: todayStart } },
-            { completedAt: null, ecommerceExportDate: { gte: todayStart } },
-          ],
-        },
-      }),
-      prisma.ecommerceExport.count({ where: { status: "mismatch" } }),
-      prisma.ecommerceExport.count({
-        where: { status: "pending", slaDeadlineAt: { lt: now } },
-      }),
-      prisma.ecommerceExport.count({ where: { status: "cancelled" } }),
-    ]);
-    return { success: true, data: { total, pending, completed, mismatch, overdue, cancelled } };
+    // Raw SQL keeps this compact read model working even if an updater left a
+    // stale generated Prisma delegate on one production machine.
+    const rows = await prisma.$queryRaw`
+      SELECT
+        COUNT(*)::int AS "total",
+        COUNT(*) FILTER (
+          WHERE "status" = 'pending'
+            AND ("slaDeadlineAt" IS NULL OR "slaDeadlineAt" >= ${now})
+        )::int AS "pending",
+        COUNT(*) FILTER (
+          WHERE "status" = 'completed'
+            AND (
+              "completedAt" >= ${todayStart}
+              OR ("completedAt" IS NULL AND "ecommerceExportDate" >= ${todayStart})
+            )
+        )::int AS "completed",
+        COUNT(*) FILTER (WHERE "status" = 'mismatch')::int AS "mismatch",
+        COUNT(*) FILTER (
+          WHERE "status" = 'pending' AND "slaDeadlineAt" < ${now}
+        )::int AS "overdue",
+        COUNT(*) FILTER (WHERE "status" = 'cancelled')::int AS "cancelled"
+      FROM "EcommerceExport"
+    `;
+    const counts = rows?.[0] || {};
+    return {
+      success: true,
+      data: {
+        total: Number(counts.total || 0),
+        pending: Number(counts.pending || 0),
+        completed: Number(counts.completed || 0),
+        mismatch: Number(counts.mismatch || 0),
+        overdue: Number(counts.overdue || 0),
+        cancelled: Number(counts.cancelled || 0),
+      },
+    };
   } catch (error) {
     console.error("Get ecommerce operational counts error:", error);
     return { success: false, error: error.message };
@@ -23801,6 +23809,11 @@ ipcMain.handle("ecommerceExports:importSnapshot", async (event, payload = {}) =>
   try {
     requireRole("admin", "manager");
     if (!prisma) throw new Error("Prisma not available");
+    if (!prisma.ecommerceImportBatch || typeof prisma.ecommerceImportBatch.create !== "function") {
+      throw new Error(
+        "Bản cập nhật thiếu Prisma Client mới cho dữ liệu TMĐT. Vui lòng cài bản vá mới nhất.",
+      );
+    }
     const platform = normalizeMarketplacePlatform(payload.platform);
     const records = Array.isArray(payload.records) ? payload.records : [];
     if (records.length > 10000 || (records.length === 0 && payload.allowEmptySnapshot !== true)) {
