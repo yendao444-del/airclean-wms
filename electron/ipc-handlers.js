@@ -22440,15 +22440,30 @@ ipcMain.handle("ecommerceExports:findByScanCode", async (event, rawCode) => {
       take: 20,
     });
     let candidates = exactRows;
+    let fallbackCompletedOrders = null;
     if (candidates.length === 0) {
-      const noteRows = await prisma.ecommerceExport.findMany({
-        where: { notes: { contains: code, mode: "insensitive" } },
-        orderBy: { updatedAt: "desc" },
-        take: 20,
-      });
+      // Run the note fallback and historical-order lookup together. Invalid
+      // scans previously paid for these round trips one after another.
+      const [noteRows, completedOrders] = await Promise.all([
+        prisma.ecommerceExport.findMany({
+          where: { notes: { contains: code, mode: "insensitive" } },
+          orderBy: { updatedAt: "desc" },
+          take: 20,
+        }),
+        prisma.order.findMany({
+          where: {
+            source: { in: ["shopee", "tiktok", "lazada", "tmdt"] },
+            status: "completed",
+            OR: [{ orderNumber: code }, { trackingNumber: code }],
+          },
+          orderBy: { updatedAt: "desc" },
+          take: 20,
+        }),
+      ]);
       candidates = noteRows.filter(
         (row) => extractTrackingFromNotes(row.notes) === code,
       );
+      fallbackCompletedOrders = completedOrders;
     }
 
     const orderMatches = candidates.filter(
@@ -22491,7 +22506,7 @@ ipcMain.handle("ecommerceExports:findByScanCode", async (event, rawCode) => {
     );
     const record = candidates[0];
     if (!record) {
-      const completedOrders = await prisma.order.findMany({
+      const completedOrders = fallbackCompletedOrders || await prisma.order.findMany({
         where: {
           source: { in: ["shopee", "tiktok", "lazada", "tmdt"] },
           status: "completed",
@@ -22878,26 +22893,21 @@ ipcMain.handle("ecommerceExports:create", async (event, data) => {
           });
 
           if (isCompleted) {
-            for (const item of resolvedItems) {
-              if (item.variantSku) {
-                await assertSaleStockAvailable(
-                  tx,
-                  item.variantSku,
-                  item.quantity,
-                  { allowNegative: true },
-                );
-                await deductItemOrCombo(tx, item.variantSku, -item.quantity, {
-                  type: "ecom_sale",
-                  referenceType: "TMDT",
-                  reference:
-                    data.orderNumber ||
-                    data.ecommerceExportCode ||
-                    "Lưu thủ công",
-                  note: `Xuất hàng TMDT: ${data.customerName}`,
-                  createdBy: data.createdBy || "System",
-                }, { allowNegative: true });
-              }
-            }
+            await batchStockUpdate(
+              tx,
+              resolvedItems
+                .filter((item) => item.variantSku)
+                .map((item) => ({ sku: item.variantSku, quantity: -item.quantity })),
+              {
+                type: "ecom_sale",
+                referenceType: "TMDT",
+                reference:
+                  data.orderNumber || data.ecommerceExportCode || "Lưu thủ công",
+                note: `Xuất hàng TMDT: ${data.customerName}`,
+                createdBy: data.createdBy || "System",
+              },
+              { allowNegative: true },
+            );
             await ensureMarketplaceOrderInTx(
               tx,
               newRecord,
@@ -23374,7 +23384,9 @@ async function execEcommerceExportUpdate(id, data, { snapshotPickup = false } = 
         const resolvedItems = data.items
           ? await resolveTmdtItemsSkus(tx, data.items)
           : null;
-        if (data.status === "completed" && resolvedItems) {
+        // Imported pickup snapshots already passed SKU validation at import;
+        // avoid repeating the extra product/variant existence queries here.
+        if (data.status === "completed" && resolvedItems && !snapshotPickup) {
           assertTmdtItemsHaveSku(
             resolvedItems,
             data.orderNumber ||
@@ -23434,28 +23446,23 @@ async function execEcommerceExportUpdate(id, data, { snapshotPickup = false } = 
           : oldItemsStrFinal;
         if (data.status === "completed") {
           const newItems = JSON.parse(newItemsStrFinal);
-          for (const item of newItems) {
-            if (item.variantSku) {
-              await assertSaleStockAvailable(
-                tx,
-                item.variantSku,
-                item.quantity,
-                { allowNegative: true },
-              );
-              await deductItemOrCombo(tx, item.variantSku, -item.quantity, {
-                type: "ecom_sale",
-                referenceType: "TMDT_EDIT",
-                reference:
-                  data.orderNumber ||
-                  data.ecommerceExportCode ||
-                  "Sua thu cong",
-                note:
-                  "Tao/Sua don TMDT: " +
-                  (data.customerName || oldRecord.customerName || "TMDT"),
-                createdBy: data.createdBy || "System",
-              }, { allowNegative: true });
-            }
-          }
+          await batchStockUpdate(
+            tx,
+            newItems
+              .filter((item) => item.variantSku)
+              .map((item) => ({ sku: item.variantSku, quantity: -item.quantity })),
+            {
+              type: "ecom_sale",
+              referenceType: "TMDT_EDIT",
+              reference:
+                data.orderNumber || data.ecommerceExportCode || "Sua thu cong",
+              note:
+                "Tao/Sua don TMDT: " +
+                (data.customerName || oldRecord.customerName || "TMDT"),
+              createdBy: data.createdBy || "System",
+            },
+            { allowNegative: true },
+          );
         }
 
         if (data.status === "completed" && oldRecord.status !== "completed") {
