@@ -149,7 +149,14 @@ const DATA_SAFETY_ALLOWED_CHANNELS = new Set([
   "ecommerceExports:create",
   // Idempotently records source order timestamps without changing stock/status.
   "ecommerceExports:syncOrderPlacedAt",
+  "ecommerceExports:importSnapshot",
   "ecommerceExports:update",
+  "ecommerceExports:completePickup",
+  // Deletion is restricted to administrators. Completed records remain
+  // immutable so their order and stock history cannot diverge.
+  "ecommerceExports:delete",
+  "ecommerceExports:bulkDelete",
+  "ecommerceExports:deleteCancelled",
   "ecommerceExports:saveTelegramSettings",
   "ecommerceExports:nextTelegramOrderCounter",
   "exportOrders:saveWithStock",
@@ -264,6 +271,10 @@ else delete process.env.DIRECT_URL;
 const { PrismaClient, Prisma } = require("@prisma/client");
 const fs = require("fs");
 const { buildPackingReadModel } = require("./packing-read-model");
+const {
+  calculateMarketplaceSlaDeadline,
+  getBangkokDateParts,
+} = require("./ecommerce-sla");
 const https = require("https");
 const http = require("http");
 const crypto = require("crypto");
@@ -1553,6 +1564,7 @@ const DATA_SAFETY_BLOCKED_CHANNELS = new Map([
   ["ecommerceExports:deleteAll", "Xóa toàn bộ phiếu xuất TMĐT"],
   ["ecommerceExports:deleteCancelled", "Xóa phiếu xuất TMĐT đã hủy"],
   ["ecommerceExports:bulkCreate", "Nhập TMĐT hiện xóa dữ liệu trước khi kiểm tra hoàn tất"],
+  ["ecommerceExports:importSnapshot", "Nhập ảnh chụp đơn chờ lấy hàng và đối soát trạng thái"],
   ["marketplaceOrders:delete", "Xóa đơn sàn"],
   ["exportOrders:delete", "Xóa phiếu xuất kho"],
   ["exportOrders:saveWithStock", "Lưu phiếu xuất đồng thời thay đổi tồn kho"],
@@ -22084,7 +22096,8 @@ async function getPackingSourceRevision(dateFilter) {
         COALESCE(MAX("id"), 0)::bigint AS "latestId",
         MAX("updatedAt") AS "updatedAt",
         COALESCE(SUM("id"), 0)::numeric AS "idSum",
-        COALESCE(SUM(EXTRACT(EPOCH FROM "updatedAt") * 1000), 0)::numeric AS "updatedAtSum"
+        COALESCE(SUM(EXTRACT(EPOCH FROM "updatedAt") * 1000), 0)::numeric AS "updatedAtSum",
+        COALESCE(SUM(hashtext(COALESCE("pickedBy", '') || '|' || COALESCE("createdBy", ''))), 0)::numeric AS "packerHash"
       FROM "EcommerceExport"
       WHERE ${Prisma.join(exportConditions, " AND ")}
     `),
@@ -22115,6 +22128,7 @@ async function getPackingSourceRevision(dateFilter) {
       latestId,
       String(exportAggregate.idSum || 0),
       String(exportAggregate.updatedAtSum || 0),
+      String(exportAggregate.packerHash || 0),
       updatedAt || "none",
       comboCount,
       comboLatestId,
@@ -22273,7 +22287,16 @@ ipcMain.handle(
       requireRole("admin", "manager");
       if (!prisma) throw new Error("Prisma not available");
       const startedAt = Date.now();
-      const field = sinceField || "ecommerceExportDate";
+      const allowedDateFields = new Set([
+        "ecommerceExportDate",
+        "completedAt",
+        "orderPlacedAt",
+        "createdAt",
+        "updatedAt",
+      ]);
+      const field = allowedDateFields.has(String(sinceField || ""))
+        ? String(sinceField)
+        : "ecommerceExportDate";
       const dateFilter = {};
       if (since && !search) dateFilter.gte = new Date(since);
       if (until && !search) dateFilter.lte = new Date(until);
@@ -22324,7 +22347,7 @@ ipcMain.handle(
 
       const exports = await prisma.ecommerceExport.findMany({
         where: Object.keys(where).length > 0 ? where : undefined,
-        orderBy: { ecommerceExportDate: "desc" },
+        orderBy: { [field]: "desc" },
         skip: skip || 0,
         take: take + 1,
         ...(compact
@@ -22339,6 +22362,13 @@ ipcMain.handle(
                 status: true,
                 createdBy: true,
                 pickedBy: true,
+                trackingNumber: true,
+                orderPlacedAt: true,
+                slaDeadlineAt: true,
+                completedAt: true,
+                mismatchAt: true,
+                mismatchReason: true,
+                lastSeenImportBatchId: true,
                 updatedAt: true,
               },
             }
@@ -22350,6 +22380,10 @@ ipcMain.handle(
       const formatted = rows.map((e) => ({
         ...e,
         ecommerceExportDate: e.ecommerceExportDate.toISOString(),
+        orderPlacedAt: e.orderPlacedAt ? e.orderPlacedAt.toISOString() : null,
+        slaDeadlineAt: e.slaDeadlineAt ? e.slaDeadlineAt.toISOString() : null,
+        completedAt: e.completedAt ? e.completedAt.toISOString() : null,
+        mismatchAt: e.mismatchAt ? e.mismatchAt.toISOString() : null,
         updatedAt: e.updatedAt ? e.updatedAt.toISOString() : null,
         items: e.items, // Already JSON string
       }));
@@ -22383,6 +22417,179 @@ ipcMain.handle(
     }
   },
 );
+
+ipcMain.handle("ecommerceExports:findByScanCode", async (event, rawCode) => {
+  try {
+    requireRole("admin", "manager");
+    if (!prisma) throw new Error("Prisma not available");
+    const code = String(rawCode || "").trim();
+    if (!code || code.length > 200) {
+      throw new Error("Mã quét không hợp lệ.");
+    }
+
+    const exactRows = await prisma.ecommerceExport.findMany({
+      where: {
+        OR: [
+          { trackingNumber: code },
+          { orderNumber: code },
+          { ecommerceExportCode: code },
+        ],
+      },
+      orderBy: { updatedAt: "desc" },
+      take: 20,
+    });
+    let candidates = exactRows;
+    if (candidates.length === 0) {
+      const noteRows = await prisma.ecommerceExport.findMany({
+        where: { notes: { contains: code, mode: "insensitive" } },
+        orderBy: { updatedAt: "desc" },
+        take: 20,
+      });
+      candidates = noteRows.filter(
+        (row) => extractTrackingFromNotes(row.notes) === code,
+      );
+    }
+
+    const orderMatches = candidates.filter(
+      (row) =>
+        String(row.orderNumber || "").trim() === code ||
+        String(row.ecommerceExportCode || "").trim() === code,
+    );
+    if (orderMatches.length > 0) {
+      candidates = orderMatches;
+    } else {
+      const trackingMatches = candidates.filter(
+        (row) =>
+          (normalizeTrackingNumber(row.trackingNumber) ||
+            extractTrackingFromNotes(row.notes)) === code,
+      );
+      const distinctOrders = new Set(
+        trackingMatches.map((row) =>
+          String(row.orderNumber || row.ecommerceExportCode || row.id),
+        ),
+      );
+      if (distinctOrders.size > 1) {
+        throw new Error(
+          `Mã vận đơn ${code} đang gắn với ${distinctOrders.size} đơn. Hãy đối chiếu và quét theo mã đơn hàng.`,
+        );
+      }
+      candidates = trackingMatches;
+    }
+
+    const statusPriority = {
+      mismatch: 0,
+      cancelled: 0,
+      completed: 1,
+      pending: 2,
+      processing: 2,
+    };
+    candidates.sort(
+      (a, b) =>
+        (statusPriority[a.status] ?? 3) - (statusPriority[b.status] ?? 3) ||
+        b.updatedAt.getTime() - a.updatedAt.getTime(),
+    );
+    const record = candidates[0];
+    if (!record) {
+      const completedOrders = await prisma.order.findMany({
+        where: {
+          source: { in: ["shopee", "tiktok", "lazada", "tmdt"] },
+          status: "completed",
+          OR: [{ orderNumber: code }, { trackingNumber: code }],
+        },
+        orderBy: { updatedAt: "desc" },
+        take: 20,
+      });
+      const exactOrder = completedOrders.find(
+        (order) => String(order.orderNumber || "").trim() === code,
+      );
+      const trackingOrders = exactOrder
+        ? []
+        : completedOrders.filter(
+            (order) => normalizeTrackingNumber(order.trackingNumber) === code,
+          );
+      if (trackingOrders.length > 1) {
+        throw new Error(
+          `Mã vận đơn ${code} đang gắn với ${trackingOrders.length} đơn đã gửi. Hãy đối chiếu theo mã đơn hàng.`,
+        );
+      }
+      const completedOrder = exactOrder || trackingOrders[0];
+      if (!completedOrder) return { success: true, data: null };
+      return {
+        success: true,
+        data: {
+          id: -completedOrder.id,
+          customerName: completedOrder.source,
+          ecommerceExportCode: completedOrder.orderNumber,
+          orderNumber: completedOrder.orderNumber,
+          ecommerceExportDate: completedOrder.createdAt.toISOString(),
+          items: "[]",
+          totalAmount: completedOrder.total || 0,
+          notes: completedOrder.note || null,
+          status: "completed",
+          trackingNumber: completedOrder.trackingNumber || null,
+          completedAt: completedOrder.updatedAt.toISOString(),
+          updatedAt: completedOrder.updatedAt.toISOString(),
+        },
+      };
+    }
+    return {
+      success: true,
+      data: {
+        ...record,
+        ecommerceExportDate: record.ecommerceExportDate.toISOString(),
+        orderPlacedAt: record.orderPlacedAt?.toISOString() || null,
+        slaDeadlineAt: record.slaDeadlineAt?.toISOString() || null,
+        completedAt: record.completedAt?.toISOString() || null,
+        mismatchAt: record.mismatchAt?.toISOString() || null,
+        updatedAt: record.updatedAt?.toISOString() || null,
+      },
+    };
+  } catch (error) {
+    console.error("Find ecommerce export by scan code error:", error);
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle("ecommerceExports:getOperationalCounts", async () => {
+  try {
+    requireRole("admin", "manager");
+    if (!prisma) throw new Error("Prisma not available");
+    const now = new Date();
+    const parts = getBangkokDateParts(now);
+    const todayStart = new Date(
+      Date.UTC(Number(parts.year), Number(parts.month) - 1, Number(parts.day), -7),
+    );
+    const [pending, completed, mismatch, overdue, cancelled] = await Promise.all([
+      prisma.ecommerceExport.count({
+        where: {
+          status: "pending",
+          OR: [
+            { slaDeadlineAt: null },
+            { slaDeadlineAt: { gte: now } },
+          ],
+        },
+      }),
+      prisma.ecommerceExport.count({
+        where: {
+          status: "completed",
+          OR: [
+            { completedAt: { gte: todayStart } },
+            { completedAt: null, ecommerceExportDate: { gte: todayStart } },
+          ],
+        },
+      }),
+      prisma.ecommerceExport.count({ where: { status: "mismatch" } }),
+      prisma.ecommerceExport.count({
+        where: { status: "pending", slaDeadlineAt: { lt: now } },
+      }),
+      prisma.ecommerceExport.count({ where: { status: "cancelled" } }),
+    ]);
+    return { success: true, data: { pending, completed, mismatch, overdue, cancelled } };
+  } catch (error) {
+    console.error("Get ecommerce operational counts error:", error);
+    return { success: false, error: error.message };
+  }
+});
 
 ipcMain.handle(
   "ecommerceExports:getPackingRevision",
@@ -22656,6 +22863,15 @@ ipcMain.handle("ecommerceExports:create", async (event, data) => {
               status: data.status || "processing",
               createdBy: data.createdBy || null,
               pickedBy: data.pickedBy || null,
+              trackingNumber:
+                normalizeTrackingNumber(data.trackingNumber) ||
+                extractTrackingFromNotes(data.notes) ||
+                null,
+              orderPlacedAt: getMarketplaceOrderPlacedAt(data),
+              slaDeadlineAt: getMarketplaceOrderPlacedAt(data)
+                ? calculateMarketplaceSlaDeadline(getMarketplaceOrderPlacedAt(data))
+                : null,
+              completedAt: isCompleted ? new Date() : null,
             },
           });
 
@@ -22781,7 +22997,15 @@ function isNetworkError(err) {
 
 function extractTrackingFromNotes(notes) {
   const match = notes?.match(/Tracking: ([^|]+)/);
-  return match ? match[1].trim() : null;
+  return match ? normalizeTrackingNumber(match[1]) : null;
+}
+
+function normalizeTrackingNumber(rawValue) {
+  const value = String(rawValue || "").trim();
+  if (!value || ["n/a", "-", "—", "null", "undefined"].includes(value.toLowerCase())) {
+    return null;
+  }
+  return value;
 }
 
 function normalizeMarketplaceSource(name) {
@@ -22879,6 +23103,28 @@ async function loadExistingTmdtSkus(tx, items) {
   return existingSkus;
 }
 
+function assertTmdtSnapshotItemsValid(items, refCode) {
+  if (!Array.isArray(items) || items.length === 0 || items.length > 500) {
+    throw new Error(`Danh sách sản phẩm của ${refCode || "đơn"} không hợp lệ.`);
+  }
+  assertTmdtItemsHaveSku(items, refCode);
+  for (const item of items) {
+    const quantity = Number(item?.quantity);
+    const unitPrice = Number(item?.unitPrice || 0);
+    const total = Number(item?.total || 0);
+    if (!Number.isInteger(quantity) || quantity <= 0 || quantity > 1_000_000) {
+      throw new Error(
+        `Số lượng không hợp lệ cho SKU ${item?.variantSku || "không xác định"} của ${refCode || "đơn"}.`,
+      );
+    }
+    if (!Number.isFinite(unitPrice) || unitPrice < 0 || !Number.isFinite(total) || total < 0) {
+      throw new Error(
+        `Giá trị sản phẩm không hợp lệ cho SKU ${item?.variantSku || "không xác định"} của ${refCode || "đơn"}.`,
+      );
+    }
+  }
+}
+
 function getMarketplaceOrderPlacedAt(record) {
   const noteMatch = String(record?.notes || record?.note || "").match(
     /OrderPlacedAt:\s*([^|]+)/i,
@@ -22887,6 +23133,13 @@ function getMarketplaceOrderPlacedAt(record) {
   if (!rawValue) return null;
   const value = new Date(rawValue);
   return Number.isNaN(value.getTime()) ? null : value;
+}
+
+function normalizeMarketplacePlatform(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (normalized === "shopee") return { key: "shopee", label: "Shopee" };
+  if (normalized === "tiktok") return { key: "tiktok", label: "TikTok" };
+  throw new Error("Sàn TMĐT không hợp lệ.");
 }
 
 function withMarketplaceOrderPlacedAtNote(notes, record) {
@@ -22959,7 +23212,9 @@ async function ensureMarketplaceOrderInTx(tx, record, actorName) {
     0,
   );
   const total = Number(record.totalAmount || subtotal || 0);
-  const trackingNumber = extractTrackingFromNotes(record.notes || null);
+  const trackingNumber =
+    normalizeTrackingNumber(record.trackingNumber) ||
+    extractTrackingFromNotes(record.notes || null);
 
   const order = await tx.order.create({
     data: {
@@ -23000,7 +23255,7 @@ async function ensureMarketplaceOrderInTx(tx, record, actorName) {
 }
 
 // --- Core logic tach rieng de dung lai khi sync queue ---
-async function execEcommerceExportUpdate(id, data) {
+async function execEcommerceExportUpdate(id, data, { snapshotPickup = false } = {}) {
   if (!prisma) throw new Error("Prisma not available");
   const result = await withStockLock(() =>
     prisma.$transaction(
@@ -23025,8 +23280,52 @@ async function execEcommerceExportUpdate(id, data) {
           where: { id: exportId },
         });
         if (!oldRecord) throw new Error("Khong tim thay phieu xuat.");
+        if (oldRecord.status === "completed") {
+          if (snapshotPickup) {
+            return { skipped: true, reason: "already_completed", data: oldRecord };
+          }
+          throw new Error(
+            "Không thể sửa đơn đã gửi để bảo toàn lịch sử đơn hàng và tồn kho.",
+          );
+        }
+        if (
+          snapshotPickup &&
+          !["pending", "processing"].includes(oldRecord.status)
+        ) {
+          throw new Error(
+            oldRecord.status === "cancelled"
+              ? "ĐƠN HỦY - phải giữ lại để kiểm tra."
+              : "ĐƠN TRỄ - phải giữ lại để kiểm tra.",
+          );
+        }
         if (oldRecord.updatedAt?.getTime() !== expectedUpdatedAt.getTime()) {
           throw new Error("Phiếu xuất TMĐT vừa được thay đổi ở máy khác. Vui lòng tải lại.");
+        }
+        if (oldRecord.lastSeenImportBatchId != null && !snapshotPickup) {
+          throw new Error("Đơn nhập từ sàn chỉ được hoàn thành bằng thao tác quét pickup.");
+        }
+        if (snapshotPickup) {
+          const trackingNumber =
+            normalizeTrackingNumber(oldRecord.trackingNumber) ||
+            extractTrackingFromNotes(oldRecord.notes);
+          if (!trackingNumber) {
+            throw new Error("Đơn chưa có mã vận đơn, chưa thể xác nhận pickup.");
+          }
+          const pickedBy = String(
+            data?.pickedBy || currentSession?.username || currentSession?.fullName || "",
+          ).trim();
+          if (!pickedBy || pickedBy.length > 100) {
+            throw new Error("Người đóng gói không hợp lệ.");
+          }
+          data = {
+            ...oldRecord,
+            status: "completed",
+            ecommerceExportDate: new Date(),
+            createdBy:
+              currentSession?.username || currentSession?.fullName || oldRecord.createdBy,
+            pickedBy,
+            updatedAt: oldRecord.updatedAt,
+          };
         }
         const nextOrderKey = String(
           data.orderNumber ||
@@ -23046,39 +23345,26 @@ async function execEcommerceExportUpdate(id, data) {
             select: { id: true, orderNumber: true, status: true },
           });
           if (existingOrder) {
+            if (existingOrder.status !== "completed") {
+              throw new Error(
+                `Đơn ${nextOrderKey} đã tồn tại ở mục Đơn hàng nhưng chưa hoàn thành. Vui lòng kiểm tra trước khi pickup.`,
+              );
+            }
+            const reconciledRecord = await tx.ecommerceExport.update({
+              where: { id: exportId },
+              data: {
+                status: "completed",
+                completedAt: oldRecord.completedAt || new Date(),
+                ecommerceExportDate: new Date(),
+                pickedBy:
+                  data.pickedBy || oldRecord.pickedBy || oldRecord.createdBy || null,
+              },
+            });
             return {
               skipped: true,
               reason: "existing_order",
-              data: { ...existingOrder, status: "completed" },
+              data: reconciledRecord,
             };
-          }
-        }
-
-        if (oldRecord.status === "completed") {
-          const oldItemsStr = oldRecord.items || "[]";
-          const newItemsStr = data.items
-            ? typeof data.items === "string"
-              ? data.items
-              : JSON.stringify(data.items)
-            : oldItemsStr;
-          const itemsUnchanged =
-            data.status === "completed" && oldItemsStr === newItemsStr;
-          if (!itemsUnchanged) {
-            const oldItems = JSON.parse(oldItemsStr);
-            for (const old of oldItems) {
-              if (old.variantSku) {
-                await deductItemOrCombo(tx, old.variantSku, old.quantity, {
-                  type: "adjustment",
-                  referenceType: "TMDT_EDIT",
-                  reference:
-                    oldRecord.orderNumber ||
-                    oldRecord.ecommerceExportCode ||
-                    "Sua thu cong",
-                  note: "Hoan ton (sua don TMDT #" + oldRecord.id + ")",
-                  createdBy: data.createdBy || "System",
-                });
-              }
-            }
           }
         }
 
@@ -23123,6 +23409,19 @@ async function execEcommerceExportUpdate(id, data) {
             createdBy:
               data.createdBy !== undefined ? data.createdBy : undefined,
             pickedBy: data.pickedBy !== undefined ? data.pickedBy : undefined,
+            trackingNumber:
+              data.trackingNumber !== undefined
+                ? normalizeTrackingNumber(data.trackingNumber)
+                : normalizeTrackingNumber(oldRecord.trackingNumber) ||
+                  extractTrackingFromNotes(data.notes || oldRecord.notes),
+            orderPlacedAt: getMarketplaceOrderPlacedAt(data) || undefined,
+            slaDeadlineAt: getMarketplaceOrderPlacedAt(data)
+              ? calculateMarketplaceSlaDeadline(getMarketplaceOrderPlacedAt(data))
+              : undefined,
+            completedAt:
+              data.status === "completed" && oldRecord.status !== "completed"
+                ? new Date()
+                : undefined,
           },
         });
 
@@ -23130,11 +23429,7 @@ async function execEcommerceExportUpdate(id, data) {
         const newItemsStrFinal = resolvedItems
           ? JSON.stringify(resolvedItems)
           : oldItemsStrFinal;
-        const skipDeduct =
-          oldRecord.status === "completed" &&
-          data.status === "completed" &&
-          oldItemsStrFinal === newItemsStrFinal;
-        if (data.status === "completed" && !skipDeduct) {
+        if (data.status === "completed") {
           const newItems = JSON.parse(newItemsStrFinal);
           for (const item of newItems) {
             if (item.variantSku) {
@@ -23288,27 +23583,46 @@ ipcMain.handle("ecommerceExports:update", async (event, id, data) => {
     });
     return { success: true, data: record };
   } catch (error) {
-    if (isNetworkError(error)) {
-      console.warn(
-        "[OfflineQueue] Network error, queuing update id=" + id + ":",
-        error.message,
-      );
-      try {
-        offlineQueue.enqueue("ecommerceExports:update", {
-          id,
-          data,
-          queuedByUserId: currentSession.id,
-        });
-        return {
-          success: true,
-          queued: true,
-          pendingCount: offlineQueue.count(),
-        };
-      } catch (qErr) {
-        console.error("[OfflineQueue] Failed to enqueue:", qErr.message);
-      }
-    }
     console.error("Update ecommerce export error:", error);
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle("ecommerceExports:completePickup", async (event, id, data = {}) => {
+  try {
+    requireRole("admin", "manager");
+    const result = await execEcommerceExportUpdate(id, data, {
+      snapshotPickup: true,
+    });
+    const record = result.data;
+    if (!result.skipped) {
+      const items =
+        typeof record.items === "string"
+          ? JSON.parse(record.items || "[]")
+          : record.items || [];
+      emitStockChangedForSkus(
+        items.map((item) => item.variantSku || item.sku),
+        {
+          referenceType: "TMDT",
+          reference:
+            record.orderNumber || record.ecommerceExportCode || `TMDT-${record.id}`,
+        },
+      );
+      void logActivity({
+        module: "export",
+        action: "UPDATE",
+        description: `Pickup bàn giao TMDT #${record.id}`,
+        recordId: record.id,
+      });
+    }
+    return {
+      success: true,
+      skipped: !!result.skipped,
+      reason: result.reason,
+      data: record,
+    };
+  } catch (error) {
+    console.error("Complete ecommerce pickup error:", error);
     return { success: false, error: error.message };
   }
 });
@@ -23316,48 +23630,36 @@ ipcMain.handle("ecommerceExports:delete", async (event, id) => {
   try {
     requireRole("admin");
     if (!prisma) throw new Error("Prisma not available");
-    const deletedSkus = [];
+
+    const exportId = Number(id);
+    if (!Number.isSafeInteger(exportId) || exportId <= 0) {
+      throw new Error("Mã phiếu xuất TMĐT không hợp lệ.");
+    }
 
     // 🔒 StockMutex: serialize stock operations — tránh race condition Thẻ Kho
     await withStockLock(() =>
       prisma.$transaction(
         async (tx) => {
-          const doc = await tx.ecommerceExport.findUnique({ where: { id } });
+          const doc = await tx.ecommerceExport.findUnique({
+            where: { id: exportId },
+          });
           if (!doc) return;
 
           if (doc.status === "completed") {
-            const items = JSON.parse(doc.items || "[]");
-            for (const item of items) {
-              if (item.variantSku) {
-                deletedSkus.push(item.variantSku);
-                await deductItemOrCombo(tx, item.variantSku, item.quantity, {
-                  type: "adjustment",
-                  referenceType: "TMDT_CANCEL",
-                  reference:
-                    doc.orderNumber ||
-                    doc.ecommerceExportCode ||
-                    "Xóa thủ công",
-                  note: `Hoàn tồn do xóa đơn TMDT #${id}`,
-                  createdBy: "System",
-                });
-              }
-            }
+            throw new Error("Không thể xóa đơn đã gửi để bảo toàn lịch sử đơn hàng và tồn kho.");
           }
-          await tx.ecommerceExport.delete({ where: { id } });
+
+          await tx.ecommerceExport.delete({ where: { id: exportId } });
         },
         { timeout: 30000, maxWait: 10000 },
       ),
     );
 
-    console.log(`✅ Deleted ecommerce export #${id}`);
-    emitStockChangedForSkus(deletedSkus, {
-      referenceType: "TMDT_CANCEL",
-      reference: `TMDT-${id}`,
-    });
+    console.log(`✅ Deleted ecommerce export #${exportId}`);
     void logActivity({
       module: "export",
       action: "DELETE",
-      description: `Xóa bàn giao TMDT #${id}`,
+      description: `Xóa bàn giao TMDT #${exportId}`,
     });
     return { success: true };
   } catch (error) {
@@ -23370,8 +23672,20 @@ ipcMain.handle("ecommerceExports:bulkDelete", async (event, ids) => {
   try {
     requireRole("admin");
     if (!prisma) throw new Error("Prisma not available");
+    if (!Array.isArray(ids)) {
+      throw new Error("Danh sách phiếu xuất TMĐT không hợp lệ.");
+    }
+    const normalizedIds = [...new Set(ids.map(Number))];
+    if (
+      normalizedIds.length === 0 ||
+      normalizedIds.length > 1000 ||
+      normalizedIds.some((id) => !Number.isSafeInteger(id) || id <= 0)
+    ) {
+      throw new Error(
+        "Danh sách phiếu xuất TMĐT không hợp lệ (tối đa 1000 phiếu).",
+      );
+    }
     const startTime = Date.now();
-    const bulkDeletedSkus = [];
 
     // 🔒 StockMutex: serialize stock operations — tránh race condition Thẻ Kho
     const count = await withStockLock(() =>
@@ -23379,44 +23693,18 @@ ipcMain.handle("ecommerceExports:bulkDelete", async (event, ids) => {
         async (tx) => {
           // 🚀 Bước 1: Lấy TẤT CẢ đơn cần xóa trong 1 query
           const docs = await tx.ecommerceExport.findMany({
-            where: { id: { in: ids } },
+            where: { id: { in: normalizedIds } },
           });
           if (docs.length === 0) return 0;
 
-          // 🚀 Bước 2: Gom SKU cần hoàn kho từ đơn completed
           const completedDocs = docs.filter((d) => d.status === "completed");
           if (completedDocs.length > 0) {
-            const skuChanges = [];
-            for (const doc of completedDocs) {
-              const items = JSON.parse(doc.items || "[]");
-              for (const item of items) {
-                if (item.variantSku) {
-                  bulkDeletedSkus.push(item.variantSku);
-                  skuChanges.push({
-                    sku: item.variantSku,
-                    quantity: item.quantity,
-                  }); // + quantity = hoàn kho
-                }
-              }
-            }
-            if (skuChanges.length > 0) {
-              await batchStockUpdate(
-                tx,
-                skuChanges,
-                {
-                  type: "adjustment",
-                  referenceType: "TMDT_CANCEL",
-                  reference: `Xóa hàng loạt ${docs.length} đơn`,
-                  note: `Hoàn tồn do xóa ${completedDocs.length} đơn TMDT completed`,
-                  createdBy: "System",
-                },
-              );
-            }
+            throw new Error("Không thể xóa đơn đã gửi. Hãy bỏ chọn các đơn Đã gửi.");
           }
 
-          // 🚀 Bước 3: Xóa tất cả trong 1 DELETE statement
+          // Xóa các phiếu chưa gửi trong một transaction.
           const deleted = await tx.ecommerceExport.deleteMany({
-            where: { id: { in: ids } },
+            where: { id: { in: normalizedIds } },
           });
           return deleted.count;
         },
@@ -23425,10 +23713,6 @@ ipcMain.handle("ecommerceExports:bulkDelete", async (event, ids) => {
     );
 
     const elapsed = Date.now() - startTime;
-    emitStockChangedForSkus(bulkDeletedSkus, {
-      referenceType: "TMDT_CANCEL",
-      reference: `TMDT-BULK-${count}`,
-    });
     console.log(`✅ Bulk deleted ${count} ecommerce exports in ${elapsed}ms`);
     void logActivity({
       module: "export",
@@ -23482,8 +23766,9 @@ ipcMain.handle("ecommerceExports:deleteCancelled", async () => {
     requireRole("admin");
     if (!prisma) throw new Error("Prisma not available");
 
-    const result = await prisma.ecommerceExport.deleteMany({
-      where: { status: "cancelled" },
+    const result = await getPrismaDirectTx().$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('ecommerce-delete-cancelled'))`;
+      return tx.ecommerceExport.deleteMany({ where: { status: "cancelled" } });
     });
 
     console.log(`🗑️ Deleted ${result.count} cancelled ecommerce exports`);
@@ -23495,6 +23780,250 @@ ipcMain.handle("ecommerceExports:deleteCancelled", async () => {
     return { success: true, data: result.count };
   } catch (error) {
     console.error("❌ Delete cancelled ecommerce exports error:", error);
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle("ecommerceExports:importSnapshot", async (event, payload = {}) => {
+  try {
+    requireRole("admin", "manager");
+    if (!prisma) throw new Error("Prisma not available");
+    const platform = normalizeMarketplacePlatform(payload.platform);
+    const records = Array.isArray(payload.records) ? payload.records : [];
+    if (records.length > 10000 || (records.length === 0 && payload.allowEmptySnapshot !== true)) {
+      throw new Error("File không có đơn chờ lấy hàng hợp lệ.");
+    }
+
+    const normalizedByOrder = new Map();
+    for (const record of records) {
+      const orderNumber = String(
+        record?.orderNumber || record?.ecommerceExportCode || "",
+      ).trim();
+      const trackingNumber =
+        normalizeTrackingNumber(record?.trackingNumber) ||
+        extractTrackingFromNotes(record?.notes) ||
+        "";
+      const orderPlacedAt = getMarketplaceOrderPlacedAt(record);
+      if (!orderNumber || !orderPlacedAt) {
+        throw new Error(
+          `Đơn ${orderNumber || "không rõ mã"} thiếu thời gian phát sinh.`,
+        );
+      }
+      const totalAmount = Number(record?.totalAmount || 0);
+      if (!Number.isFinite(totalAmount) || totalAmount < 0) {
+        throw new Error(`Tổng tiền của đơn ${orderNumber} không hợp lệ.`);
+      }
+      const items = await resolveTmdtItemsSkus(prisma, record.items);
+      assertTmdtSnapshotItemsValid(items, orderNumber);
+      normalizedByOrder.set(orderNumber, {
+        ...record,
+        orderNumber,
+        ecommerceExportCode: orderNumber,
+        customerName: platform.label,
+        // Shopee/TikTok may expose the order before assigning a waybill.
+        trackingNumber: trackingNumber || null,
+        orderPlacedAt,
+        slaDeadlineAt: calculateMarketplaceSlaDeadline(orderPlacedAt),
+        items: JSON.stringify(items),
+        totalAmount,
+      });
+    }
+    const normalizedRecords = Array.from(normalizedByOrder.values());
+    const orderNumbers = normalizedRecords.map((record) => record.orderNumber);
+    const importedAt = new Date();
+    const fileNames = Array.isArray(payload.fileNames)
+      ? payload.fileNames.map((name) => String(name).slice(0, 260))
+      : [];
+
+    const result = await getPrismaDirectTx().$transaction(
+      async (tx) => {
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`ecommerce-snapshot:${platform.key}`}))`;
+        const batch = await tx.ecommerceImportBatch.create({
+          data: {
+            platform: platform.label,
+            fileNames: JSON.stringify(fileNames),
+            importedCount: normalizedRecords.length,
+            createdBy: currentSession?.username || currentSession?.fullName || null,
+          },
+        });
+
+        const existingRows = await tx.ecommerceExport.findMany({
+          where: {
+            customerName: platform.label,
+            OR: [
+              { orderNumber: { in: orderNumbers } },
+              { ecommerceExportCode: { in: orderNumbers } },
+            ],
+          },
+          orderBy: [{ status: "asc" }, { id: "asc" }],
+        });
+        const completedOrders = await tx.order.findMany({
+          where: {
+            orderNumber: { in: orderNumbers },
+            source: normalizeMarketplaceSource(platform.label),
+            status: "completed",
+          },
+          select: { orderNumber: true, createdAt: true },
+        });
+        const completedOrderByNumber = new Map(
+          completedOrders.map((order) => [order.orderNumber, order]),
+        );
+        const existingByOrder = new Map();
+        for (const row of existingRows) {
+          const key = String(row.orderNumber || row.ecommerceExportCode || "").trim();
+          const current = existingByOrder.get(key);
+          if (!current || row.status === "completed") existingByOrder.set(key, row);
+        }
+
+        const createData = [];
+        const updateRecords = [];
+        const completedReconciliations = [];
+        let updatedCount = 0;
+        let skippedCompleted = 0;
+        for (const record of normalizedRecords) {
+          const existing = existingByOrder.get(record.orderNumber);
+          const notes = withMarketplaceOrderPlacedAtNote(record.notes, record);
+          const completedOrder = completedOrderByNumber.get(record.orderNumber);
+          if (completedOrder) {
+            if (existing && existing.status !== "completed") {
+              completedReconciliations.push({ existing, completedOrder });
+            }
+            skippedCompleted += 1;
+          } else if (!existing) {
+            createData.push({
+              customerName: platform.label,
+              ecommerceExportCode: record.orderNumber,
+              orderNumber: record.orderNumber,
+              ecommerceExportReason: record.ecommerceExportReason || null,
+              ecommerceExportDate: importedAt,
+              items: record.items,
+              totalAmount: Number(record.totalAmount || 0),
+              notes,
+              status: "pending",
+              createdBy: record.createdBy || currentSession?.username || null,
+              trackingNumber: record.trackingNumber || null,
+              orderPlacedAt: record.orderPlacedAt,
+              slaDeadlineAt: record.slaDeadlineAt,
+              mismatchAt: null,
+              mismatchReason: null,
+              lastSeenImportBatchId: batch.id,
+            });
+          } else if (existing.status === "completed") {
+            // Đơn đã bàn giao là lịch sử bất biến: không tạo lại và không cập nhật ngược
+            // bằng dữ liệu từ file "Chờ lấy hàng" được xuất muộn.
+            skippedCompleted += 1;
+          } else {
+            updateRecords.push({ existing, record, notes });
+          }
+        }
+
+        if (createData.length > 0) {
+          await tx.ecommerceExport.createMany({ data: createData });
+        }
+        for (const { existing, completedOrder } of completedReconciliations) {
+          await tx.ecommerceExport.update({
+            where: { id: existing.id },
+            data: {
+              status: "completed",
+              completedAt: existing.completedAt || completedOrder.createdAt || importedAt,
+              mismatchAt: null,
+              mismatchReason: null,
+            },
+          });
+        }
+        for (let offset = 0; offset < updateRecords.length; offset += 100) {
+          const chunk = updateRecords.slice(offset, offset + 100);
+          const outcomes = await Promise.all(
+            chunk.map(async ({ existing, record, notes }) => {
+              const updated = await tx.ecommerceExport.updateMany({
+                where: {
+                  id: existing.id,
+                  status: existing.status,
+                  updatedAt: existing.updatedAt,
+                },
+                data: {
+                  ecommerceExportCode: record.orderNumber,
+                  orderNumber: record.orderNumber,
+                  ecommerceExportReason: record.ecommerceExportReason || null,
+                  items: record.items,
+                  totalAmount: Number(record.totalAmount || 0),
+                  notes,
+                  trackingNumber:
+                    record.trackingNumber ||
+                    normalizeTrackingNumber(existing.trackingNumber) ||
+                    extractTrackingFromNotes(existing.notes) ||
+                    null,
+                  orderPlacedAt: record.orderPlacedAt,
+                  slaDeadlineAt: record.slaDeadlineAt,
+                  lastSeenImportBatchId: batch.id,
+                  status: "pending",
+                  mismatchAt: null,
+                  mismatchReason: null,
+                },
+              });
+              if (updated.count === 1) return "updated";
+
+              const latest = await tx.ecommerceExport.findUnique({
+                where: { id: existing.id },
+                select: { status: true },
+              });
+              if (latest?.status === "completed") return "completed";
+              throw new Error(
+                `Đơn ${record.orderNumber} vừa thay đổi trên máy khác. Vui lòng import lại snapshot mới nhất.`,
+              );
+            }),
+          );
+          updatedCount += outcomes.filter((outcome) => outcome === "updated").length;
+          skippedCompleted += outcomes.filter((outcome) => outcome === "completed").length;
+        }
+
+        const missing = await tx.ecommerceExport.updateMany({
+          where: {
+            customerName: platform.label,
+            status: "pending",
+            OR: [
+              { orderNumber: { notIn: orderNumbers } },
+              {
+                orderNumber: null,
+                ecommerceExportCode: { notIn: orderNumbers },
+              },
+            ],
+          },
+          data: {
+            status: "mismatch",
+            mismatchAt: importedAt,
+            mismatchReason: "ĐƠN TRỄ - Không còn trong file chờ lấy hàng mới nhất",
+          },
+        });
+
+        await tx.ecommerceImportBatch.update({
+          where: { id: batch.id },
+          data: {
+            createdCount: createData.length,
+            updatedCount,
+            mismatchCount: missing.count,
+          },
+        });
+        return {
+          batchId: batch.id,
+          imported: normalizedRecords.length,
+          created: createData.length,
+          updated: updatedCount,
+          skippedCompleted,
+          mismatch: missing.count,
+        };
+      },
+      { maxWait: 15000, timeout: 120000 },
+    );
+
+    void logActivity({
+      module: "export",
+      action: "IMPORT",
+      description: `Đối soát ${platform.label}: ${result.imported} đơn, ${result.mismatch} đơn trễ`,
+    });
+    return { success: true, data: result };
+  } catch (error) {
+    console.error("Import ecommerce snapshot error:", error);
     return { success: false, error: error.message };
   }
 });
@@ -23731,21 +24260,11 @@ ipcMain.handle("ecommerceExports:bulkCancel", async (event, ids) => {
 
 const ORDER_MARKETPLACE_SOURCES = ["shopee", "tiktok", "lazada", "tmdt"];
 
-function getUnifiedMarketplaceOrderTimeSql(alias = "o") {
+function getUnifiedOrderActivityTimeSql(alias = "o") {
   const tableRef = alias === "o" ? "o" : '"Order"';
-  const sourceColumn = Prisma.raw(`${tableRef}."source"`);
-  const orderNumberColumn = Prisma.raw(`${tableRef}."orderNumber"`);
-  const createdAtColumn = Prisma.raw(`${tableRef}."createdAt"`);
-  return Prisma.sql`CASE
-    WHEN ${sourceColumn} IN (${Prisma.join(ORDER_MARKETPLACE_SOURCES)}) THEN COALESCE(
-      (SELECT MAX(e."ecommerceExportDate")
-       FROM "EcommerceExport" e
-       WHERE e."orderNumber" = ${orderNumberColumn}
-         AND e."status" = 'completed'),
-      ${createdAtColumn}
-    )
-    ELSE ${createdAtColumn}
-  END`;
+  // Marketplace orders are created when pickup is completed, so createdAt is
+  // the pickup/handover timestamp used by the Orders screen.
+  return Prisma.raw(`${tableRef}."createdAt"`);
 }
 
 function getUnifiedOrderRange(args, previous = false) {
@@ -23880,9 +24399,7 @@ function mapUnifiedDatabaseOrder(order) {
     ),
     totalAmount: order.total || 0,
     status: order.status,
-    date: (marketplace && getMarketplaceOrderPlacedAt(order)
-      ? getMarketplaceOrderPlacedAt(order)
-      : order.createdAt).toISOString(),
+    date: order.createdAt.toISOString(),
     tracking: order.trackingNumber || undefined,
     shipping: order.note?.match(/Shipping: ([^|]+)/)?.[1]?.trim(),
     notes: order.note || "",
@@ -23935,7 +24452,7 @@ function buildUnifiedOrderSqlCondition(args, previous = false, ignoreSource = fa
   const sourceCondition = getUnifiedOrderSqlSourceCondition(args, ignoreSource);
   if (!sourceCondition) return null;
   const range = getUnifiedOrderRange(args, previous);
-  const orderTime = getUnifiedMarketplaceOrderTimeSql("o");
+  const orderTime = getUnifiedOrderActivityTimeSql("o");
   const parts = [
     Prisma.sql`(${orderTime}) >= ${range.gte}`,
     Prisma.sql`(${orderTime}) <= ${range.lte}`,
@@ -23979,7 +24496,7 @@ function buildUnifiedExportSqlCondition(args, previous = false, ignoreSource = f
 
 function buildUnifiedPageQuery(args, page, pageSize) {
   const branches = [];
-  const orderTime = getUnifiedMarketplaceOrderTimeSql("o");
+  const orderTime = getUnifiedOrderActivityTimeSql("o");
   const orderCondition = buildUnifiedOrderSqlCondition(args);
   const exportCondition = buildUnifiedExportSqlCondition(args);
   if (orderCondition) {
@@ -24231,7 +24748,7 @@ ipcMain.handle("orders:getDailyStats", async (event, args = {}) => {
             ORDER_MARKETPLACE_SOURCES,
           )}) AND "status" = 'completed'))`;
 
-    const orderTime = getUnifiedMarketplaceOrderTimeSql("Order");
+    const orderTime = getUnifiedOrderActivityTimeSql("Order");
     const localOrderTime = Prisma.sql`(${orderTime}) AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Bangkok'`;
     const orderBucket = granularity === "hour"
       ? Prisma.sql`TO_CHAR(DATE_TRUNC('hour', ${localOrderTime}), 'YYYY-MM-DD HH24:00')`
