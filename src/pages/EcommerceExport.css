@@ -32,8 +32,9 @@
 
 .ecommerce-toolbar {
     display: grid;
-    grid-template-columns: auto minmax(210px, 1fr) auto;
+    grid-template-columns: max-content minmax(220px, 320px) max-content;
     gap: 8px 12px;
+    justify-content: space-between;
     margin-bottom: 10px;
     padding: 10px;
     border: 1px solid #e6ebe8;
@@ -49,7 +50,8 @@
 }
 
 .ecommerce-status-group {
-    flex-wrap: wrap;
+    flex-wrap: nowrap;
+    white-space: nowrap;
 }
 
 .ecommerce-status-chip.ant-tag {
@@ -58,11 +60,13 @@
 
 .ecommerce-search {
     min-width: 0;
+    width: 100%;
+    max-width: 320px;
 }
 
 .ecommerce-toolbar-actions {
     justify-content: flex-end;
-    flex-wrap: wrap;
+    flex-wrap: nowrap;
 }
 
 .ecommerce-toolbar-button {
@@ -153,6 +157,23 @@
     overflow: visible;
 }
 
+/* Keep long variation labels inside their cell instead of covering the amount. */
+.ecommerce-table .ecommerce-cell--variation {
+    min-width: 0;
+    overflow: hidden;
+}
+
+.ecommerce-table .ecommerce-cell--variation .ant-tag {
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.ecommerce-table .ecommerce-cell--amount {
+    white-space: nowrap;
+}
+
 .ecommerce-mismatch-heading {
     justify-content: space-between;
     gap: 12px;
@@ -181,14 +202,16 @@
     margin-top: 24px;
 }
 
-@container ecommerce-page (max-width: 1180px) {
+@container ecommerce-page (max-width: 920px) {
     .ecommerce-toolbar {
         grid-template-columns: auto minmax(220px, 1fr);
+        justify-content: stretch;
     }
 
     .ecommerce-toolbar-actions {
         grid-column: 1 / -1;
         justify-content: flex-start;
+        flex-wrap: wrap;
     }
 
     .ecommerce-table-card > .ant-card-body {
@@ -235,7 +258,7 @@
         grid-template-areas:
             "select order order product product actions"
             "select source sku variation date actions"
-            "select shipping amount amount date actions";
+            "select shipping amount status date actions";
         column-gap: 10px;
         padding: 0 10px;
         overflow: visible;
@@ -252,8 +275,22 @@
     }
 
     .ecommerce-table .ant-table-tbody > tr.ecommerce-table-row--cancelled {
+        border-left-color: #262626;
+        background: #fafafa;
+    }
+
+    .ecommerce-table .ant-table-tbody > tr.ecommerce-table-row--mismatch,
+    .ecommerce-table .ant-table-tbody > tr.ecommerce-table-row--overdue {
         border-left-color: #ff4d4f;
         background: #fffafa;
+    }
+
+    .ecommerce-table .ant-table-tbody > tr.ecommerce-table-row--no-selection {
+        grid-template-columns: minmax(160px, 1.1fr) minmax(150px, 1fr) minmax(125px, 0.8fr) minmax(135px, 0.9fr) 38px;
+        grid-template-areas:
+            "order order product product actions"
+            "source sku variation date actions"
+            "shipping amount status date actions";
     }
 
     .ecommerce-table .ant-table-tbody > tr.ecommerce-table-row--multi:not(.ecommerce-table-row--completed) {
@@ -288,6 +325,7 @@
     .ecommerce-cell--variation { grid-area: variation; }
     .ecommerce-cell--amount { grid-area: amount; }
     .ecommerce-cell--shipping { grid-area: shipping; }
+    .ecommerce-cell--status { grid-area: status; }
 
     .ecommerce-cell:not(.ecommerce-cell--actions) {
         display: grid !important;
@@ -307,14 +345,15 @@
         text-transform: uppercase;
     }
 
-    .ecommerce-cell--date::before { content: "Created"; }
-    .ecommerce-cell--source::before { content: "Nguon"; }
-    .ecommerce-cell--order::before { content: "Order / Track"; }
-    .ecommerce-cell--product::before { content: "San pham"; }
+    .ecommerce-cell--date::before { content: "Thời gian"; }
+    .ecommerce-cell--source::before { content: "Nguồn"; }
+    .ecommerce-cell--order::before { content: "Mã đơn / vận đơn"; }
+    .ecommerce-cell--product::before { content: "Sản phẩm"; }
     .ecommerce-cell--sku::before { content: "SKU"; }
-    .ecommerce-cell--variation::before { content: "Phan loai"; }
-    .ecommerce-cell--amount::before { content: "Tong tien"; }
-    .ecommerce-cell--shipping::before { content: "Don vi VC"; }
+    .ecommerce-cell--variation::before { content: "Phân loại"; }
+    .ecommerce-cell--amount::before { content: "Tổng tiền"; }
+    .ecommerce-cell--shipping::before { content: "Đơn vị VC"; }
+    .ecommerce-cell--status::before { content: "Trạng thái"; }
 
     .ecommerce-cell .ant-tag {
         width: fit-content;
@@ -472,8 +511,23 @@
             "select variation actions"
             "select shipping actions"
             "select amount actions"
+            "select status actions"
             "select date actions";
         column-gap: 9px;
+    }
+
+    .ecommerce-table .ant-table-tbody > tr.ecommerce-table-row--no-selection {
+        grid-template-columns: minmax(0, 1fr) 38px;
+        grid-template-areas:
+            "order actions"
+            "product actions"
+            "source actions"
+            "sku actions"
+            "variation actions"
+            "shipping actions"
+            "amount actions"
+            "status actions"
+            "date actions";
     }
 
     .ecommerce-cell:not(.ecommerce-cell--actions) {

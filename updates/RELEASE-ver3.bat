@@ -1,7 +1,7 @@
 @echo off
 chcp 65001 >nul
 setlocal enabledelayedexpansion
-cd /d "%~dp0"
+cd /d "%~dp0.."
 
 for /f "tokens=*" %%t in ('gh auth token 2^>nul') do set GH_TOKEN=%%t
 
@@ -15,6 +15,15 @@ echo   DBY POS - QUICK PATCH Release
 echo   Chi update code (KHONG build lai EXE)
 echo ============================================
 echo.
+echo [RULE] Khong dung file nay neu schema, migration, Prisma delegate/field thay doi.
+echo [RULE] Truong hop do phai dung updates\RELEASE-PRISMA-PATCH.bat.
+echo.
+
+call node scripts\release-preflight.cjs quick
+if errorlevel 1 (
+    pause
+    exit /b 1
+)
 
 for /f %%v in ('node scripts\\release-version.cjs current') do set CURRENT_VERSION=%%v
 if not defined CURRENT_VERSION (
@@ -47,18 +56,19 @@ if errorlevel 1 (
 echo [OK] package.json updated to v!NEW_VERSION!
 echo.
 
-echo [2/4] Build Vite...
+echo [2/4] Type-check and build renderer...
 echo ----------------------------------------
 if exist "!BUILD_DIST!" rmdir /S /Q "!BUILD_DIST!"
-call npx vite build --outDir "!BUILD_DIST!" --emptyOutDir
+call npm run build -- --outDir "!BUILD_DIST!" --emptyOutDir
 if errorlevel 1 (
     echo.
-    echo [ERROR] Vite build failed.
+    echo [ERROR] TypeScript or Vite build failed.
     if exist "!BUILD_DIST!" rmdir /S /Q "!BUILD_DIST!"
+    node scripts\release-version.cjs set !CURRENT_VERSION! >nul
     pause
     exit /b 1
 )
-echo [OK] Vite build completed.
+echo [OK] Renderer build completed.
 echo.
 
 echo [3/4] Create patch zip...
@@ -119,6 +129,7 @@ if errorlevel 1 (
 del /Q "!PATCH_TEMP!\resources\app\electron\config.js" 2>nul
 del /Q "!PATCH_TEMP!\resources\app\electron\supabase-storage.json" 2>nul
 del /Q "!PATCH_TEMP!\resources\app\electron\gdrive-credentials.json" 2>nul
+del /Q "!PATCH_TEMP!\resources\app\electron\gdrive-token.json" 2>nul
 xcopy "node_modules\@supabase\*" "!PATCH_TEMP!\resources\app\node_modules\@supabase\" /E /I /Y /Q >nul 2>&1
 xcopy "node_modules\@zxing\*" "!PATCH_TEMP!\resources\app\node_modules\@zxing\" /E /I /Y /Q >nul 2>&1
 xcopy "node_modules\cloudflared\*" "!PATCH_TEMP!\resources\app\node_modules\cloudflared\" /E /I /Y /Q >nul 2>&1
@@ -150,7 +161,7 @@ if not exist "!PATCH_TEMP!\resources\app\node_modules\cloudflared\bin\cloudflare
 copy /Y "python\attendance_service.py" "!PATCH_TEMP!\resources\app\python\" >nul 2>&1
 copy /Y "python\requirements.txt" "!PATCH_TEMP!\resources\app\python\" >nul 2>&1
 copy /Y "package.json" "!PATCH_TEMP!\resources\app\package.json" >nul 2>&1
-echo    [OK] Khong kem EXE ^(dung RELEASE-ver2.bat neu can cap nhat Python service^)
+echo    [OK] Khong kem EXE ^(dung updates\RELEASE-ver2.bat neu can cap nhat Python service^)
 
 powershell -NoProfile -Command "Compress-Archive -Path '!PATCH_TEMP!\*' -DestinationPath '!PATCH_ZIP_PATH!' -Force"
 set ZIP_EXIT=!errorlevel!
@@ -183,8 +194,16 @@ echo.
 
 echo [4/4] Git and GitHub release...
 echo ----------------------------------------
-:: Chi stage ma nguon va cau hinh phat hanh; bo qua log va tai lieu tam.
-git add .gitignore BUILD-INSTALLER.bat RELEASE-ver3.bat RELEASE.bat electron/ipc-handlers.js electron/preload.js package.json scripts/prepare-r2-daily-evidence-config.js scripts/verify-data-safety.js src/pages/Attendance.tsx src/pages/DailyTasks.tsx src/pages/Returns.tsx src/pages/StockCheck.tsx src/types/electron.d.ts
+echo Review every file below. RELEASE will stage all of them:
+git status --short
+set /p "RELEASE_CONFIRM=Type RELEASE to continue: "
+if /I not "!RELEASE_CONFIRM!"=="RELEASE" (
+    echo [CANCELLED] Nothing was committed or published.
+    node scripts\release-version.cjs set !CURRENT_VERSION! >nul
+    pause
+    exit /b 1
+)
+git add -A
 git commit -m "v!NEW_VERSION! - !NOTES!"
 if errorlevel 1 (
     echo [WARN] Git commit failed or there is nothing new to commit.

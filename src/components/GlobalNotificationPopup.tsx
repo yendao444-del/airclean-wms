@@ -12,7 +12,7 @@ interface GlobalNotificationPopupProps {
 }
 
 const formatDate = (value?: string | null) => value
-    ? new Intl.DateTimeFormat('vi-VN').format(new Date(value))
+    ? new Intl.DateTimeFormat('vi-VN', { timeZone: 'Asia/Bangkok' }).format(new Date(value))
     : 'Áp dụng ngay';
 
 interface PackingPolicyRow {
@@ -26,6 +26,10 @@ const parsePackingPolicyRows = (content: string): PackingPolicyRow[] => {
     content.split('\n').map(line => line.trim()).filter(Boolean).forEach(line => {
         if (!line.startsWith('•')) return;
         const raw = line.slice(1).trim();
+        if (raw.toLocaleLowerCase('vi-VN').startsWith('ngày sale')) {
+            rows.push({ label: 'Ngày sale', previous: 'Đơn giá thường', current: '+ 50% hoa hồng' });
+            return;
+        }
         const colonIndex = raw.indexOf(':');
         if (colonIndex > 0 && colonIndex < 35) {
             const label = raw.slice(0, colonIndex).trim();
@@ -71,6 +75,7 @@ export default function GlobalNotificationPopup({
 
     const contentLines = announcement.content.split('\n').map(line => line.trim()).filter(Boolean);
     const isPackingPolicy = announcement.policyCode?.startsWith('PKG-REWARD-WEEKLY') === true;
+    const isSchedulePolicy = announcement.policyCode === 'ATT-SCHEDULE-2026.09';
     const packingRows = isPackingPolicy ? parsePackingPolicyRows(announcement.content) : [];
 
     return (
@@ -80,7 +85,7 @@ export default function GlobalNotificationPopup({
             closable={false}
             maskClosable={false}
             keyboard={false}
-            width={isPackingPolicy ? 860 : 720}
+            width={isPackingPolicy || isSchedulePolicy ? 860 : 720}
             footer={null}
             centered
         >
@@ -88,7 +93,27 @@ export default function GlobalNotificationPopup({
                 <span><BellOutlined /> Thông báo mới cần xác nhận</span>
                 <Tag color="orange">Hiệu lực {formatDate(announcement.effectiveAt)}</Tag>
             </div>
-            {isPackingPolicy && packingRows.length > 0 ? (
+            {isSchedulePolicy ? (
+                <div className="notification-popup__official-document">
+                    <div className="notification-popup__document-banner">
+                        THAY ĐỔI THỜI GIAN ĐI LÀM TỪ NGÀY {formatDate(announcement.effectiveAt)}
+                    </div>
+                    <p className="notification-popup__document-intro">
+                        Kể từ ngày <strong>{formatDate(announcement.effectiveAt)}</strong>, {announcement.issuer || 'Phòng vận hành'} chính thức áp dụng giờ ca chiều mới cho nhân viên chính thức:
+                    </p>
+                    <div className="notification-popup__table-wrap">
+                        <table className="notification-popup__policy-table">
+                            <thead><tr><th>STT</th><th>Nhóm thời gian</th><th>Trước ngày áp dụng</th><th>Từ ngày áp dụng</th></tr></thead>
+                            <tbody>
+                                <tr><td>1</td><td><strong>Ca chiều - Chính thức</strong></td><td>13:30</td><td><strong>13:00</strong></td></tr>
+                                <tr><td>2</td><td><strong>Ca chiều - Thời vụ</strong></td><td>13:30</td><td><strong>13:30 (giữ nguyên)</strong></td></tr>
+                                <tr><td>3</td><td><strong>Thời gian linh động</strong></td><td>5 phút</td><td><strong>5 phút</strong></td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                    <p className="notification-popup__document-intro"><strong>Lưu ý:</strong> Ca sáng vẫn là 08:00. Dữ liệu cũ giữ nguyên; giờ 13:00 chỉ áp dụng cho nhân viên chính thức từ 00:00 ngày {formatDate(announcement.effectiveAt)}.</p>
+                </div>
+            ) : isPackingPolicy && packingRows.length > 0 ? (
                 <div className="notification-popup__official-document">
                     <div className="notification-popup__document-banner">
                         CẬP NHẬT VỀ {announcement.title.toUpperCase()} TỪ NGÀY {formatDate(announcement.effectiveAt)}
@@ -120,15 +145,17 @@ export default function GlobalNotificationPopup({
                     </div>
                 </div>
             ) : (
-                <>
-                    <h2>{announcement.title}</h2>
-                    <p className="notification-popup__summary">{announcement.summary}</p>
+                <div className="notification-popup__official-document">
+                    <div className="notification-popup__document-banner">
+                        {announcement.title.toUpperCase()} TỪ NGÀY {formatDate(announcement.effectiveAt)}
+                    </div>
+                    <p className="notification-popup__document-intro">{announcement.summary}</p>
                     <div className="notification-popup__content">
                         {contentLines.map((line, index) => line.startsWith('•') ? (
                             <p className="notification-popup__bullet" key={index}><CheckCircleFilled />{line.slice(1).trim()}</p>
                         ) : <p key={index}>{line}</p>)}
                     </div>
-                </>
+                </div>
             )}
             <div className="notification-popup__privacy">
                 <SafetyCertificateOutlined />

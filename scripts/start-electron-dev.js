@@ -27,6 +27,11 @@ const startedAt = Date.now();
 const children = new Set();
 let launcherLock = null;
 let shuttingDown = false;
+let electronChild = null;
+let electronRestartTimer = null;
+let electronRestartRequested = false;
+const electronWatchers = [];
+const fastStart = process.env.DBYPOS_FAST_START === '1';
 
 function elapsed() {
   return `${((Date.now() - startedAt) / 1000).toFixed(1)}s`;
@@ -77,6 +82,61 @@ function ensurePrismaClientSynced() {
       reject(new Error(`Prisma Client generation failed with exit code ${code}.`));
     });
   });
+}
+
+function getLatestMtime(targetPath) {
+  if (!fs.existsSync(targetPath)) return 0;
+  const stat = fs.statSync(targetPath);
+  if (!stat.isDirectory()) return stat.mtimeMs;
+  let latest = stat.mtimeMs;
+  for (const entry of fs.readdirSync(targetPath, { withFileTypes: true })) {
+    latest = Math.max(latest, getLatestMtime(path.join(targetPath, entry.name)));
+  }
+  return latest;
+}
+
+function runNode(entry, args) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [entry, ...args], {
+      cwd: projectRoot,
+      env: process.env,
+      stdio: 'inherit',
+      windowsHide: true,
+    });
+    child.once('error', reject);
+    child.once('exit', (code) => {
+      if (code === 0) resolve();
+      else reject(new Error(`${path.basename(entry)} exited with code ${code}.`));
+    });
+  });
+}
+
+async function ensureRendererBuild() {
+  const distIndex = path.join(projectRoot, 'dist', 'index.html');
+  const distMtime = fs.existsSync(distIndex) ? fs.statSync(distIndex).mtimeMs : 0;
+  const sourceMtime = Math.max(
+    getLatestMtime(path.join(projectRoot, 'src')),
+    getLatestMtime(path.join(projectRoot, 'public')),
+    ...[
+      'index.html',
+      'package.json',
+      'package-lock.json',
+      'tsconfig.json',
+      'tsconfig.app.json',
+      'vite.config.ts',
+    ].map((file) => getLatestMtime(path.join(projectRoot, file))),
+  );
+  if (distMtime >= sourceMtime) {
+    console.log(`[START] Reusing fresh production renderer after ${elapsed()}`);
+    return;
+  }
+
+  console.log('[START] Renderer source changed; refreshing the production build once...');
+  // START is a runtime launcher, not the release validation pipeline. Vite
+  // transpiles the renderer needed to run; `npm run build` remains the place
+  // that performs the full TypeScript check before packaging/release.
+  await runNode(viteEntry, ['build']);
+  console.log(`[START] Production renderer ready after ${elapsed()}`);
 }
 
 function acquireLauncherLock() {
@@ -231,9 +291,77 @@ function terminateTree(child) {
   }
 }
 
+function launchElectron({ devServerUrl, useBuiltRenderer = false }) {
+  const child = spawn(process.execPath, [electronEntry, projectRoot], {
+    cwd: projectRoot,
+    env: {
+      ...process.env,
+      ...(devServerUrl ? { DBYPOS_VITE_DEV_SERVER_URL: devServerUrl } : {}),
+      DBYPOS_USE_DIST: useBuiltRenderer ? '1' : '0',
+    },
+    stdio: 'inherit',
+    windowsHide: true,
+  });
+  electronChild = child;
+  children.add(child);
+  child.once('exit', (code) => {
+    children.delete(child);
+    if (electronChild === child) electronChild = null;
+    if (shuttingDown) return;
+    if (electronRestartRequested) {
+      electronRestartRequested = false;
+      console.log(`[START] Electron backend updated; restarting after ${elapsed()}...`);
+      launchElectron({ devServerUrl, useBuiltRenderer });
+      return;
+    }
+    console.log(`[START] Electron closed after ${elapsed()}; stopping the development server.`);
+    shutdown(code || 0);
+  });
+}
+
+function watchElectronBackend({ devServerUrl, useBuiltRenderer = false }) {
+  const watchedFiles = [
+    'main.js',
+    'preload.js',
+    'ipc-handlers.js',
+    'packing-read-model.js',
+    'update-handlers.js',
+    'offline-queue.js',
+  ];
+  for (const filename of watchedFiles) {
+    const filePath = path.join(projectRoot, 'electron', filename);
+    if (!fs.existsSync(filePath)) continue;
+    const getSignature = () => {
+      try {
+        const stat = fs.statSync(filePath);
+        return `${stat.mtimeMs}:${stat.size}`;
+      } catch {
+        return null;
+      }
+    };
+    let lastSignature = getSignature();
+    const watcher = fs.watch(filePath, () => {
+      clearTimeout(electronRestartTimer);
+      electronRestartTimer = setTimeout(() => {
+        if (!electronChild || electronRestartRequested || shuttingDown) return;
+        const nextSignature = getSignature();
+        if (!nextSignature || nextSignature === lastSignature) return;
+        lastSignature = nextSignature;
+        electronRestartRequested = true;
+        console.log(`[START] ${filename} changed; restarting Electron (Vite remains running)...`);
+        terminateTree(electronChild);
+      }, 250);
+    });
+    electronWatchers.push(watcher);
+  }
+  console.log('[START] Watching Electron backend/preload files for automatic restart');
+}
+
 function shutdown(exitCode = 0) {
   if (shuttingDown) return;
   shuttingDown = true;
+  clearTimeout(electronRestartTimer);
+  for (const watcher of electronWatchers) watcher.close();
   for (const child of children) terminateTree(child);
   launcherLock?.close();
   launcherLock = null;
@@ -264,6 +392,14 @@ async function main() {
   quarantineStaleElectronApp();
   await ensurePrismaClientSynced();
 
+  if (fastStart) {
+    await ensureRendererBuild();
+    console.log(`[START] Launching Electron with the production renderer after ${elapsed()}`);
+    launchElectron({ useBuiltRenderer: true });
+    watchElectronBackend({ useBuiltRenderer: true });
+    return;
+  }
+
   const runningServer = await findRunningDbyServer();
   let devServerUrl;
 
@@ -282,18 +418,15 @@ async function main() {
   }
 
   console.log(`[START] Vite ready after ${elapsed()}; launching Electron`);
-  const electron = startNode(electronEntry, [projectRoot], 'ELECTRON', {
-    DBYPOS_VITE_DEV_SERVER_URL: devServerUrl,
-  });
-  electron.once('exit', (code) => {
-    if (!shuttingDown) {
-      console.log(`[START] Electron closed after ${elapsed()}; stopping the development server.`);
-      shutdown(code || 0);
-    }
-  });
+  launchElectron({ devServerUrl });
+  watchElectronBackend({ devServerUrl });
 }
 
-main().catch((error) => {
+const startPromise = process.argv.includes('--verify-fast-build')
+  ? ensureRendererBuild()
+  : main();
+
+startPromise.catch((error) => {
   console.error(`[START] ${error.message}`);
   shutdown(1);
 });

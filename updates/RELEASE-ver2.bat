@@ -1,7 +1,7 @@
 @echo off
 chcp 65001 >nul
 setlocal enabledelayedexpansion
-cd /d "%~dp0"
+cd /d "%~dp0.."
 
 for /f "tokens=*" %%t in ('gh auth token 2^>nul') do set GH_TOKEN=%%t
 
@@ -15,6 +15,15 @@ echo   DBY POS - PATCH Release
 echo   Update code and face service artifact
 echo ============================================
 echo.
+echo [RULE] Chi dung khi ca Prisma va Python face service can cap nhat.
+echo [RULE] Neu khong doi Python, dung updates\RELEASE-PRISMA-PATCH.bat de goi nhe hon.
+echo.
+
+call node scripts\release-preflight.cjs prisma-python
+if errorlevel 1 (
+    pause
+    exit /b 1
+)
 
 for /f %%v in ('node scripts\\release-version.cjs current') do set CURRENT_VERSION=%%v
 if not defined CURRENT_VERSION (
@@ -68,16 +77,16 @@ if errorlevel 1 (
 echo [OK] Prisma Client regenerated.
 echo.
 
-echo [3/7] Build Vite...
+echo [3/7] Type-check and build renderer...
 echo ----------------------------------------
-call npx vite build
+call npm run build
 if errorlevel 1 (
     echo.
-    echo [ERROR] Vite build failed.
+    echo [ERROR] TypeScript or Vite build failed.
     pause
     exit /b 1
 )
-echo [OK] Vite build completed.
+echo [OK] Renderer build completed.
 echo.
 
 echo [4/7] Copy code into local release folder for quick verification...
@@ -164,6 +173,12 @@ xcopy "node_modules\tslib\*" "!PATCH_TEMP!\resources\app\node_modules\tslib\" /E
 copy /Y "python\attendance_service.py" "!PATCH_TEMP!\resources\app\python\" >nul 2>&1
 copy /Y "python\requirements.txt" "!PATCH_TEMP!\resources\app\python\" >nul 2>&1
 
+rem Never publish development database/service credentials in a patch.
+del /Q "!PATCH_TEMP!\resources\app\electron\config.js" 2>nul
+del /Q "!PATCH_TEMP!\resources\app\electron\supabase-storage.json" 2>nul
+del /Q "!PATCH_TEMP!\resources\app\electron\gdrive-credentials.json" 2>nul
+del /Q "!PATCH_TEMP!\resources\app\electron\gdrive-token.json" 2>nul
+
 if exist "python\dist\attendance_service.exe" (
     mkdir "!PATCH_TEMP!\resources\app\python\dist" >nul 2>&1
     copy /Y "python\dist\attendance_service.exe" "!PATCH_TEMP!\resources\app\python\dist\" >nul 2>&1
@@ -207,6 +222,15 @@ echo.
 
 echo [7/7] Git and GitHub release...
 echo ----------------------------------------
+echo Review every file below. RELEASE will stage all of them:
+git status --short
+set /p "RELEASE_CONFIRM=Type RELEASE to continue: "
+if /I not "!RELEASE_CONFIRM!"=="RELEASE" (
+    echo [CANCELLED] Nothing was committed or published.
+    node scripts\release-version.cjs set !CURRENT_VERSION! >nul
+    pause
+    exit /b 1
+)
 git add -A
 git commit -m "v!NEW_VERSION! - !NOTES!"
 if errorlevel 1 (

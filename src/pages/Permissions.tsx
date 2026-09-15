@@ -108,11 +108,13 @@ export default function PermissionsPage() {
         setLoading(true);
         try {
             const result = await window.electronAPI.users.getAll();
-            if (result.success && result.data) {
-                setUsers(result.data);
+            if (!result.success || !result.data) {
+                throw new Error(result.error || 'Không thể tải danh sách người dùng.');
             }
+            setUsers(result.data);
         } catch (error) {
             console.error('Error loading users:', error);
+            message.error(error instanceof Error ? error.message : 'Không thể tải danh sách người dùng.');
         } finally {
             setLoading(false);
         }
@@ -159,6 +161,9 @@ export default function PermissionsPage() {
 
         try {
             const attendanceResult = await window.electronAPI.appConfig.get('attendanceData');
+            if (!attendanceResult?.success) {
+                throw new Error(attendanceResult?.error || 'Không kiểm tra được liên kết lương.');
+            }
             const payrollEmployees = Array.isArray(attendanceResult?.data?.employees)
                 ? attendanceResult.data.employees
                 : [];
@@ -181,9 +186,27 @@ export default function PermissionsPage() {
             okType: 'danger',
             cancelText: 'Hủy',
             onOk: async () => {
-                await window.electronAPI.users.delete(user.id);
-                await loadUsers();
-                message.success('Đã xóa người dùng!');
+                try {
+                    const result = await window.electronAPI.users.delete(user.id);
+                    if (!result?.success) {
+                        throw new Error(result?.error || 'Không thể xóa người dùng.');
+                    }
+
+                    const refreshed = await window.electronAPI.users.getAll();
+                    if (!refreshed?.success || !refreshed.data) {
+                        throw new Error(refreshed?.error || 'Đã xóa nhưng không thể xác minh danh sách người dùng.');
+                    }
+                    if (refreshed.data.some((item: User) => item.id === user.id)) {
+                        throw new Error('Database chưa xóa người dùng. Vui lòng thử lại.');
+                    }
+
+                    setUsers(refreshed.data);
+                    message.success('Đã xóa người dùng!');
+                } catch (error) {
+                    const errorMessage = error instanceof Error ? error.message : 'Không thể xóa người dùng.';
+                    message.error({ key: `delete-user-${user.id}`, content: errorMessage });
+                    throw error;
+                }
             },
         });
     };
@@ -194,9 +217,14 @@ export default function PermissionsPage() {
             return;
         }
 
-        await window.electronAPI.users.update(user.id, { isActive: !user.isActive });
-        await loadUsers();
-        message.success(user.isActive ? 'Đã vô hiệu hóa!' : 'Đã kích hoạt!');
+        try {
+            const result = await window.electronAPI.users.update(user.id, { isActive: !user.isActive });
+            if (!result?.success) throw new Error(result?.error || 'Không thể cập nhật trạng thái người dùng.');
+            await loadUsers();
+            message.success(user.isActive ? 'Đã vô hiệu hóa!' : 'Đã kích hoạt!');
+        } catch (error) {
+            message.error(error instanceof Error ? error.message : 'Không thể cập nhật trạng thái người dùng.');
+        }
     };
 
     const handleSubmit = async () => {

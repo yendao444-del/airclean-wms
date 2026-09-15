@@ -454,6 +454,30 @@
 
 
 /* Light Theme Customizations */
+.app-menu-geometric-icon {
+    color: #334155 !important;
+    width: 20px !important;
+    min-width: 20px !important;
+    font-size: 20px !important;
+    line-height: 1 !important;
+    transition: color 0.2s ease, transform 0.2s ease !important;
+}
+
+.ant-menu-item:hover .app-menu-geometric-icon,
+.ant-menu-submenu-title:hover .app-menu-geometric-icon {
+    color: #0aa86c !important;
+    transform: translateX(1px);
+}
+
+.ant-menu-item-selected .app-menu-geometric-icon,
+.ant-menu-submenu-selected > .ant-menu-submenu-title .app-menu-geometric-icon {
+    color: #fff !important;
+}
+
+.ant-menu-inline-collapsed .app-menu-geometric-icon {
+    margin-inline-end: 0 !important;
+}
+
 .ant-menu-item-selected,
 .ant-menu-submenu-selected>.ant-menu-submenu-title {
     background:
@@ -474,6 +498,15 @@
 }
 
 .ant-menu-item {
+    margin: 4px 8px !important;
+    width: calc(100% - 16px) !important;
+    border-radius: 8px !important;
+    transition: all 0.3s !important;
+}
+
+/* Ant gives submenu titles a different default inset than regular items.
+   Match both rows so every icon and label shares one vertical grid. */
+.ant-menu-submenu-title {
     margin: 4px 8px !important;
     width: calc(100% - 16px) !important;
     border-radius: 8px !important;

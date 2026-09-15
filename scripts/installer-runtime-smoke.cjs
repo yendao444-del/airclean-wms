@@ -37,6 +37,20 @@ async function main() {
     datasources: { db: { url: runtimeEnv.DATABASE_URL } },
   });
   try {
+    const requiredDelegates = [
+      'ecommerceExport',
+      'ecommerceImportBatch',
+      'order',
+      'inventoryLog',
+    ];
+    for (const delegateName of requiredDelegates) {
+      const delegate = prisma[delegateName];
+      if (!delegate || typeof delegate.findFirst !== 'function') {
+        throw new Error(
+          `Packaged Prisma Client is stale: missing ${delegateName} delegate. Run prisma generate before packaging.`,
+        );
+      }
+    }
     await prisma.$connect();
   } finally {
     await prisma.$disconnect().catch(() => {});

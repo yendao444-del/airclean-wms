@@ -64,6 +64,26 @@ function getConfiguredAmount(config, employee, levelKey) {
     return Number(config[`${prefix}${levelKey}`] || 0);
 }
 
+function getScheduleConfigAt(config, timestamp, employeeType) {
+    const current = { ...DEFAULT_ATTENDANCE_CONFIG, ...(config || {}) };
+    const at = new Date(timestamp).getTime();
+    if (!Number.isFinite(at) || !Array.isArray(current.scheduleHistory) || current.scheduleHistory.length === 0) {
+        return current;
+    }
+    const versions = current.scheduleHistory
+        .filter((version) => Number.isFinite(new Date(version?.effectiveAt).getTime()))
+        .sort((left, right) => new Date(left.effectiveAt).getTime() - new Date(right.effectiveAt).getTime());
+    let selected = current;
+    for (const version of versions) {
+        if (new Date(version.effectiveAt).getTime() > at) break;
+        if (Array.isArray(version.employeeTypes)
+            && version.employeeTypes.length > 0
+            && !version.employeeTypes.includes(employeeType)) continue;
+        selected = { ...current, ...version };
+    }
+    return selected;
+}
+
 function getHistoricalAmount(fines, employeesById, employee, levelKey, logDate, fallback) {
     const candidates = fines
         .filter(fine => {
@@ -146,10 +166,11 @@ async function reconcileLateAttendanceFinesNow(prisma, options = {}) {
             const isMorning = log.checkType === 'morning_in';
             const shiftKey = isMorning ? 'sang' : 'chieu';
             const shiftLabel = isMorning ? 'sáng' : 'chiều';
-            const [startHour, startMinute] = String(isMorning ? config.morningStart : config.afternoonStart).split(':').map(Number);
+            const scheduleConfig = getScheduleConfigAt(config, log.timestamp, employee.type);
+            const [startHour, startMinute] = String(isMorning ? scheduleConfig.morningStart : scheduleConfig.afternoonStart).split(':').map(Number);
             const timestamp = new Date(log.timestamp);
             const lateMinutes = timestamp.getHours() * 60 + timestamp.getMinutes() - (startHour * 60 + startMinute);
-            if (lateMinutes <= Number(config.graceMinutes || 0)) continue;
+            if (lateMinutes <= Number(scheduleConfig.graceMinutes || 0)) continue;
 
             const level = getFineLevel(lateMinutes);
             const configuredAmount = getConfiguredAmount(config, employee, level.key);

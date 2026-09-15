@@ -1836,6 +1836,15 @@
     background: #fdf5f5;
 }
 
+.attendance-policy-table .th-navy {
+    background: #0f6848;
+    border-color: #2a8062;
+}
+
+.attendance-policy-table .tr-data-row:hover {
+    background: #f0fbf6;
+}
+
 /* Fallback / Footer Row (like "Các ngành hàng còn lại / Không điều chỉnh") */
 .shopee-spec-table .tr-fallback-row {
     background: #f8fafc;

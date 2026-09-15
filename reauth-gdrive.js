@@ -73,7 +73,7 @@ const server = http.createServer(async (req, res) => {
         res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
         res.end('<h2>✅ Xác thực thành công! Bạn có thể đóng tab này.</h2>');
         server.close();
-        console.log('\nXong! Chạy lại RELEASE.bat là được.');
+        console.log('\nXong! Chạy lại updates\\RELEASE.bat là được.');
     } catch (err) {
         console.error('❌ Lỗi lấy token:', err.message);
         res.end('<h2>❌ Lỗi: ' + err.message + '</h2>');

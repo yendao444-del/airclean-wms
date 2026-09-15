@@ -106,6 +106,24 @@ function timeToMinutes(value, fallback) {
   return Number(match[1]) * 60 + Number(match[2]);
 }
 
+function scheduleConfigAt(config, timestamp, employeeType) {
+  const current = { ...DEFAULT_ATTENDANCE_REWARD_CONFIG, ...(config || {}) };
+  const at = new Date(timestamp).getTime();
+  if (!Number.isFinite(at) || !Array.isArray(current.scheduleHistory) || current.scheduleHistory.length === 0) return current;
+  const versions = current.scheduleHistory
+    .filter((version) => Number.isFinite(new Date(version?.effectiveAt).getTime()))
+    .sort((left, right) => new Date(left.effectiveAt).getTime() - new Date(right.effectiveAt).getTime());
+  let selected = current;
+  for (const version of versions) {
+    if (new Date(version.effectiveAt).getTime() > at) break;
+    if (Array.isArray(version.employeeTypes)
+      && version.employeeTypes.length > 0
+      && !version.employeeTypes.includes(employeeType)) continue;
+    selected = { ...current, ...version };
+  }
+  return selected;
+}
+
 function normalizeConfig(config = {}) {
   const source = config && typeof config.attendanceReward === 'object'
     ? { ...config, ...config.attendanceReward }
@@ -205,8 +223,9 @@ function buildEmployeeInputs(employee, logs, workSchedules, leaveRecords, config
         return { session, status: compareDateKeys(dateKey, nowKey) >= 0 ? 'pending' : 'absent' };
       }
       const parts = bangkokParts(log.timestamp);
-      const start = timeToMinutes(session === 'morning' ? config.morningStart : config.afternoonStart);
-      const late = !parts || parts.minutes > start + config.graceMinutes;
+      const schedule = scheduleConfigAt(config, log.timestamp, employee.type);
+      const start = timeToMinutes(session === 'morning' ? schedule.morningStart : schedule.afternoonStart);
+      const late = !parts || parts.minutes > start + schedule.graceMinutes;
       if (late) hasLate = true;
       return { session, status: late ? 'late' : 'on_time', logId: log.id, timestamp: log.timestamp };
     });

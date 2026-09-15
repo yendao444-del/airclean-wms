@@ -8,8 +8,8 @@ if not exist "node_modules\electron\dist\electron.exe" (
     exit /b 1
 )
 
-echo Starting cached production renderer + Electron (fast mode)...
-set "DBYPOS_FAST_START=1"
+echo Starting Vite + Electron (development mode)...
+set "DBYPOS_FAST_START="
 node "scripts\start-electron-dev.js"
 
 if errorlevel 1 (

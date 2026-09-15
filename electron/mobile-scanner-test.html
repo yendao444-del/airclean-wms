@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <title>DBY Mobile Scanner</title>
+  <style>
+    :root { --green:#075439; --mint:#e8f5ee; --ink:#17362b; --muted:#668078; --red:#b42318; --amber:#a15c00; }
+    * { box-sizing:border-box; }
+    body { margin:0; min-height:100vh; padding:24px 18px calc(28px + env(safe-area-inset-bottom)); font:16px/1.45 ui-rounded,system-ui,sans-serif; color:var(--ink); background:radial-gradient(circle at top right,#d9f1e5,transparent 42%),#f6faf8; }
+    main { width:min(100%,520px); margin:auto; }
+    h1 { margin:0 0 6px; font-size:26px; }
+    p { color:var(--muted); }
+    .card { padding:20px; border:1px solid #cfe1d8; border-radius:20px; background:rgba(255,255,255,.94); box-shadow:0 12px 40px rgba(7,84,57,.09); }
+    input,button { width:100%; min-height:50px; padding:12px 14px; border-radius:13px; font:inherit; }
+    input { border:1px solid #b7cec2; margin:6px 0 10px; font-size:18px; }
+    button { border:0; margin-top:10px; color:white; background:var(--green); font-weight:700; }
+    button.secondary { color:var(--green); border:1px solid #a9cabb; background:white; }
+    button:disabled { opacity:.5; }
+    video { width:100%; min-height:220px; margin:14px 0 4px; border-radius:16px; background:#10251d; object-fit:cover; }
+    .hidden { display:none; }
+    .badge { display:inline-flex; align-items:center; gap:6px; padding:6px 10px; border-radius:999px; color:var(--amber); background:#fff4df; font-size:13px; font-weight:700; }
+    .badge.online { color:var(--green); background:var(--mint); }
+    #result { min-height:116px; margin-top:16px; padding:18px; border-radius:17px; background:#eef3f0; text-align:center; transition:.15s ease; }
+    #result.success { color:#086c49; background:#dff7eb; }
+    #result.fail { color:var(--red); background:#ffebe9; }
+    #result.warning { color:#8b5200; background:#fff1d6; }
+    #result strong { display:block; font-size:24px; overflow-wrap:anywhere; }
+    #result small { display:block; margin-top:6px; }
+    .hint { font-size:13px; }
+    .row { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+    input[type=file] { position:absolute; width:1px; height:1px; opacity:0; }
+  </style>
+</head>
+<body>
+  <main>
+    <div class="badge" id="connection">Đang kết nối...</div>
+    <h1>DBY Scanner</h1>
+    <p>Phiên kiểm thử độc lập, không thay đổi đơn hàng hoặc tồn kho.</p>
+
+    <section class="card" id="joinPanel">
+      <label for="employee">Tên nhân viên</label>
+      <input id="employee" autocomplete="name" maxlength="40" placeholder="Ví dụ: Lan">
+      <button id="join">Bắt đầu ca quét</button>
+      <p class="hint">Nút này kích hoạt sẵn âm thanh trên iPhone. Mỗi điện thoại được nhận diện riêng.</p>
+    </section>
+
+    <section class="card hidden" id="scanPanel">
+      <strong id="identity"></strong>
+      <video id="preview" playsinline muted class="hidden"></video>
+      <div class="row">
+        <button id="camera">Mở camera liên tục</button>
+        <button id="capture" class="secondary">Chụp mã</button>
+      </div>
+      <input id="photo" type="file" accept="image/*" capture="environment">
+      <label for="code">Hoặc nhập mã để mô phỏng</label>
+      <input id="code" autocomplete="off" autocapitalize="off" placeholder="Mã vận đơn / SKU">
+      <button id="send">Gửi mã</button>
+      <div id="result"><strong>Sẵn sàng</strong><span>Đang chờ quét mã</span></div>
+      <p class="hint">Quét cùng một mã lần hai để thử lỗi trùng. Nhập mã bắt đầu bằng <b>FAIL</b> để thử lỗi.</p>
+    </section>
+  </main>
+  <script src="/zxing.js"></script>
+  <script>
+    const params = new URLSearchParams(location.search);
+    const session = params.get('session') || '';
+    const deviceId = localStorage.dbyScannerDeviceId || (localStorage.dbyScannerDeviceId = (crypto.randomUUID ? crypto.randomUUID() : Date.now() + '-' + Math.random()));
+    const employee = document.querySelector('#employee');
+    const connection = document.querySelector('#connection');
+    const resultBox = document.querySelector('#result');
+    const codeInput = document.querySelector('#code');
+    employee.value = localStorage.dbyScannerEmployee || '';
+    let socket;
+    let audioContext;
+    let joined = false;
+    let readerControls;
+    let lastCameraCode = '';
+    let lastCameraAt = 0;
+
+    function connect() {
+      const scheme = location.protocol === 'https:' ? 'wss:' : 'ws:';
+      socket = new WebSocket(scheme + '//' + location.host + '/socket?session=' + encodeURIComponent(session));
+      socket.onopen = () => {
+        connection.textContent = 'Đã kết nối PC';
+        connection.classList.add('online');
+        if (joined) sendHello();
+      };
+      socket.onclose = () => {
+        connection.textContent = 'Mất kết nối - đang thử lại';
+        connection.classList.remove('online');
+        setTimeout(connect, 1000);
+      };
+      socket.onmessage = (event) => {
+        const data = JSON.parse(event.data);
+        if (data.type !== 'result') return;
+        showResult(data);
+      };
+    }
+
+    function sendHello() {
+      if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type:'hello', deviceId, employee:employee.value.trim() }));
+    }
+
+    function unlockAudio() {
+      audioContext ||= new (window.AudioContext || window.webkitAudioContext)();
+      return audioContext.resume();
+    }
+
+    function beep(status) {
+      if (!audioContext) return;
+      const notes = status === 'success' ? [880,1175] : [230,170];
+      notes.forEach((frequency,index) => {
+        const oscillator = audioContext.createOscillator();
+        const gain = audioContext.createGain();
+        const start = audioContext.currentTime + index * .1;
+        oscillator.frequency.value = frequency;
+        gain.gain.setValueAtTime(.0001,start);
+        gain.gain.exponentialRampToValueAtTime(.18,start+.01);
+        gain.gain.exponentialRampToValueAtTime(.0001,start+.09);
+        oscillator.connect(gain).connect(audioContext.destination);
+        oscillator.start(start); oscillator.stop(start+.1);
+      });
+      navigator.vibrate?.(status === 'success' ? 80 : [100,60,100]);
+    }
+
+    function showResult(data) {
+      const elapsed = Math.max(0, Date.now() - Number(data.sentAt || Date.now()));
+      resultBox.className = data.status;
+      resultBox.innerHTML = '<strong>' + escapeHtml(data.code) + '</strong><span>' + escapeHtml(data.message) + '</span><small>Phản hồi ' + elapsed + ' ms</small>';
+      beep(data.status);
+    }
+
+    function escapeHtml(value) {
+      const node = document.createElement('span'); node.textContent = String(value); return node.innerHTML;
+    }
+
+    function submitCode(rawCode) {
+      const code = String(rawCode || '').trim();
+      if (!code || socket?.readyState !== WebSocket.OPEN) return;
+      const sentAt = Date.now();
+      resultBox.className = '';
+      resultBox.innerHTML = '<strong>' + escapeHtml(code) + '</strong><span>Đang kiểm tra...</span>';
+      socket.send(JSON.stringify({ type:'scan', scanId:crypto.randomUUID ? crypto.randomUUID() : String(sentAt), deviceId, employee:employee.value.trim(), code, sentAt }));
+      codeInput.value = '';
+    }
+
+    document.querySelector('#join').onclick = () => {
+      if (!employee.value.trim()) { employee.focus(); return; }
+      void unlockAudio();
+      localStorage.dbyScannerEmployee = employee.value.trim();
+      joined = true; sendHello();
+      document.querySelector('#joinPanel').classList.add('hidden');
+      document.querySelector('#scanPanel').classList.remove('hidden');
+      document.querySelector('#identity').textContent = employee.value.trim();
+      if (window.isSecureContext) document.querySelector('#camera').click();
+      else codeInput.focus();
+    };
+    document.querySelector('#send').onclick = () => submitCode(codeInput.value);
+    codeInput.onkeydown = event => { if (event.key === 'Enter') submitCode(codeInput.value); };
+    document.querySelector('#capture').onclick = () => document.querySelector('#photo').click();
+    document.querySelector('#photo').onchange = async event => {
+      const file = event.target.files?.[0]; if (!file) return;
+      const url = URL.createObjectURL(file);
+      try { const decoded = await new ZXingBrowser.BrowserMultiFormatReader().decodeFromImageUrl(url); submitCode(decoded.getText()); }
+      catch { showResult({ status:'fail', code:'Không đọc được', message:'Hãy đưa mã gần camera hơn', sentAt:Date.now() }); }
+      finally { URL.revokeObjectURL(url); event.target.value=''; }
+    };
+    document.querySelector('#camera').onclick = async event => {
+      if (!window.isSecureContext) {
+        document.querySelector('#photo').click();
+        return;
+      }
+      try {
+        const video = document.querySelector('#preview'); video.classList.remove('hidden');
+        const reader = new ZXingBrowser.BrowserMultiFormatReader(undefined,{ delayBetweenScanAttempts:120, delayBetweenScanSuccess:800 });
+        readerControls = await reader.decodeFromVideoDevice(undefined,video,(decoded) => {
+          if (!decoded) return;
+          const value = decoded.getText(), now = Date.now();
+          if (value === lastCameraCode && now-lastCameraAt < 1800) return;
+          lastCameraCode = value; lastCameraAt = now; submitCode(value);
+        });
+        event.currentTarget.textContent = 'Camera đang quét'; event.currentTarget.disabled = true;
+      } catch (error) { document.querySelector('#preview').classList.add('hidden'); showResult({ status:'fail', code:'Không mở được camera', message:error?.message || 'Kiểm tra quyền Camera trong Safari', sentAt:Date.now() }); }
+    };
+    addEventListener('pagehide',() => readerControls?.stop());
+    if (!window.isSecureContext) {
+      document.querySelector('#camera').textContent = 'Chụp và đọc mã';
+      document.querySelector('#capture').classList.add('hidden');
+    }
+    connect();
+  </script>
+</body>
+</html>

@@ -2,7 +2,6 @@ import { useState, useEffect } from 'react';
 import {
     Typography,
     Tag,
-    Space,
     Button,
     DatePicker,
     Select,
@@ -21,7 +20,6 @@ import {
     PlusCircleOutlined,
     EditOutlined,
     DeleteOutlined,
-    ReloadOutlined,
     SearchOutlined,
     DownloadOutlined,
     UserOutlined,
@@ -30,15 +28,14 @@ import {
     ImportOutlined,
     CloseCircleOutlined,
     InfoCircleOutlined,
+    CheckCircleOutlined,
     WarningOutlined,
     ExclamationCircleOutlined,
 } from '@ant-design/icons';
 import type { ActivityLog } from '../types/electron';
 import dayjs from 'dayjs';
-import relativeTime from 'dayjs/plugin/relativeTime';
 import 'dayjs/locale/vi';
 
-dayjs.extend(relativeTime);
 dayjs.locale('vi');
 
 const { Title, Text } = Typography;
@@ -57,6 +54,8 @@ const MODULE_MAP: Record<string, { label: string; color: string }> = {
     users: { label: 'Người dùng', color: '#f5222d' },
     database: { label: 'Cơ sở dữ liệu', color: '#faad14' },
     system: { label: 'Hệ thống', color: '#8c8c8c' },
+    attendance: { label: 'Chấm công', color: '#00a85a' },
+    attendance_device: { label: 'Thiết bị', color: '#1677ff' },
 };
 
 const ACTION_MAP: Record<string, { label: string; color: string; icon: React.ReactNode }> = {
@@ -67,6 +66,13 @@ const ACTION_MAP: Record<string, { label: string; color: string; icon: React.Rea
     EXPORT: { label: 'Xuất', color: '#8c8c8c', icon: <DownloadOutlined /> },
     LOGIN: { label: 'Đăng nhập', color: '#52c41a', icon: <UserOutlined /> },
     LOGOUT: { label: 'Đăng xuất', color: '#8c8c8c', icon: <UserOutlined /> },
+    app_open: { label: 'Mở ứng dụng', color: '#1677ff', icon: <FileTextOutlined /> },
+    session_restore: { label: 'Khôi phục phiên', color: '#722ed1', icon: <UserOutlined /> },
+    login: { label: 'Đăng nhập', color: '#52c41a', icon: <UserOutlined /> },
+    network_changed: { label: 'Đổi mạng', color: '#fa8c16', icon: <WarningOutlined /> },
+    attendance_blocked: { label: 'Đã chặn', color: '#ff4d4f', icon: <CloseCircleOutlined /> },
+    DEVICE_ENFORCEMENT_ENABLED: { label: 'Bật khóa máy', color: '#00a85a', icon: <CheckCircleOutlined /> },
+    DEVICE_ENFORCEMENT_DISABLED: { label: 'Tắt khóa máy', color: '#fa8c16', icon: <WarningOutlined /> },
 };
 
 const SEVERITY_MAP: Record<string, { color: string; icon: React.ReactNode }> = {
@@ -88,6 +94,30 @@ const FIELD_LABELS: Record<string, string> = {
 };
 
 const getFieldLabel = (f: string) => FIELD_LABELS[f] || f;
+
+const parseChanges = (changes: ActivityLog['changes']) => {
+    if (!changes) return null;
+    if (typeof changes === 'object') return changes;
+    try {
+        return JSON.parse(changes);
+    } catch {
+        return null;
+    }
+};
+
+const getLogSummary = (log: ActivityLog) => {
+    const details = parseChanges(log.changes);
+    const machineName = details?.machineName || log.deviceInfo || 'máy tính';
+
+    switch (log.action?.toLowerCase()) {
+        case 'app_open': return `Mở ứng dụng trên ${machineName}`;
+        case 'session_restore': return `Khôi phục phiên đăng nhập trên ${machineName}`;
+        case 'login': return `Đăng nhập trên ${machineName}`;
+        case 'logout': return `Đăng xuất khỏi ${machineName}`;
+        case 'network_changed': return `Thay đổi kết nối mạng trên ${machineName}`;
+        default: return log.description || 'Hoạt động hệ thống';
+    }
+};
 
 /* ─────────────── Component ─────────────── */
 
@@ -149,10 +179,6 @@ export default function SystemLogsPage() {
         setDateRange(null);
     };
 
-    const handleExport = () => {
-        message.info('Tính năng xuất Excel đang được phát triển...');
-    };
-
     // ─── Group logs by date ───
     const groupedByDate = (() => {
         const map = new Map<string, ActivityLog[]>();
@@ -175,48 +201,29 @@ export default function SystemLogsPage() {
     };
 
     const statCards = [
-        { label: 'Tổng logs', value: stats.total, icon: <FileTextOutlined />, bg: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)' },
-        { label: 'Tạo mới', value: stats.create, icon: <PlusCircleOutlined />, bg: 'linear-gradient(135deg, #43e97b 0%, #38f9d7 100%)' },
-        { label: 'Cập nhật', value: stats.update, icon: <EditOutlined />, bg: 'linear-gradient(135deg, #4facfe 0%, #00f2fe 100%)' },
-        { label: 'Xóa', value: stats.delete, icon: <DeleteOutlined />, bg: 'linear-gradient(135deg, #ff6b6b 0%, #ee5a24 100%)' },
+        { label: 'Tổng hoạt động', value: stats.total, color: '#5b67d8' },
+        { label: 'Tạo mới', value: stats.create, color: '#0ba86b' },
+        { label: 'Cập nhật', value: stats.update, color: '#1684e8' },
+        { label: 'Xóa', value: stats.delete, color: '#e5484d' },
     ];
 
     /* ─────────────── RENDER ─────────────── */
     return (
         <div style={{ maxWidth: 1200, margin: '0 auto' }}>
-            {/* Header */}
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
-                <Title level={3} style={{ margin: 0, display: 'flex', alignItems: 'center', gap: 8 }}>
-                    <HistoryOutlined /> Lịch sử hệ thống
-                </Title>
-                <Space>
-                    <Button icon={<ReloadOutlined />} onClick={loadLogs} loading={loading}>Tải lại</Button>
-                    <Button icon={<DownloadOutlined />} onClick={handleExport}>Xuất Excel</Button>
-                </Space>
-            </div>
-
-            {/* Stat Cards */}
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 14, marginBottom: 20 }}>
+            {/* Compact summary */}
+            <div style={{
+                display: 'grid', gridTemplateColumns: 'repeat(4, minmax(120px, 1fr))',
+                marginBottom: 12, padding: '10px 14px', background: '#fff',
+                border: '1px solid #e8edf3', borderRadius: 10,
+            }}>
                 {statCards.map((s, i) => (
                     <div key={i} style={{
-                        background: s.bg,
-                        borderRadius: 14,
-                        padding: '18px 20px',
-                        color: '#fff',
-                        position: 'relative',
-                        overflow: 'hidden',
+                        display: 'flex', alignItems: 'baseline', justifyContent: 'center', gap: 7,
+                        minWidth: 0, padding: '2px 10px',
+                        borderRight: i < statCards.length - 1 ? '1px solid #edf1f5' : 'none',
                     }}>
-                        <div style={{ fontSize: 13, opacity: 0.9, marginBottom: 6 }}>{s.label}</div>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                            <span style={{ fontSize: 20, opacity: 0.9 }}>{s.icon}</span>
-                            <span style={{ fontSize: 28, fontWeight: 800 }}>{s.value}</span>
-                        </div>
-                        {/* Decorative circle */}
-                        <div style={{
-                            position: 'absolute', right: -15, top: -15,
-                            width: 70, height: 70, borderRadius: '50%',
-                            background: 'rgba(255,255,255,0.12)',
-                        }} />
+                        <span style={{ color: '#758398', fontSize: 12 }}>{s.label}</span>
+                        <strong style={{ color: s.color, fontSize: 18 }}>{s.value}</strong>
                     </div>
                 ))}
             </div>
@@ -224,9 +231,9 @@ export default function SystemLogsPage() {
             {/* Filters */}
             <div style={{
                 display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap',
-                marginBottom: 20, padding: '14px 18px',
-                background: '#fff', borderRadius: 12,
-                border: '1px solid #f0f0f0',
+                marginBottom: 12, padding: '10px 12px',
+                background: '#fff', borderRadius: 10,
+                border: '1px solid #e8edf3',
             }}>
                 <Input
                     placeholder="Tìm kiếm..."
@@ -278,33 +285,33 @@ export default function SystemLogsPage() {
                         <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="Không có dữ liệu" />
                     </div>
                 ) : (
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
                         {groupedByDate.map(({ date, items }) => (
                             <div key={date} style={{
-                                background: '#fff', borderRadius: 14,
-                                border: '1px solid #f0f0f0', overflow: 'hidden',
+                                background: '#fff', borderRadius: 10,
+                                border: '1px solid #e8edf3', overflow: 'hidden',
                             }}>
                                 {/* Date Header */}
                                 <div style={{
                                     display: 'flex', alignItems: 'center', gap: 10,
-                                    padding: '12px 20px',
-                                    background: 'linear-gradient(135deg, #f8f9ff 0%, #f0f5ff 100%)',
+                                    padding: '9px 14px',
+                                    background: '#f7f9fc',
                                     borderBottom: '1px solid #e8ecf4',
                                 }}>
                                     <div style={{
-                                        width: 36, height: 36, borderRadius: 10,
-                                        background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
+                                        width: 30, height: 30, borderRadius: 8,
+                                        background: '#e8edff',
                                         display: 'flex', alignItems: 'center', justifyContent: 'center',
-                                        color: '#fff', fontSize: 16,
+                                        color: '#5967d8', fontSize: 14,
                                     }}>
                                         <ClockCircleOutlined />
                                     </div>
                                     <div>
-                                        <div style={{ fontSize: 15, fontWeight: 600, color: '#262626' }}>
+                                        <div style={{ fontSize: 13, fontWeight: 700, color: '#26364d' }}>
                                             {dayjs(date).format('dddd, DD/MM/YYYY')}
                                         </div>
                                         <div style={{ fontSize: 12, color: '#8c8c8c' }}>
-                                            {items.length} hoạt động • {dayjs(date).fromNow()}
+                                            {items.length} hoạt động
                                         </div>
                                     </div>
                                 </div>
@@ -320,8 +327,8 @@ export default function SystemLogsPage() {
                                             <div
                                                 key={log.id || idx}
                                                 style={{
-                                                    display: 'flex', alignItems: 'center', gap: 12,
-                                                    padding: '12px 20px',
+                                                    display: 'flex', alignItems: 'center', gap: 10,
+                                                    padding: '9px 14px',
                                                     borderBottom: idx < items.length - 1 ? '1px solid #f5f5f5' : 'none',
                                                     transition: 'background 0.15s',
                                                     cursor: log.changes ? 'pointer' : 'default',
@@ -337,42 +344,34 @@ export default function SystemLogsPage() {
                                             >
                                                 {/* Action Icon */}
                                                 <div style={{
-                                                    width: 34, height: 34, borderRadius: 10, flexShrink: 0,
+                                                    width: 30, height: 30, borderRadius: 8, flexShrink: 0,
                                                     background: act.color + '14',
                                                     color: act.color,
                                                     display: 'flex', alignItems: 'center', justifyContent: 'center',
-                                                    fontSize: 15,
+                                                    fontSize: 13,
                                                 }}>
                                                     {act.icon}
                                                 </div>
 
                                                 {/* Time */}
                                                 <div style={{
-                                                    width: 70, flexShrink: 0,
-                                                    fontSize: 13, fontWeight: 600,
+                                                    width: 58, flexShrink: 0,
+                                                    fontSize: 12, fontWeight: 700,
                                                     color: '#595959', fontVariantNumeric: 'tabular-nums',
                                                 }}>
                                                     {dayjs(log.timestamp).format('HH:mm:ss')}
                                                 </div>
 
-                                                {/* Tags */}
-                                                <div style={{ width: 160, flexShrink: 0, display: 'flex', gap: 4 }}>
+                                                {/* Action */}
+                                                <div style={{ flexShrink: 0 }}>
                                                     <Tag style={{
                                                         margin: 0, borderRadius: 6,
-                                                        fontSize: 11, padding: '1px 8px',
+                                                        fontSize: 10, padding: '0 7px',
                                                         background: act.color + '14',
                                                         color: act.color, border: 'none',
                                                         fontWeight: 600,
                                                     }}>
                                                         {act.label}
-                                                    </Tag>
-                                                    <Tag style={{
-                                                        margin: 0, borderRadius: 6,
-                                                        fontSize: 11, padding: '1px 8px',
-                                                        background: mod.color + '14',
-                                                        color: mod.color, border: 'none',
-                                                    }}>
-                                                        {mod.label}
                                                     </Tag>
                                                 </div>
 
@@ -382,13 +381,9 @@ export default function SystemLogsPage() {
                                                         fontSize: 13, color: '#262626',
                                                         overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
                                                     }}>
-                                                        {log.description}
+                                                        {getLogSummary(log)}
                                                     </div>
-                                                    {log.recordName && (
-                                                        <div style={{ fontSize: 12, color: '#8c8c8c', marginTop: 2 }}>
-                                                            📌 {log.recordName}
-                                                        </div>
-                                                    )}
+                                                    <div style={{ fontSize: 10, color: mod.color, marginTop: 1 }}>{mod.label}</div>
                                                 </div>
 
                                                 {/* Severity */}
@@ -408,8 +403,8 @@ export default function SystemLogsPage() {
                                                         ? 'linear-gradient(135deg, #ff416c 0%, #ff4b2b 100%)'
                                                         : 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
                                                     color: '#fff',
-                                                    padding: '4px 12px', borderRadius: 14,
-                                                    fontSize: 12, fontWeight: 600,
+                                                    padding: '3px 9px', borderRadius: 12,
+                                                    fontSize: 11, fontWeight: 600,
                                                 }}>
                                                     <UserOutlined style={{ fontSize: 11 }} />
                                                     {log.userName}

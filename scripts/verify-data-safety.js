@@ -31,6 +31,12 @@ const devLauncher = read('scripts/start-electron-dev.js');
 const fastStartBatch = read('START.bat');
 const devStartBatch = read('START-DEV.bat');
 const r2BootstrapScript = read('scripts/prepare-r2-daily-evidence-config.js');
+const releaseLite = read('updates/RELEASE-SUPPERLITE.bat');
+const releaseQuick = read('updates/RELEASE-ver3.bat');
+const releasePrisma = read('updates/RELEASE-PRISMA-PATCH.bat');
+const releasePrismaPython = read('updates/RELEASE-ver2.bat');
+const releaseFull = read('updates/RELEASE.bat');
+const releaseInstaller = read('updates/BUILD-INSTALLER.bat');
 
 const failures = [];
 const requireText = (source, text, label) => {
@@ -503,6 +509,36 @@ requireText(
 requireText(appPage, "const GlobalTaskAlerts = lazy(() => import('./components/GlobalTaskAlerts'))", 'Global task alerts must remain outside the startup bundle');
 requireText(appPage, 'void loadAttendancePage();', 'Attendance chunk must remain eligible for idle warming');
 requireText(packageJson, '!node_modules/.prisma/**/*.tmp*', 'Packaged app must exclude stale Prisma temp binaries');
+requireText(releaseLite, 'release-preflight.cjs renderer', 'Lite release must enforce renderer-only scope');
+requireText(releaseQuick, 'release-preflight.cjs quick', 'Quick release must reject Prisma and Python changes');
+requireText(releasePrisma, 'release-preflight.cjs prisma', 'Prisma patch must enforce Prisma-only patch scope');
+requireText(releasePrismaPython, 'release-preflight.cjs prisma-python', 'Prisma/Python release must declare its scope');
+requireText(releaseFull, 'release-preflight.cjs full', 'Full release must run the shared preflight');
+requireText(releaseInstaller, 'release-preflight.cjs full', 'Installer build must run the shared preflight');
+for (const [name, source] of [
+  ['Lite release', releaseLite],
+  ['Quick release', releaseQuick],
+  ['Prisma patch', releasePrisma],
+  ['Prisma/Python release', releasePrismaPython],
+  ['Full release', releaseFull],
+  ['Installer build', releaseInstaller],
+]) {
+  requireText(source, 'npm run build', `${name} must run the full TypeScript and Vite build`);
+}
+for (const [name, source] of [
+  ['Quick release', releaseQuick],
+  ['Prisma patch', releasePrisma],
+  ['Prisma/Python release', releasePrismaPython],
+  ['Full release', releaseFull],
+]) {
+  requireText(source, 'gdrive-token.json" 2>nul', `${name} must remove local Google Drive tokens from staging`);
+  requireText(source, 'supabase-storage.json" 2>nul', `${name} must remove local Supabase configuration from staging`);
+}
+requireText(releasePrisma, 'npx prisma generate', 'Prisma patch must regenerate Prisma Client');
+requireText(releasePrisma, 'node_modules\\@prisma\\client\\*', 'Prisma patch must package @prisma/client');
+requireText(releasePrisma, 'node_modules\\.prisma\\client\\*', 'Prisma patch must package the generated .prisma client');
+requireText(releasePrisma, 'patch-runtime-smoke.cjs', 'Prisma patch must smoke-test its staged runtime');
+requireText(releasePrisma, '.sha256', 'Prisma patch must create and upload a SHA-256 asset');
 const packingCatalogStart = ipc.indexOf('ipcMain.handle("products:getPackingCatalog"');
 const packingCatalogEnd = ipc.indexOf('ipcMain.handle("handlingUnits:getWorkspace"', packingCatalogStart);
 const packingCatalogHandler = packingCatalogStart >= 0 && packingCatalogEnd > packingCatalogStart

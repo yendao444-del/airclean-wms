@@ -63,7 +63,7 @@ echo ============================================
 echo   RESTORE HOAN TAT - San sang code!
 echo ============================================
 echo   - npm run dev    (chay dev mode)
-echo   - RELEASE.bat    (build + deploy)
+echo   - updates\RELEASE.bat    (build + deploy)
 echo ============================================
 echo.
 pause

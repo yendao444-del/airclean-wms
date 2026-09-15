@@ -1,7 +1,7 @@
 @echo off
 chcp 65001 >nul
 setlocal enabledelayedexpansion
-cd /d "%~dp0"
+cd /d "%~dp0.."
 
 for /f "tokens=*" %%t in ('gh auth token 2^>nul') do set GH_TOKEN=%%t
 
@@ -11,8 +11,15 @@ echo   Chi gom dist + package.json
 echo ============================================
 echo.
 echo [!] Chi dung cho thay doi giao dien, CSS, cong thuc frontend.
-echo [!] Neu sua electron, prisma, python hoac them dependency, dung RELEASE-ver3.bat.
+echo [!] Electron dung updates\RELEASE-ver3.bat; Prisma dung updates\RELEASE-PRISMA-PATCH.bat.
+echo [!] Python dung updates\RELEASE-ver2.bat; runtime/dependency dung updates\BUILD-INSTALLER.bat.
 echo.
+
+call node scripts\release-preflight.cjs renderer
+if errorlevel 1 (
+    pause
+    exit /b 1
+)
 
 for /f %%v in ('node scripts\release-version.cjs current') do set CURRENT_VERSION=%%v
 if not defined CURRENT_VERSION (
@@ -47,18 +54,18 @@ if errorlevel 1 (
 echo [OK] Version updated.
 echo.
 
-echo [2/4] Build Vite...
+echo [2/4] Type-check and build renderer...
 if exist "!BUILD_DIST!" rmdir /S /Q "!BUILD_DIST!"
-call npx vite build --outDir "!BUILD_DIST!" --emptyOutDir
+call npm run build -- --outDir "!BUILD_DIST!" --emptyOutDir
 if errorlevel 1 (
-    echo [ERROR] Vite build failed.
+    echo [ERROR] TypeScript or Vite build failed.
     if exist "!BUILD_DIST!" rmdir /S /Q "!BUILD_DIST!"
     node scripts\release-version.cjs set !CURRENT_VERSION! >nul
     echo [OK] Restored package.json to v!CURRENT_VERSION!.
     pause
     exit /b 1
 )
-echo [OK] Vite build completed.
+echo [OK] Renderer build completed.
 echo.
 
 echo [3/4] Create lite patch...
@@ -102,6 +109,15 @@ echo [OK] Created !CHECKSUM_FILE!
 echo.
 
 echo [4/4] Git and GitHub release...
+echo Review every file below. RELEASE will stage all of them:
+git status --short
+set /p "RELEASE_CONFIRM=Type RELEASE to continue: "
+if /I not "!RELEASE_CONFIRM!"=="RELEASE" (
+    echo [CANCELLED] Nothing was committed or published.
+    node scripts\release-version.cjs set !CURRENT_VERSION! >nul
+    pause
+    exit /b 1
+)
 git add -A
 git commit -m "v!NEW_VERSION! - !NOTES!"
 if errorlevel 1 (
