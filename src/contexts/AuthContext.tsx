@@ -42,12 +42,13 @@ const todayKey = () => {
 export function AuthProvider({ children }: { children: ReactNode }) {
     const notificationUiTest = import.meta.env.DEV && new URLSearchParams(window.location.search).has('notificationUiTest');
     const attendanceUiTest = import.meta.env.DEV && new URLSearchParams(window.location.search).has('attendanceUiTest');
-    const uiTestMode = notificationUiTest || attendanceUiTest;
+    const prepackedUiTest = import.meta.env.DEV && new URLSearchParams(window.location.search).has('prepackedUiTest');
+    const uiTestMode = notificationUiTest || attendanceUiTest || prepackedUiTest;
     const [actualUser, setActualUser] = useState<AuthUser | null>(() => uiTestMode ? {
         id: 900001,
         username: 'thuy.le',
         fullName: 'Thúy Lê',
-        role: attendanceUiTest ? 'admin' : 'staff',
+        role: attendanceUiTest || prepackedUiTest ? 'admin' : 'staff',
         isActive: true,
     } : null);
     const [previewUser, setPreviewUser] = useState<AuthUser | null>(null);

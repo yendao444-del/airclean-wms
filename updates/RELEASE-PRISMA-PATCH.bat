@@ -127,7 +127,7 @@ for %%F in ("!PATCH_ZIP_PATH!") do (
 echo [8/8] Publish release...
 echo.
 rem Stage only application and release sources. Never include tmp, qa or generated design files.
-git add -A -- AGENTS.md updates package.json package-lock.json prisma electron scripts src public index.html vite.config.ts tsconfig.json tsconfig.node.json START.bat START-DEV.bat RESTORE.bat reauth-gdrive.js python\BUILD_FACE_SERVICE.md "Tai lieu\NHAT_KY_AUDIT_HIEU_NANG.md" BUILD-INSTALLER.bat RELEASE-SUPPERLITE.bat RELEASE-ver2.bat RELEASE-ver3.bat RELEASE.bat SECURITY-DEPLOYMENT.md
+git add -A -- AGENTS.md updates package.json package-lock.json prisma electron scripts src public index.html vite.config.ts tsconfig.json tsconfig.node.json START.bat START-DEV.bat RESTORE.bat reauth-gdrive.js python\BUILD_FACE_SERVICE.md "Tai lieu\NHAT_KY_AUDIT_HIEU_NANG.md" updates\BUILD-INSTALLER.bat updates\RELEASE-SUPPERLITE.bat updates\RELEASE-ver2.bat updates\RELEASE-ver3.bat updates\RELEASE.bat updates\SECURITY-DEPLOYMENT.md
 if errorlevel 1 goto release_failed
 git commit -m "v!NEW_VERSION! - !NOTES!"
 if errorlevel 1 goto release_failed

@@ -691,6 +691,75 @@ model StockBalance {
 }
 
 // ========================================
+// PREPACKED GOODS / HÀNG ĐÓNG GÓI SẴN
+// ========================================
+
+model PrepackBatch {
+  id                Int       @id @default(autoincrement())
+  code              String    @unique
+  productId         Int?
+  productSku        String
+  productName       String
+  unit              String    @default("gói")
+  requestedQty      Int
+  reportedQty       Int       @default(0)
+  acceptedQty       Int       @default(0)
+  issuedQty         Int       @default(0)
+  status            String    @default("pending") // pending, waiting_acceptance, ready, depleted, rejected
+  packerId          Int?
+  packerUsername    String
+  packerName        String
+  acceptorId        Int?
+  acceptorUsername  String?
+  acceptorName      String?
+  createdById       Int?
+  createdByName     String
+  note              String?
+  discrepancyReason String?
+  reportedAt        DateTime?
+  acceptedAt        DateTime?
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  evidences PrepackEvidence[]
+  movements PrepackMovement[]
+
+  @@index([status, createdAt])
+  @@index([packerUsername, status])
+  @@index([productSku, status])
+}
+
+model PrepackEvidence {
+  id             Int          @id @default(autoincrement())
+  batchId        Int
+  batch          PrepackBatch @relation(fields: [batchId], references: [id], onDelete: Cascade)
+  objectKey      String       @unique
+  fileName       String
+  mimeType       String
+  sha256         String       @unique
+  uploadedById   Int?
+  uploadedByName String
+  createdAt      DateTime     @default(now())
+
+  @@index([batchId, createdAt])
+}
+
+model PrepackMovement {
+  id            Int          @id @default(autoincrement())
+  batchId       Int
+  batch         PrepackBatch @relation(fields: [batchId], references: [id], onDelete: Cascade)
+  type          String // accepted, issued, adjusted
+  quantity      Int
+  balanceAfter  Int
+  note          String?
+  createdById   Int?
+  createdByName String
+  createdAt     DateTime     @default(now())
+
+  @@index([batchId, createdAt])
+}
+
+// ========================================
 // APP CONFIG / CẤU HÌNH ỨNG DỤNG
 // ========================================
 

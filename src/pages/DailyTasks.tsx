@@ -21,7 +21,7 @@ import {
     Select,
     Radio,
     Alert,
-    Upload
+    Spin
 } from 'antd';
 const { TextArea } = Input;
 const { Option } = Select;
@@ -52,7 +52,8 @@ import {
     LockOutlined,
     LeftOutlined,
     RightOutlined,
-    QrcodeOutlined
+    QrcodeOutlined,
+    MobileOutlined
 } from '@ant-design/icons';
 import dayjs from 'dayjs';
 import { QRCodeSVG } from 'qrcode.react';
@@ -290,27 +291,12 @@ const formatPenaltyAmount = (value: string | number | undefined): string => {
 
 const getDailyRotationAnchor = () => dayjs().format('YYYY-MM-DD');
 
-const MAX_EVIDENCE_SOURCE_BYTES = 15 * 1024 * 1024;
 const MAX_EVIDENCE_IMAGES = 5;
 
 const getRequiredEvidenceImageCount = (evidence?: EvidenceMeta): number => {
     const configured = Math.floor(Number(evidence?.minImages) || 1);
     return Math.max(1, Math.min(MAX_EVIDENCE_IMAGES, configured));
 };
-
-const getEvidenceImageMimeType = (file: File): string | null => {
-    if (file.type === 'image/jpeg') return file.type;
-    const extension = file.name.split('.').pop()?.toLowerCase();
-    if (extension === 'jpg' || extension === 'jpeg') return 'image/jpeg';
-    return null;
-};
-
-const readFileAsDataUrl = (file: File): Promise<string> => new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(String(reader.result));
-    reader.onerror = () => reject(new Error('Không thể đọc ảnh.'));
-    reader.readAsDataURL(file);
-});
 
 const getDriveImageUrl = (url: string) => {
     const fileId = url.match(/[-\w]{25,}/)?.[0];
@@ -377,12 +363,14 @@ const DailyTasks = () => {
     const [mobileEvidenceSession, setMobileEvidenceSession] = useState<{
         url: string;
         secure: boolean;
+        connecting?: boolean;
         address?: string;
         employee: string;
         operatedBy?: string | null;
         taskCount: number;
         expiresAt: number;
     } | null>(null);
+    const mobileEvidencePendingSessionRef = useRef<NonNullable<typeof mobileEvidenceSession> | null>(null);
     const [isSavingTask, setIsSavingTask] = useState(false);
     const taskSaveInFlightRef = useRef(false);
 
@@ -737,8 +725,38 @@ const DailyTasks = () => {
         void loadTasks();
     }), []); // eslint-disable-line react-hooks/exhaustive-deps
 
+    useEffect(() => window.electronAPI.dailyTasks.onMobileEvidenceUrlUpdated((data) => {
+        const pendingSession = mobileEvidencePendingSessionRef.current;
+        setMobileEvidenceSession(current => {
+            const session = current || pendingSession;
+            return session ? {
+            ...session,
+            url: data.url,
+            secure: data.secure,
+            connecting: data.connecting,
+            } : current;
+        });
+        mobileEvidencePendingSessionRef.current = null;
+        message.success({
+            key: 'mobile-evidence-start',
+            content: data.secure
+                ? 'Kết nối bảo mật đã sẵn sàng. Bạn có thể quét mã QR.'
+                : 'Mã QR Wi-Fi đã sẵn sàng để quét.',
+            duration: 2,
+        });
+    }), []);
+
     const startMobileEvidence = async (targetUsername?: string) => {
         setMobileEvidenceStarting(true);
+        setMobileEvidenceSession(null);
+        mobileEvidencePendingSessionRef.current = null;
+        setMobileEvidenceTargetOpen(false);
+        setMobileEvidenceOpen(true);
+        message.loading({
+            key: 'mobile-evidence-start',
+            content: 'Đã nhận lệnh. Hệ thống đang chuẩn bị mã QR...',
+            duration: 0,
+        });
         try {
             const result = await window.electronAPI.dailyTasks.startMobileEvidence(
                 targetUsername ? { targetUsername } : undefined,
@@ -746,19 +764,40 @@ const DailyTasks = () => {
             if (!result.success || !result.url || !result.employee || !result.expiresAt) {
                 throw new Error(result.error || 'Không thể tạo phiên nộp qua điện thoại.');
             }
-            setMobileEvidenceSession({
+            const nextSession = {
                 url: result.url,
                 secure: Boolean(result.secure),
+                connecting: Boolean(result.connecting),
                 address: result.address,
                 employee: result.employee,
                 operatedBy: result.operatedBy,
                 taskCount: Number(result.taskCount) || 0,
                 expiresAt: result.expiresAt,
-            });
-            setMobileEvidenceTargetOpen(false);
-            setMobileEvidenceOpen(true);
+            };
+            if (nextSession.connecting) {
+                mobileEvidencePendingSessionRef.current = nextSession;
+                message.loading({
+                    key: 'mobile-evidence-start',
+                    content: 'Đã nhận lệnh. Đang tạo kết nối bảo mật...',
+                    duration: 0,
+                });
+            } else {
+                setMobileEvidenceSession(nextSession);
+                message.success({
+                    key: 'mobile-evidence-start',
+                    content: 'Mã QR Wi-Fi đã sẵn sàng để quét.',
+                    duration: 2,
+                });
+            }
         } catch (error: any) {
-            message.error(error?.message || 'Không thể tạo phiên nộp qua điện thoại.');
+            setMobileEvidenceOpen(false);
+            setMobileEvidenceSession(null);
+            mobileEvidencePendingSessionRef.current = null;
+            message.error({
+                key: 'mobile-evidence-start',
+                content: error?.message || 'Không thể tạo phiên nộp qua điện thoại.',
+                duration: 4,
+            });
         } finally {
             setMobileEvidenceStarting(false);
         }
@@ -767,6 +806,7 @@ const DailyTasks = () => {
     const stopMobileEvidence = async () => {
         await window.electronAPI.dailyTasks.stopMobileEvidence();
         setMobileEvidenceSession(null);
+        mobileEvidencePendingSessionRef.current = null;
         setMobileEvidenceOpen(false);
     };
 
@@ -1836,113 +1876,14 @@ const DailyTasks = () => {
     };
 
     const handleSubmitEvidence = (task: Task) => {
-        let selectedImages: File[] = [];
-        const minimumImages = getRequiredEvidenceImageCount(getEvidence(task));
-
-        Modal.confirm({
-            title: 'Nộp bằng chứng',
-            icon: <UploadOutlined style={{ color: '#16a34a' }} />,
-            content: (
-                <div>
-                    <p style={{ marginBottom: 12, color: '#475569' }}><strong>{task.title}</strong></p>
-                    <div>
-                        <Upload
-                            accept="image/jpeg,.jpg,.jpeg"
-                            multiple
-                            maxCount={MAX_EVIDENCE_IMAGES}
-                            beforeUpload={(file) => {
-                                if (selectedImages.length >= MAX_EVIDENCE_IMAGES) {
-                                    message.warning(`Chỉ được chọn tối đa ${MAX_EVIDENCE_IMAGES} ảnh.`);
-                                    return Upload.LIST_IGNORE;
-                                }
-                                if (!getEvidenceImageMimeType(file as unknown as File)) {
-                                    message.error('Không chấp nhận ảnh chụp màn hình hoặc ảnh tải về. Chỉ chọn ảnh JPG/JPEG chụp từ camera.');
-                                    return Upload.LIST_IGNORE;
-                                }
-                                selectedImages = [...selectedImages, file as unknown as File];
-                                return false;
-                            }}
-                            onRemove={(file) => {
-                                selectedImages = selectedImages.filter(image => (image as any).uid !== file.uid);
-                                return true;
-                            }}
-                        >
-                            <Button icon={<UploadOutlined />}>Chọn ảnh từ máy</Button>
-                        </Upload>
-                        <div style={{ fontSize: 12, color: '#64748b', marginTop: 6 }}>
-                            Công việc này yêu cầu tối thiểu {minimumImages} ảnh, tối đa {MAX_EVIDENCE_IMAGES} ảnh JPG/JPEG chụp thực tế bằng điện thoại. Có thể dùng ảnh đã gửi qua Zalo/Messenger; không chấp nhận ảnh chụp màn hình. Ảnh tối đa 15 MB.
-                        </div>
-                    </div>
-                </div>
-            ),
-            okText: 'Gửi bằng chứng', cancelText: 'Hủy',
-            onOk: async () => {
-                if (selectedImages.length < minimumImages) {
-                    message.warning(`Công việc này yêu cầu ít nhất ${minimumImages} ảnh bằng chứng. Bạn mới chọn ${selectedImages.length} ảnh.`);
-                    return Promise.reject();
-                }
-                const invalidImage = selectedImages.find(image => !getEvidenceImageMimeType(image) || image.size > MAX_EVIDENCE_SOURCE_BYTES);
-                if (invalidImage) {
-                    message.warning(`Ảnh "${invalidImage.name}" phải là JPG/JPEG chụp từ camera và không vượt quá 15 MB.`);
-                    return Promise.reject();
-                }
-                try {
-                    const sourceBytes = selectedImages.reduce((total, image) => total + image.size, 0);
-                    const images = [];
-                    for (let index = 0; index < selectedImages.length; index += 1) {
-                        const selectedImage = selectedImages[index];
-                        message.loading({ key: 'evidence-upload', content: `Đang xác minh ảnh gốc ${index + 1}/${selectedImages.length}...`, duration: 0 });
-                        const sourceData = await readFileAsDataUrl(selectedImage);
-                        const validation = await window.electronAPI.dailyTasks.validateEvidenceSource({
-                            taskId: task.id,
-                            name: selectedImage.name,
-                            mimeType: getEvidenceImageMimeType(selectedImage) || selectedImage.type,
-                            data: sourceData,
-                        });
-                        if (!validation.success || !validation.data?.validationToken) {
-                            throw new Error(validation.error || `Không thể xác minh ảnh "${selectedImage.name}".`);
-                        }
-                        images.push({
-                            name: selectedImage.name,
-                            size: validation.data.preparedSize || 0,
-                            validationToken: validation.data.validationToken,
-                        });
-                    }
-                    message.loading({ key: 'evidence-upload', content: 'Đang tải bằng chứng lên hệ thống...', duration: 0 });
-                    const result = await window.electronAPI.dailyTasks.submitEvidence({
-                        taskId: task.id,
-                        images: images.map(({ name, validationToken }) => ({ name, validationToken })),
-                    });
-                    if (!result.success) {
-                        if (result.reauthRequired) {
-                            Modal.error({
-                                title: 'Cần kết nối lại Google Drive',
-                                content: result.error || 'Phiên Google Drive trên máy này đã hết hạn. Vui lòng liên hệ admin để kết nối lại rồi gửi bằng chứng.',
-                                okText: 'Đã hiểu',
-                            });
-                        }
-                        const submitError: any = new Error(result.error || 'Không thể lưu bằng chứng');
-                        submitError.alreadyPresented = Boolean(result.reauthRequired);
-                        throw submitError;
-                    }
-                    await loadTasks();
-                    if (activeTab === 'history' || activeTab === 'triage') await loadHistory();
-                    const uploadedBytes = images.reduce((total, image) => total + image.size, 0);
-                    message.success({
-                        key: 'evidence-upload',
-                        content: `Đã nộp ${images.length} ảnh (${(sourceBytes / 1024 / 1024).toFixed(1)} MB → ${(uploadedBytes / 1024).toFixed(0)} KB) và tự động hoàn thành công việc.`,
-                        duration: 5,
-                    });
-                } catch (error: any) {
-                    if (error?.alreadyPresented) {
-                        message.destroy('evidence-upload');
-                    } else {
-                        message.error({ key: 'evidence-upload', content: error.message || 'Không thể gửi bằng chứng.', duration: 5 });
-                    }
-                    return Promise.reject(error);
-                }
-            }
-        });
+        if (mobileEvidenceSession) {
+            setMobileEvidenceOpen(true);
+            return;
+        }
+        const targetUsername = isAdmin
+            ? getAssignmentRecipients(task)[0] || task.assignee
+            : isRolePreview ? user?.username : undefined;
+        void startMobileEvidence(targetUsername);
     };
 
     const submitEvidenceReview = async (task: Task, approved: boolean, evidenceOverride?: EvidenceMeta, rejectionReason?: string) => {
@@ -2716,8 +2657,8 @@ const DailyTasks = () => {
                                 </div>
                                 <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 6, flexWrap: 'wrap', marginTop: 11, paddingTop: 10, borderTop: '1px solid #f1f5f9' }}>
                                     {evidence.status === 'submitted' && <Button size="small" icon={<EyeOutlined />} onClick={() => openEvidence(task)}>Xem bằng chứng</Button>}
-                                    {lane === 'evidence' && <Button size="small" type="primary" icon={<UploadOutlined />} onClick={() => handleSubmitEvidence(task)} style={{ background: '#16a34a', borderColor: '#16a34a' }}>Nộp bằng chứng</Button>}
-                                    {lane === 'review' && evidence.status !== 'submitted' && <Button size="small" icon={<UploadOutlined />} onClick={() => handleSubmitEvidence(task)}>Nộp bổ sung</Button>}
+                                    {lane === 'evidence' && <Button size="small" type="primary" icon={<QrcodeOutlined />} onClick={() => handleSubmitEvidence(task)} style={{ background: '#16a34a', borderColor: '#16a34a' }}>Nộp qua điện thoại</Button>}
+                                    {lane === 'review' && evidence.status !== 'submitted' && <Button size="small" icon={<QrcodeOutlined />} onClick={() => handleSubmitEvidence(task)}>Nộp bổ sung qua điện thoại</Button>}
                                     {lane === 'review' && evidence.status === 'submitted' && canReviewEvidence && <Button size="small" type="primary" icon={<SafetyCertificateOutlined />} onClick={() => handleReviewEvidence(task, true)} style={{ background: '#16a34a', borderColor: '#16a34a' }}>Duyệt</Button>}
                                     {lane === 'review' && evidence.status === 'submitted' && canReviewEvidence && <Button size="small" danger onClick={() => handleReviewEvidence(task, false)}>Từ chối</Button>}
                                     {isAdmin && <Button type="text" icon={<EditOutlined />} onClick={() => handleEditTask(task)} aria-label="Sửa công việc" />}
@@ -3337,7 +3278,7 @@ const DailyTasks = () => {
                 {isAssignment ? (
                     <Space size={6} className="daily-task-row-actions">
                         <span className={`daily-task-deadline-pill${color === '#dc2626' ? ' is-overdue' : ''}`}><ClockCircleOutlined /> {deadlineText}</span>
-                        {needsEvidence && !historicalEvidenceOverdue && canSubmitAssignmentEvidence && <Button size="small" type="primary" icon={<UploadOutlined />} onClick={() => handleSubmitEvidence(task)} className="daily-task-primary-action">Nộp bằng chứng</Button>}
+                        {needsEvidence && !historicalEvidenceOverdue && canSubmitAssignmentEvidence && <Button size="small" type="primary" icon={<QrcodeOutlined />} onClick={() => handleSubmitEvidence(task)} className="daily-task-primary-action">Nộp qua điện thoại</Button>}
                         {historicalEvidenceOverdue && <span className="daily-task-expired-action"><LockOutlined /> Quá hạn nộp</span>}
                         {hasEvidence && <Button size="small" icon={<EyeOutlined />} onClick={() => openEvidence(task)}>Xem bằng chứng</Button>}
                         {evidence.required && evidence.status === 'submitted' && canReviewEvidence && <Tooltip title="Duyệt bằng chứng"><Button type="text" size="small" icon={<SafetyCertificateOutlined />} onClick={() => handleReviewEvidence(task, true)} style={{ color: '#16a34a' }} /></Tooltip>}
@@ -3356,7 +3297,7 @@ const DailyTasks = () => {
                 ) : (
                     <Space size={6} className="daily-task-row-actions">
                         <span className={`daily-task-deadline-pill${color === '#dc2626' ? ' is-overdue' : ''}`}><ClockCircleOutlined /> {deadlineText}</span>
-                        {canCompleteDailyTask && needsEvidence && !historicalEvidenceOverdue && <Button size="small" type="primary" icon={<UploadOutlined />} onClick={() => handleSubmitEvidence(task)} className="daily-task-primary-action">Nộp bằng chứng</Button>}
+                        {canCompleteDailyTask && needsEvidence && !historicalEvidenceOverdue && <Button size="small" type="primary" icon={<QrcodeOutlined />} onClick={() => handleSubmitEvidence(task)} className="daily-task-primary-action">Nộp qua điện thoại</Button>}
                         {historicalEvidenceOverdue && <span className="daily-task-expired-action"><LockOutlined /> Quá hạn nộp</span>}
                         {hasEvidence && <Button size="small" icon={<EyeOutlined />} onClick={() => openEvidence(task)}>Xem bằng chứng</Button>}
                         {canCompleteDailyTask && !evidence.required && <Button size="small" type="primary" icon={<CheckCircleOutlined />} onClick={() => handleToggleComplete(task.id)} className="daily-task-primary-action">Hoàn thành</Button>}
@@ -3379,7 +3320,7 @@ const DailyTasks = () => {
                 )}
                 {showTaskActionGuide && pendingTasks.length > 0 && (
                     <div className="daily-task-action-guide" role="status">
-                        <span><CheckCircleOutlined /> Chọn <strong>Hoàn thành</strong> hoặc <strong>Nộp bằng chứng</strong> ở cuối dòng. Bấm vào nội dung công việc sẽ không tự xác nhận.</span>
+                        <span><CheckCircleOutlined /> Chọn <strong>Hoàn thành</strong> hoặc <strong>Nộp qua điện thoại</strong> ở cuối dòng. Bấm vào nội dung công việc sẽ không tự xác nhận.</span>
                         <Button type="text" size="small" onClick={dismissTaskActionGuide}>Đã hiểu</Button>
                     </div>
                 )}
@@ -3565,24 +3506,34 @@ const DailyTasks = () => {
                 ] : null}
                 destroyOnHidden={false}
             >
+                {!mobileEvidenceSession && <div style={{ minHeight: 300, display: 'grid', placeItems: 'center', textAlign: 'center' }}>
+                    <Space direction="vertical" size={14}>
+                        <Spin size="large" />
+                        <strong>Đã nhận lệnh, đang chuẩn bị mã QR...</strong>
+                        <span style={{ color: '#64748b' }}>Vui lòng đợi trong giây lát.</span>
+                    </Space>
+                </div>}
                 {mobileEvidenceSession && <div className="daily-tasks-mobile-evidence">
                     <div className="daily-tasks-mobile-evidence__qr">
                         <QRCodeSVG value={mobileEvidenceSession.url} size={220} level="M" marginSize={2} />
                     </div>
-                    <div className="daily-tasks-mobile-evidence__copy">
-                        <strong>{mobileEvidenceSession.employee}</strong>
-                        <span>{mobileEvidenceSession.taskCount} công việc đang chờ nộp ảnh</span>
-                        {mobileEvidenceSession.operatedBy && <span>Kiểm thử bởi admin: {mobileEvidenceSession.operatedBy}</span>}
-                        <span>Phiên hết hạn lúc {dayjs(mobileEvidenceSession.expiresAt).format('HH:mm DD/MM/YYYY')}</span>
+                    <div className={`daily-tasks-mobile-evidence__guide${mobileEvidenceSession.secure ? ' is-secure' : ''}`}>
+                        <div className="daily-tasks-mobile-evidence__phone" aria-hidden="true">
+                            <MobileOutlined className="daily-tasks-mobile-evidence__phone-icon" />
+                            <span className="daily-tasks-mobile-evidence__scan-frame"><QrcodeOutlined /></span>
+                            <span className="daily-tasks-mobile-evidence__scan-line" />
+                        </div>
+                        <div className="daily-tasks-mobile-evidence__guide-copy">
+                            <strong>{mobileEvidenceSession.secure ? 'Sẵn sàng quét bằng điện thoại' : 'Đưa camera điện thoại vào mã QR'}</strong>
+                            <span>
+                                {mobileEvidenceSession.secure
+                                    ? 'Mở camera, hướng vào mã QR phía trên rồi chạm vào đường dẫn hiện trên màn hình.'
+                                    : mobileEvidenceSession.connecting
+                                        ? 'Điện thoại cùng Wi-Fi có thể quét ngay. Kết nối bảo mật đang được chuẩn bị trong nền.'
+                                        : 'Điện thoại cần kết nối cùng mạng Wi-Fi với máy tính để mở mã QR.'}
+                            </span>
+                        </div>
                     </div>
-                    <Alert
-                        showIcon
-                        type={mobileEvidenceSession.secure ? 'success' : 'warning'}
-                        message={mobileEvidenceSession.secure ? 'Sẵn sàng quét bằng điện thoại' : 'Đang dùng kết nối Wi-Fi nội bộ'}
-                        description={mobileEvidenceSession.secure
-                            ? 'Quét một lần để xem và nộp lần lượt các công việc được giao cho tài khoản này.'
-                            : `Điện thoại cần dùng cùng mạng Wi-Fi với máy tính${mobileEvidenceSession.address ? ` (${mobileEvidenceSession.address})` : ''}.`}
-                    />
                 </div>}
             </Modal>
 

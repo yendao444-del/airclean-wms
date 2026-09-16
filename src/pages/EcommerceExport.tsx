@@ -232,6 +232,15 @@ function detectMarketplaceFromWorksheet(worksheet: any, XLSX: any, firstRow: any
     return null;
 }
 
+function isAuthoritativePendingSnapshot(fileName: string, source: 'Shopee' | 'TikTok'): boolean {
+    if (source === 'TikTok') return true;
+    return /(?:^|[._\-\s])toship(?:[._\-\s]|$)/i.test(fileName);
+}
+
+function isPickupEligibleStatus(status: string): boolean {
+    return ['pending', 'processing', 'mismatch'].includes(String(status || '').trim().toLowerCase());
+}
+
 const TIKTOK_ORDER_TIME_HEADERS = [
     'Created Time', 'Order Created Time', 'Order Creation Time', 'Order creation time',
     'Order Date', 'Order Created Date',
@@ -659,7 +668,6 @@ export default function EcommerceExportPage() {
             base.limit = base.limit || 200;
             delete base.until;
         } else if (currentStatus === 'overdue') {
-            // Một tab "Đơn trễ" duy nhất: gồm đơn quá SLA và đơn không còn trong file mới.
             base.statusIn = ['pending', 'mismatch'];
             base.operationalState = 'overdue';
             base.limit = base.limit || 200;
@@ -667,7 +675,7 @@ export default function EcommerceExportPage() {
         } else if (currentStatus === 'all') {
             base.limit = base.limit || 200;
         } else {
-            base.statusIn = ['pending'];
+            base.statusIn = ['pending', 'mismatch'];
             // Lọc ngay ở database thay vì tải cả đơn pending quá hạn rồi bỏ ở renderer.
             base.operationalState = 'active';
             base.limit = base.limit || 200;
@@ -684,8 +692,12 @@ export default function EcommerceExportPage() {
             if (record.status === 'completed') counts.completed += 1;
             else if (record.status === 'cancelled') counts.cancelled += 1;
             else if (record.status === 'mismatch') counts.mismatch += 1;
-            else if (record.status === 'pending' && record.slaDeadlineAt && dayjs(record.slaDeadlineAt).isBefore(dayjs())) counts.overdue += 1;
-            else if (record.status === 'pending') counts.pending += 1;
+            if (
+                ['pending', 'mismatch'].includes(record.status)
+                && record.slaDeadlineAt
+                && dayjs(record.slaDeadlineAt).isBefore(dayjs())
+            ) counts.overdue += 1;
+            else if (['pending', 'mismatch'].includes(record.status)) counts.pending += 1;
             return counts;
         }, { total: 0, pending: 0, completed: 0, mismatch: 0, overdue: 0, cancelled: 0 });
         try {
@@ -711,7 +723,7 @@ export default function EcommerceExportPage() {
         new Promise(resolve => {
             Modal.confirm({
                 title: `File ${source} không có đơn chờ lấy hàng`,
-                content: 'Nếu tiếp tục, mọi đơn đang chờ lấy hàng của sàn này nhưng không có trong file sẽ chuyển sang Đơn trễ và bị chặn pickup. Chỉ tiếp tục khi đây là snapshot rỗng chính xác.',
+                content: 'Nếu tiếp tục, mọi đơn đang chờ lấy hàng của sàn này nhưng không có trong file sẽ được đánh dấu Đơn trễ. Đơn trễ vẫn có thể pickup; chỉ tiếp tục khi đây là snapshot rỗng chính xác.',
                 okText: 'Xác nhận snapshot rỗng',
                 okType: 'danger',
                 cancelText: 'Hủy',
@@ -1116,14 +1128,15 @@ Thời gian: ${currentTime}`;
 
         if (foundEcommerceExport) {
             console.info(`[PickupPerf] lookup-done code=${trimmed} ms=${Math.round(performance.now() - scanStartedAt)}`);
-            // 🚨 CHẶN CỨNG: Đơn đã bị hủy trên sàn → KHÔNG CHO GIAO
-            if (foundEcommerceExport.status === 'mismatch' || foundEcommerceExport.status === 'cancelled') {
+            // A cancelled order is never handed over. An overdue/mismatch order
+            // is still eligible for pickup; lateness is only an SLA signal.
+            if (foundEcommerceExport.status === 'cancelled') {
                 playAlert();
                 setScanStatus({
                     type: 'error',
-                message: `FAIL - ${foundEcommerceExport.status === 'cancelled' ? 'ĐƠN HỦY' : 'ĐƠN TRỄ'} - ${foundEcommerceExport.orderNumber || foundEcommerceExport.ecommerceExportCode}`,
+                message: `FAIL - ĐƠN HỦY - ${foundEcommerceExport.orderNumber || foundEcommerceExport.ecommerceExportCode}`,
                 });
-                message.error(`${foundEcommerceExport.status === 'cancelled' ? 'ĐƠN HỦY' : 'ĐƠN TRỄ'} - phải giữ lại để kiểm tra: ${foundEcommerceExport.orderNumber || foundEcommerceExport.ecommerceExportCode}`);
+                message.error(`ĐƠN HỦY - phải giữ lại để kiểm tra: ${foundEcommerceExport.orderNumber || foundEcommerceExport.ecommerceExportCode}`);
             } else if (foundEcommerceExport.status === 'completed') {
                 // ⚠️ Đơn hàng đã được bàn giao DVVC rồi
                 playAlert();
@@ -1132,6 +1145,13 @@ Thời gian: ${currentTime}`;
                     message: `ĐÃ PICKUP - ${foundEcommerceExport.orderNumber || foundEcommerceExport.ecommerceExportCode}`,
                 });
                 message.warning(`Đơn ${foundEcommerceExport.orderNumber || foundEcommerceExport.ecommerceExportCode} đã gửi rồi!`);
+            } else if (!isPickupEligibleStatus(foundEcommerceExport.status)) {
+                playAlert();
+                setScanStatus({
+                    type: 'error',
+                    message: `TRẠNG THÁI KHÔNG HỢP LỆ - ${foundEcommerceExport.orderNumber || foundEcommerceExport.ecommerceExportCode}`,
+                });
+                message.error(`Đơn đang ở trạng thái không thể pickup: ${foundEcommerceExport.status || 'không xác định'}`);
             } else {
                 const currentTracking = getTrackingKey(foundEcommerceExport);
                 if (!hasUsableTracking(currentTracking)) {
@@ -1943,12 +1963,13 @@ Thời gian: ${currentTime}`;
                             return;
                         }
                         const importResult = await withImportTimeout(
-                            window.electronAPI.ecommerceExports.importSnapshot({
-                                platform: source,
-                                fileNames: [file.name],
-                                records: newEcommerceExports,
-                                allowEmptySnapshot,
-                            }),
+                        window.electronAPI.ecommerceExports.importSnapshot({
+                            platform: source,
+                            fileNames: [file.name],
+                            records: newEcommerceExports,
+                            allowEmptySnapshot,
+                            reconcileMissing: isAuthoritativePendingSnapshot(file.name, source),
+                        }),
                             120000,
                             'Đồng bộ dữ liệu lên Supabase quá lâu. Vui lòng thử lại.',
                         );
@@ -2032,6 +2053,7 @@ Thời gian: ${currentTime}`;
             const failedFiles: Array<{ name: string; error: string }> = [];
             const snapshotRecordsBySource = new Map<string, Map<string, EcommerceExport>>();
             const snapshotFilesBySource = new Map<string, string[]>();
+            const reconcileMissingBySource = new Map<string, boolean>();
             // Xử lý từng file
             for (const [fileIndex, fileData] of files.entries()) {
                 try {
@@ -2075,6 +2097,10 @@ Thời gian: ${currentTime}`;
                     }
                     if (!snapshotFilesBySource.has(fileSource)) snapshotFilesBySource.set(fileSource, []);
                     snapshotFilesBySource.get(fileSource)!.push(fileData.name);
+                    reconcileMissingBySource.set(
+                        fileSource,
+                        isAuthoritativePendingSnapshot(fileData.name, fileSource as 'Shopee' | 'TikTok'),
+                    );
                     // Process same as handleImportExcel
                     const orderMap = new Map<string, any[]>();
                     const invalidOrders: string[] = [];
@@ -2289,6 +2315,7 @@ Thời gian: ${currentTime}`;
                             fileNames: snapshotFilesBySource.get(source) || [],
                             records,
                             allowEmptySnapshot,
+                            reconcileMissing: reconcileMissingBySource.get(source) === true,
                         }),
                         120000,
                         `Đồng bộ ${source} lên Supabase quá lâu. Vui lòng thử lại.`,
@@ -2598,7 +2625,12 @@ Thời gian: ${currentTime}`;
             width: 90,
             className: 'ecommerce-cell ecommerce-cell--status',
             render: (value, record) => {
-                if (value === 'mismatch') return <Tag color="error">ĐƠN TRỄ</Tag>;
+                if (value === 'mismatch') {
+                    const isOverdue = record.slaDeadlineAt && dayjs(record.slaDeadlineAt).valueOf() < slaNow;
+                    return isOverdue
+                        ? <Tag color="error">ĐƠN TRỄ</Tag>
+                        : <Tag color="warning">CẦN ĐỐI SOÁT</Tag>;
+                }
                 if (value === 'cancelled') {
                     return <Tag style={{ background: '#262626', borderColor: '#262626', color: '#fff' }}>Hủy</Tag>;
                 }
@@ -2722,16 +2754,16 @@ Thời gian: ${currentTime}`;
     // ⚡ useMemo — tránh re-filter + re-parse mỗi lần render
     const filteredEcommerceExports = useMemo(() => {
         const filtered = ecommerceExports.filter(ecommerceExport => {
-            const isLate = ecommerceExport.status === 'pending'
+            const isLate = ['pending', 'mismatch'].includes(ecommerceExport.status)
                 && !!ecommerceExport.slaDeadlineAt
                 && dayjs(ecommerceExport.slaDeadlineAt).valueOf() < slaNow;
             // Lọc theo trạng thái
             let statusMatch = true;
-            if (statusFilter === 'pending') statusMatch = ecommerceExport.status === 'pending' && !isLate;
+            if (statusFilter === 'pending') statusMatch = ['pending', 'mismatch'].includes(ecommerceExport.status) && !isLate;
             else if (statusFilter === 'completed') statusMatch = ecommerceExport.status === 'completed';
             else if (statusFilter === 'cancelled') statusMatch = ecommerceExport.status === 'cancelled';
             else if (statusFilter === 'mismatch') statusMatch = ecommerceExport.status === 'mismatch';
-            else if (statusFilter === 'overdue') statusMatch = isLate || ecommerceExport.status === 'mismatch';
+            else if (statusFilter === 'overdue') statusMatch = isLate;
             if (!statusMatch) return false;
 
             // 🔎 Lọc theo từ khóa tìm kiếm mã vận đơn đi
@@ -2840,7 +2872,7 @@ Thời gian: ${currentTime}`;
                         color: statusFilter === 'overdue' ? '#fff' : '#cf1322',
                     }}
                 >
-                    Đơn trễ: {operationalCounts.overdue + operationalCounts.mismatch}
+                    Đơn trễ: {operationalCounts.overdue}
                     </Tag>
                     <Tag
                     className="ecommerce-status-chip"
@@ -3060,7 +3092,7 @@ Thời gian: ${currentTime}`;
                             // ⚡ Dùng indexOf thay vì JSON.parse — nhanh hơn 100x
                             try {
                                 const firstComma = record.items.indexOf('},{');
-                                const slaTone = record.status === 'pending'
+                                const slaTone = ['pending', 'mismatch'].includes(record.status)
                                     ? getSlaPresentation(record.slaDeadlineAt, slaNow).tone
                                     : 'unknown';
                                 return [
@@ -3068,7 +3100,7 @@ Thời gian: ${currentTime}`;
                                     firstComma !== -1 ? 'multi-sku-row ecommerce-table-row--multi' : '',
                                     `ecommerce-table-row--${record.status || 'pending'}`,
                                     `ecommerce-table-row--sla-${slaTone}`,
-                                    record.status === 'pending' && record.slaDeadlineAt && dayjs(record.slaDeadlineAt).valueOf() < slaNow
+                                    ['pending', 'mismatch'].includes(record.status) && record.slaDeadlineAt && dayjs(record.slaDeadlineAt).valueOf() < slaNow
                                         ? 'ecommerce-table-row--overdue'
                                         : '',
                                     !isAdmin ? 'ecommerce-table-row--no-selection' : '',

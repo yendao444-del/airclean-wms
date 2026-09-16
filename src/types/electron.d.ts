@@ -315,6 +315,17 @@ export interface ElectronAPI {
     }>;
     onStockChanged?: (callback: (data: any) => void) => () => void;
   };
+  prepack: {
+    list: (filters?: { status?: string }) => Promise<{ success: boolean; data?: any[]; error?: string }>;
+    create: (data: any) => Promise<{ success: boolean; data?: any; error?: string }>;
+    submitEvidence: (data: any) => Promise<{ success: boolean; data?: any; error?: string }>;
+    accept: (data: any) => Promise<{ success: boolean; data?: any; error?: string }>;
+    issue: (data: any) => Promise<{ success: boolean; data?: any; error?: string }>;
+    getEvidenceUrl: (
+      batchId: number,
+      evidenceId: number,
+    ) => Promise<{ success: boolean; data?: { url: string }; error?: string }>;
+  };
   categories: {
     getAll: () => Promise<{
       success: boolean;
@@ -789,43 +800,11 @@ export interface ElectronAPI {
     deleteAssignment: (
       id: number,
     ) => Promise<{ success: boolean; data?: any; error?: string }>;
-    uploadEvidenceImage: (payload: {
-      taskId: number;
-      mimeType: string;
-      data: string;
-      hash: string;
-    }) => Promise<{
-      success: boolean;
-      data?: { storagePath: string };
-      error?: string;
-    }>;
-    validateEvidenceSource: (payload: {
-      taskId: number;
-      name: string;
-      mimeType: string;
-      data: string;
-    }) => Promise<{
-      success: boolean;
-      data?: {
-        validationToken: string;
-        camera?: string;
-        verification?: "camera_metadata" | "image_screening";
-        preparedSize?: number;
-      };
-      error?: string;
-    }>;
-    submitEvidence: (
-      payload: any,
-    ) => Promise<{
-      success: boolean;
-      data?: any;
-      error?: string;
-      reauthRequired?: boolean;
-    }>;
     startMobileEvidence: (options?: { targetUsername?: string }) => Promise<{
       success: boolean;
       url?: string;
       secure?: boolean;
+      connecting?: boolean;
       address?: string;
       employee?: string;
       operatedBy?: string | null;
@@ -836,6 +815,9 @@ export interface ElectronAPI {
     stopMobileEvidence: () => Promise<{ success: boolean; error?: string }>;
     onMobileEvidenceUpdated: (
       callback: (data: { taskId: number; submittedAt: string }) => void,
+    ) => () => void;
+    onMobileEvidenceUrlUpdated: (
+      callback: (data: { url: string; secure: boolean; connecting: boolean }) => void,
     ) => () => void;
     reviewEvidence: (
       taskId: number,
@@ -1031,7 +1013,10 @@ export interface ElectronAPI {
     ) => Promise<{ success: boolean; data?: any; error?: string }>;
     completePickup: (
       id: number,
-      data: { updatedAt?: string | Date; pickedBy?: string },
+      data: {
+        updatedAt?: string | Date;
+        pickedBy?: string;
+      },
     ) => Promise<{
       success: boolean;
       skipped?: boolean;
@@ -1087,6 +1072,7 @@ export interface ElectronAPI {
       fileNames: string[];
       records: any[];
       allowEmptySnapshot?: boolean;
+      reconcileMissing?: boolean;
     }) => Promise<{
       success: boolean;
       data?: {
