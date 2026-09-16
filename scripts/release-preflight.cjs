@@ -1,4 +1,5 @@
 const { execFileSync } = require('child_process');
+const fs = require('fs');
 
 const tier = String(process.argv[2] || '').trim().toLowerCase();
 const validTiers = new Set(['renderer', 'quick', 'prisma', 'prisma-python', 'full']);
@@ -59,11 +60,38 @@ const relevant = normalized.filter(
   (file) => !ignoredPrefixes.some((prefix) => file.startsWith(prefix)),
 );
 
+function packageFileChangedBeyondVersion(file) {
+  if (!normalized.includes(file)) return false;
+
+  const comparisonRef = releaseBaseline || 'HEAD';
+  try {
+    const previous = JSON.parse(
+      execFileSync('git', ['show', `${comparisonRef}:${file}`], { encoding: 'utf8' }),
+    );
+    const current = JSON.parse(fs.readFileSync(file, 'utf8'));
+
+    delete previous.version;
+    delete current.version;
+    if (file === 'package-lock.json') {
+      if (previous.packages?.['']) delete previous.packages[''].version;
+      if (current.packages?.['']) delete current.packages[''].version;
+    }
+
+    return JSON.stringify(previous) !== JSON.stringify(current);
+  } catch {
+    // Missing or invalid package metadata must use the safer release tier.
+    return true;
+  }
+}
+
+const packageJsonRuntimeImpact = packageFileChangedBeyondVersion('package.json');
+const packageLockRuntimeImpact = packageFileChangedBeyondVersion('package-lock.json');
+
 const isPrismaImpact = (file) =>
   file === 'prisma/schema.prisma' ||
   file.startsWith('prisma/migrations/') ||
-  file === 'package.json' ||
-  file === 'package-lock.json';
+  (file === 'package.json' && packageJsonRuntimeImpact) ||
+  (file === 'package-lock.json' && packageLockRuntimeImpact);
 const isPythonImpact = (file) => file.startsWith('python/') && !file.toLowerCase().endsWith('.md');
 const isBackendImpact = (file) => file.startsWith('electron/');
 const isReleaseTooling = (file) =>
@@ -112,7 +140,7 @@ if (blockers.length > 0) {
   process.exit(1);
 }
 
-if (relevant.some((file) => file === 'package.json' || file === 'package-lock.json')) {
+if (packageJsonRuntimeImpact || packageLockRuntimeImpact) {
   console.warn('WARNING: package files changed. Confirm that no new runtime/native dependency requires a full installer.');
 }
 

@@ -10,7 +10,6 @@ import {
     Badge,
     Progress,
     Empty,
-    Divider,
     Modal,
     Form,
     Input,
@@ -49,12 +48,14 @@ import {
     FlagOutlined,
     MessageOutlined,
     SendOutlined,
-    HistoryOutlined,
     InfoCircleOutlined,
+    LockOutlined,
     LeftOutlined,
-    RightOutlined
+    RightOutlined,
+    QrcodeOutlined
 } from '@ant-design/icons';
 import dayjs from 'dayjs';
+import { QRCodeSVG } from 'qrcode.react';
 import { useAuth } from '../contexts/AuthContext';
 import {
     getFixedVietnamHolidayName,
@@ -342,10 +343,12 @@ const GRADIENT_PRESETS = [
 ];
 
 const DailyTasks = () => {
-    const { user } = useAuth();
+    const { user, isRolePreview } = useAuth();
     const isAdmin = user?.role === 'admin';
     // Tài khoản test có vai trò quản lý mở rộng để kiểm thử toàn bộ luồng công việc.
     const isTestOperator = Boolean(user?.isTestAccount);
+    const taskVisibilityScope = `${isRolePreview ? 'preview' : 'actual'}:${user?.username || ''}`;
+    const previousTaskVisibilityScopeRef = useRef(taskVisibilityScope);
     const canReviewEvidence = user?.role === 'admin' || user?.role === 'manager' || isTestOperator;
     const isAssignmentRecipient = useCallback((task: Task) => {
         if (isTestOperator) return true;
@@ -367,6 +370,19 @@ const DailyTasks = () => {
     const [taskForm] = Form.useForm();
     const [assignmentMode, setAssignmentMode] = useState<'fixed' | 'daily'>('fixed');
     const [loading, setLoading] = useState(false);
+    const [mobileEvidenceOpen, setMobileEvidenceOpen] = useState(false);
+    const [mobileEvidenceStarting, setMobileEvidenceStarting] = useState(false);
+    const [mobileEvidenceTargetOpen, setMobileEvidenceTargetOpen] = useState(false);
+    const [mobileEvidenceTarget, setMobileEvidenceTarget] = useState<string>();
+    const [mobileEvidenceSession, setMobileEvidenceSession] = useState<{
+        url: string;
+        secure: boolean;
+        address?: string;
+        employee: string;
+        operatedBy?: string | null;
+        taskCount: number;
+        expiresAt: number;
+    } | null>(null);
     const [isSavingTask, setIsSavingTask] = useState(false);
     const taskSaveInFlightRef = useRef(false);
 
@@ -475,7 +491,8 @@ const DailyTasks = () => {
     };
 
     // History state
-    const [activeTab, setActiveTab] = useState<'tasks' | 'triage' | 'assignments' | 'history'>('triage');
+    // Show the complete daily-task list by default, including completed evidence.
+    const [activeTab, setActiveTab] = useState<'tasks' | 'triage' | 'assignments' | 'history'>('tasks');
     const [boardFilter, setBoardFilter] = useState<'all' | 'action' | 'evidence' | 'overdue'>('all');
     const [taskSearch, setTaskSearch] = useState('');
     const [taskSort, setTaskSort] = useState<'priority' | 'deadline'>('priority');
@@ -677,7 +694,10 @@ const DailyTasks = () => {
             setLoading(true);
             // Reset and reconciliation run independently on page entry. Task
             // cards should not wait for the full maintenance scan.
-            const result = await window.electronAPI.dailyTasks.list({ maintenance: false });
+            const result = await window.electronAPI.dailyTasks.list({
+                maintenance: false,
+                viewerUsername: isRolePreview ? user?.username : undefined,
+            });
             if (result.success && result.data) {
                 setTasks(result.data.map((t: any) => ({
                     ...t,
@@ -705,6 +725,49 @@ const DailyTasks = () => {
         }
         // Penalty badges are supplemental. Do not hold back the task cards.
         void applyEvidencePenalties();
+    };
+
+    useEffect(() => {
+        if (previousTaskVisibilityScopeRef.current === taskVisibilityScope) return;
+        previousTaskVisibilityScopeRef.current = taskVisibilityScope;
+        void loadTasks();
+    }, [taskVisibilityScope]); // eslint-disable-line react-hooks/exhaustive-deps
+
+    useEffect(() => window.electronAPI.dailyTasks.onMobileEvidenceUpdated(() => {
+        void loadTasks();
+    }), []); // eslint-disable-line react-hooks/exhaustive-deps
+
+    const startMobileEvidence = async (targetUsername?: string) => {
+        setMobileEvidenceStarting(true);
+        try {
+            const result = await window.electronAPI.dailyTasks.startMobileEvidence(
+                targetUsername ? { targetUsername } : undefined,
+            );
+            if (!result.success || !result.url || !result.employee || !result.expiresAt) {
+                throw new Error(result.error || 'Không thể tạo phiên nộp qua điện thoại.');
+            }
+            setMobileEvidenceSession({
+                url: result.url,
+                secure: Boolean(result.secure),
+                address: result.address,
+                employee: result.employee,
+                operatedBy: result.operatedBy,
+                taskCount: Number(result.taskCount) || 0,
+                expiresAt: result.expiresAt,
+            });
+            setMobileEvidenceTargetOpen(false);
+            setMobileEvidenceOpen(true);
+        } catch (error: any) {
+            message.error(error?.message || 'Không thể tạo phiên nộp qua điện thoại.');
+        } finally {
+            setMobileEvidenceStarting(false);
+        }
+    };
+
+    const stopMobileEvidence = async () => {
+        await window.electronAPI.dailyTasks.stopMobileEvidence();
+        setMobileEvidenceSession(null);
+        setMobileEvidenceOpen(false);
     };
 
     // === ASSIGNMENT DEADLINE LOGIC ===
@@ -2318,11 +2381,6 @@ const DailyTasks = () => {
         );
     };
 
-    // Stats (only daily tasks)
-    const totalTasks = dailyTasks.length;
-    const completedTasks = dailyTasks.filter(t => t.status === 'completed').length;
-    const overdueTasks = dailyTasks.filter(t => isOverdue(t)).length;
-    const urgentTasks = dailyTasks.filter(t => t.priority === 'urgent' && t.status !== 'completed').length;
     const evidenceTasks = dailyTasks.filter(task => getEvidence(task).required && task.status !== 'completed');
     const evidenceToSubmit = evidenceTasks.filter(task => {
         const evidence = getEvidence(task);
@@ -3022,8 +3080,10 @@ const DailyTasks = () => {
         const snapshotTasks = historySnapshots[selectedDateKey]?.tasks;
         const selectedDailyTasks = isCurrentWorkDate
             ? dailyTasks
-            : Array.isArray(snapshotTasks)
-                ? snapshotTasks.map((task: any) => ({
+        : Array.isArray(snapshotTasks)
+            ? snapshotTasks
+                .filter((task: any) => !parseAttachments(task.attachments)?.archive?.archived && task.status !== 'cancelled')
+                .map((task: any) => ({
                     ...task,
                     type: task.type || 'daily',
                     priority: task.priority || 'normal',
@@ -3119,10 +3179,15 @@ const DailyTasks = () => {
                 : `Còn ${formatTimeDiff(remainingMinutes)}`;
         };
         const evidenceSoon = (task: Task) => task.type !== 'assignment' && getEvidence(task).required && !isTaskOverdue(task);
+        const isHistoricalEvidenceOverdue = (task: Task) => {
+            const evidence = getEvidence(task);
+            return !isCurrentWorkDate && evidence.required && evidence.status !== 'approved' && evidence.status !== 'submitted';
+        };
         const groups = [
             { key: 'overdue', label: 'Quá hạn', color: '#dc2626', tasks: pendingTasks.filter(isTaskOverdue) },
-            { key: 'evidence', label: 'Bằng chứng sắp đến hạn', color: '#d97706', tasks: pendingTasks.filter(evidenceSoon) },
-            { key: 'normal', label: 'Bình thường', color: '#64748b', tasks: pendingTasks.filter(task => !isTaskOverdue(task) && !evidenceSoon(task)) },
+            { key: 'expired-evidence', label: 'Quá hạn nộp bằng chứng', color: '#dc2626', tasks: pendingTasks.filter(isHistoricalEvidenceOverdue) },
+            { key: 'evidence', label: 'Bằng chứng sắp đến hạn', color: '#d97706', tasks: pendingTasks.filter(task => isCurrentWorkDate && evidenceSoon(task)) },
+            { key: 'normal', label: 'Bình thường', color: '#64748b', tasks: pendingTasks.filter(task => !isTaskOverdue(task) && !isHistoricalEvidenceOverdue(task) && !evidenceSoon(task)) },
             ...(completedDailyTasks.length > 0 ? [{ key: 'completed-daily', label: 'Đã hoàn thành', color: '#16a34a', tasks: completedDailyTasks }] : []),
             ...(completedDeadlineTasks.length > 0 ? [{ key: 'completed', label: 'Đã hoàn thành', color: '#16a34a', tasks: completedDeadlineTasks }] : []),
         ].filter(group => group.tasks.length > 0);
@@ -3150,54 +3215,6 @@ const DailyTasks = () => {
             };
         };
         const hasConcurrentRecurrences = pendingTasks.some(task => Boolean(getOpenRecurrenceInfo(task)));
-        const sidebarTaskById = new Map([...selectedDailyTasks, ...selectedAssignments].map(task => [Number(task.id), task]));
-        const sidebarEvents = selectedDateEvents.filter(entry => {
-            if (scope === 'all') return true;
-            const isAssignmentEvent = entry?.type === 'assignment'
-                || String(entry?.category || '').trim().toLocaleLowerCase('vi-VN') === 'bàn giao';
-            return scope === 'deadline' ? isAssignmentEvent : !isAssignmentEvent;
-        });
-        const sidebarEventsByTask = new Map<number, any[]>();
-        sidebarEvents.forEach(entry => {
-            const taskId = Number(entry.taskId);
-            if (!Number.isFinite(taskId)) return;
-            sidebarEventsByTask.set(taskId, [...(sidebarEventsByTask.get(taskId) || []), entry]);
-        });
-        const sidebarHistoryRows = Array.from(sidebarEventsByTask.entries()).map(([taskId, events]) => {
-            const latestEvent = events[0];
-            const evidenceEvent = events.find(entry => entry?.evidence);
-            const task = sidebarTaskById.get(taskId);
-            const evidence = mergeHistoryEvidence(task ? getEvidence(task) : {}, evidenceEvent?.evidence);
-            const images = evidence.submittedImages?.length
-                ? evidence.submittedImages
-                : evidence.submittedImage ? [evidence.submittedImage] : [];
-            const completed = ['completed', 'daily_reset', 'evidence_approved'].includes(latestEvent.action);
-            return {
-                taskId,
-                task: task || ({
-                    id: taskId,
-                    title: latestEvent.taskTitle || 'Công việc không tên',
-                    category: latestEvent.category || 'Hàng ngày',
-                    assignee: latestEvent.assignee || '',
-                    verifier: latestEvent.verifier || '',
-                    priority: 'normal',
-                    dueTime: '',
-                    dueDate: selectedDateKey,
-                    status: completed ? 'completed' : 'pending',
-                    type: 'daily',
-                } as Task),
-                title: task?.title || latestEvent.taskTitle || 'Công việc không tên',
-                assignee: latestEvent.assignee || task?.assignee || 'Chưa phân công',
-                time: dayjs(latestEvent.timestamp).format('HH:mm'),
-                completed,
-                rejected: evidence.status === 'rejected' || latestEvent.action === 'evidence_rejected',
-                evidence,
-                imageCount: images.length,
-                rejectionPenaltyAmount: Number(evidence.rejectionPenaltyAmount) || 0,
-                rejectionPenaltyCycle: Number(evidence.rejectionPenaltyCycle) || 0,
-            };
-        }).slice(0, 12);
-
         const renderRow = (task: Task, color: string) => {
             const evidence = getEvidence(task);
             const isAssignment = task.type === 'assignment';
@@ -3211,6 +3228,7 @@ const DailyTasks = () => {
                 : getDailyDeadlineText(task);
             const sourceLabel = isAssignment ? 'Bàn giao' : 'Hàng ngày';
             const needsEvidence = evidence.required && evidence.status !== 'submitted' && evidence.status !== 'approved';
+            const historicalEvidenceOverdue = isHistoricalEvidenceOverdue(task);
             const hasEvidence = evidence.required && ['submitted', 'approved', 'rejected'].includes(evidence.status || '');
             const evidencePenaltyRecorded = Boolean(task.evidencePenaltyRecorded);
             const evidencePenaltyAmount = isAssignment ? getAssignmentDeadlinePenalty(task) : evidence.penaltyAmount;
@@ -3303,7 +3321,9 @@ const DailyTasks = () => {
                                 <span className="daily-task-evidence-next"><ClockCircleOutlined /> Tiếp: {nextAssignmentEvidencePenalty.deadline.format('HH:mm DD/MM')} · {formatPenaltyAmount(nextAssignmentEvidencePenalty.amount)}đ</span>
                             </Tooltip>
                         )}
-                    </> : <span>{evidence.required
+                    </> : <span>{historicalEvidenceOverdue
+                        ? <><LockOutlined /> Quá hạn nộp bằng chứng {evidencePenaltyAmount ? `· Phạt ${formatPenaltyAmount(evidencePenaltyAmount)}đ` : ''}</>
+                        : evidence.required
                         ? <><UploadOutlined /> Cần ít nhất {getRequiredEvidenceImageCount(evidence)} ảnh {evidencePenaltyAmount ? `· Phạt ${formatPenaltyAmount(evidencePenaltyAmount)}đ` : ''}</>
                         : isAssignment
                             ? <><WarningOutlined /> Phạt trễ deadline {formatPenaltyAmount(getAssignmentDeadlinePenalty(task))}đ</>
@@ -3317,7 +3337,8 @@ const DailyTasks = () => {
                 {isAssignment ? (
                     <Space size={6} className="daily-task-row-actions">
                         <span className={`daily-task-deadline-pill${color === '#dc2626' ? ' is-overdue' : ''}`}><ClockCircleOutlined /> {deadlineText}</span>
-                        {needsEvidence && canSubmitAssignmentEvidence && <Button size="small" type="primary" icon={<UploadOutlined />} onClick={() => handleSubmitEvidence(task)} className="daily-task-primary-action">Nộp bằng chứng</Button>}
+                        {needsEvidence && !historicalEvidenceOverdue && canSubmitAssignmentEvidence && <Button size="small" type="primary" icon={<UploadOutlined />} onClick={() => handleSubmitEvidence(task)} className="daily-task-primary-action">Nộp bằng chứng</Button>}
+                        {historicalEvidenceOverdue && <span className="daily-task-expired-action"><LockOutlined /> Quá hạn nộp</span>}
                         {hasEvidence && <Button size="small" icon={<EyeOutlined />} onClick={() => openEvidence(task)}>Xem bằng chứng</Button>}
                         {evidence.required && evidence.status === 'submitted' && canReviewEvidence && <Tooltip title="Duyệt bằng chứng"><Button type="text" size="small" icon={<SafetyCertificateOutlined />} onClick={() => handleReviewEvidence(task, true)} style={{ color: '#16a34a' }} /></Tooltip>}
                         <Button size="small" onClick={() => handleNoteAssignment(task)} style={{ borderRadius: 6 }}>Ghi chú</Button>
@@ -3335,7 +3356,8 @@ const DailyTasks = () => {
                 ) : (
                     <Space size={6} className="daily-task-row-actions">
                         <span className={`daily-task-deadline-pill${color === '#dc2626' ? ' is-overdue' : ''}`}><ClockCircleOutlined /> {deadlineText}</span>
-                        {canCompleteDailyTask && needsEvidence && <Button size="small" type="primary" icon={<UploadOutlined />} onClick={() => handleSubmitEvidence(task)} className="daily-task-primary-action">Nộp bằng chứng</Button>}
+                        {canCompleteDailyTask && needsEvidence && !historicalEvidenceOverdue && <Button size="small" type="primary" icon={<UploadOutlined />} onClick={() => handleSubmitEvidence(task)} className="daily-task-primary-action">Nộp bằng chứng</Button>}
+                        {historicalEvidenceOverdue && <span className="daily-task-expired-action"><LockOutlined /> Quá hạn nộp</span>}
                         {hasEvidence && <Button size="small" icon={<EyeOutlined />} onClick={() => openEvidence(task)}>Xem bằng chứng</Button>}
                         {canCompleteDailyTask && !evidence.required && <Button size="small" type="primary" icon={<CheckCircleOutlined />} onClick={() => handleToggleComplete(task.id)} className="daily-task-primary-action">Hoàn thành</Button>}
                         {adminActions}
@@ -3344,18 +3366,17 @@ const DailyTasks = () => {
             </div>;
         };
 
-        return <div className="daily-tasks-main-grid" style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) 370px', gap: 16, alignItems: 'start' }}>
+        return <div className="daily-tasks-main-grid" style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr)', gap: 16, alignItems: 'start' }}>
             <section className="daily-tasks-list-panel" style={{ background: '#fff', border: '1px solid #dbe3ec', borderRadius: 8, overflow: 'hidden' }}>
-                <div className="daily-tasks-panel-header" style={{ padding: '16px 18px', borderBottom: '1px solid #e2e8f0', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16 }}>
-                    <div><h2 style={{ margin: 0, color: '#172033', fontSize: 18, fontWeight: 800 }}>{scope === 'all' ? (isCurrentWorkDate ? 'Cần xử lý hôm nay' : `Công việc ngày ${selectedWorkDate.format('DD/MM/YYYY')}`) : scope === 'daily' ? 'Hàng ngày' : 'Bàn giao'}</h2><span style={{ color: '#64748b', fontSize: 13 }}>{scope === 'daily' ? `${completedDailyTasks.length} đã hoàn thành · ${pendingTasks.length} đang mở` : scope === 'deadline' && deadlineViewFilter === 'completed' ? `${completedDeadlineCount} công việc đã hoàn thành` : `${pendingTasks.length} công việc đang mở`}</span></div>
-                    {scope === 'deadline' ? (
+                {scope === 'deadline' && (
+                    <div className="daily-tasks-panel-header daily-tasks-deadline-filter" style={{ padding: '10px 14px', borderBottom: '1px solid #e2e8f0', display: 'flex', alignItems: 'center', justifyContent: 'flex-end' }}>
                         <Space size={6} wrap>
                             <Button size="small" type={deadlineViewFilter === 'pending' ? 'primary' : 'default'} onClick={() => setDeadlineViewFilter('pending')} style={{ borderRadius: 6 }}>Đang mở ({selectedAssignments.length - completedDeadlineCount})</Button>
                             <Button size="small" type={deadlineViewFilter === 'completed' ? 'primary' : 'default'} onClick={() => setDeadlineViewFilter('completed')} style={{ borderRadius: 6 }}>Đã hoàn thành ({completedDeadlineCount})</Button>
                             <Button size="small" type={deadlineViewFilter === 'all' ? 'primary' : 'default'} onClick={() => setDeadlineViewFilter('all')} style={{ borderRadius: 6 }}>Tất cả ({selectedAssignments.length})</Button>
                         </Space>
-                    ) : <span className="daily-tasks-panel-status">Ưu tiên theo thời hạn và mức độ</span>}
-                </div>
+                    </div>
+                )}
                 {showTaskActionGuide && pendingTasks.length > 0 && (
                     <div className="daily-task-action-guide" role="status">
                         <span><CheckCircleOutlined /> Chọn <strong>Hoàn thành</strong> hoặc <strong>Nộp bằng chứng</strong> ở cuối dòng. Bấm vào nội dung công việc sẽ không tự xác nhận.</span>
@@ -3371,52 +3392,6 @@ const DailyTasks = () => {
                 {groups.map(group => <div key={group.key}><div style={{ padding: '9px 14px', background: group.key === 'overdue' ? '#fef2f2' : group.key === 'evidence' ? '#fff7ed' : '#f8fafc', color: group.color, fontSize: 13, fontWeight: 800 }}>{group.label} ({group.tasks.length})</div>{group.tasks.map(task => renderRow(task, group.color))}</div>)}
                 {groups.length === 0 && <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={isCurrentWorkDate ? 'Không có công việc cần xử lý' : 'Chưa có dữ liệu công việc cho ngày này'} style={{ padding: 60 }} />}
             </section>
-            <aside className="daily-tasks-history-panel" style={{ background: '#fff', border: '1px solid #dbe3ec', borderRadius: 8, overflow: 'hidden' }}>
-                <div style={{ padding: '16px 18px', borderBottom: '1px solid #e2e8f0', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                    <div>
-                        <h2 style={{ margin: 0, fontSize: 17, color: '#172033' }}><HistoryOutlined style={{ color: '#059669' }} /> Lịch sử</h2>
-                        <div style={{ marginTop: 3, color: '#64748b', fontSize: 12 }}>{selectedWorkDate.format('DD/MM/YYYY')}</div>
-                    </div>
-                    <Badge count={sidebarHistoryRows.length} showZero style={{ background: '#dcfce7', color: '#15803d', boxShadow: 'none' }} />
-                </div>
-                <div className="daily-tasks-history-list">
-                    {sidebarHistoryRows.length > 0 ? sidebarHistoryRows.map(row => (
-                        <div key={`history-side-${row.taskId}`} style={{ padding: '13px 16px', borderBottom: '1px solid #eef2f7' }}>
-                            <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10 }}>
-                                <div style={{ minWidth: 0, fontWeight: 750, color: '#172033', overflow: 'hidden', textOverflow: 'ellipsis' }} title={row.title}>{row.title}</div>
-                                <time style={{ color: '#64748b', fontSize: 12, fontWeight: 700, whiteSpace: 'nowrap' }}>{row.time}</time>
-                            </div>
-                            <div style={{ display: 'flex', alignItems: 'center', gap: 7, marginTop: 7, flexWrap: 'wrap' }}>
-                                <Tag color={row.rejected ? 'red' : row.completed ? 'green' : 'orange'} style={{ margin: 0 }}>
-                                    {row.rejected ? 'Bằng chứng bị từ chối' : row.completed ? 'Hoàn thành' : 'Đang xử lý'}
-                                </Tag>
-                                <span style={{ color: '#64748b', fontSize: 12 }}><UserOutlined /> {row.assignee}</span>
-                            </div>
-                            <div style={{ marginTop: 8 }}>
-                                {row.imageCount > 0 ? (
-                                    <>
-                                        <Button type="link" size="small" icon={<EyeOutlined />} onClick={() => openEvidence(row.task, row.evidence)} style={{ padding: 0, height: 24, fontWeight: 700 }}>
-                                            Xem {row.imageCount} ảnh bằng chứng
-                                        </Button>
-                                        {row.rejectionPenaltyAmount > 0 && (
-                                            <Tag color="red" style={{ marginLeft: 8, fontWeight: 700 }}>
-                                                Lần {row.rejectionPenaltyCycle || 1} · Phạt {formatPenaltyAmount(row.rejectionPenaltyAmount)}đ
-                                            </Tag>
-                                        )}
-                                        {row.rejected && row.evidence.rejectionReason && (
-                                            <div style={{ marginTop: 5, color: '#b91c1c', fontSize: 12, lineHeight: 1.45 }}>
-                                                <strong>Lý do:</strong> {row.evidence.rejectionReason}
-                                            </div>
-                                        )}
-                                    </>
-                                ) : row.evidence.required ? (
-                                    <span style={{ color: '#dc2626', fontSize: 12, fontWeight: 650 }}><WarningOutlined /> Thiếu ảnh bằng chứng · bị phạt sau hạn</span>
-                                ) : <span style={{ color: '#94a3b8', fontSize: 12 }}>Công việc không yêu cầu bằng chứng</span>}
-                            </div>
-                        </div>
-                    )) : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="Chưa có lịch sử trong ngày" style={{ padding: 48 }} />}
-                </div>
-            </aside>
         </div>;
     };
 
@@ -3494,64 +3469,41 @@ const DailyTasks = () => {
                         </div>
                     </div>
 
-                    <Space className="daily-tasks-stats" size={18}>
-                        <div className="daily-task-stat-card is-success">
-                            <div style={{ fontSize: 22, fontWeight: 'bold', color: '#16a34a' }}>
-                                {completedTasks}
-                            </div>
-                            <div style={{ fontSize: 12, color: '#999', marginTop: 2 }}>Hoàn thành</div>
-                        </div>
-
-                        <Divider type="vertical" style={{ height: 34 }} />
-
-                        <div className="daily-task-stat-card is-danger">
-                            <div style={{ fontSize: 22, fontWeight: 'bold', color: '#dc2626' }}>
-                                {overdueTasks}
-                            </div>
-                            <div style={{ fontSize: 12, color: '#999', marginTop: 2 }}>Quá hạn</div>
-                        </div>
-
-                        <Divider type="vertical" style={{ height: 34 }} />
-
-                        <div className="daily-task-stat-card is-warning">
-                            <div style={{ fontSize: 22, fontWeight: 'bold', color: '#d97706' }}>
-                                {urgentTasks}
-                            </div>
-                            <div style={{ fontSize: 12, color: '#999', marginTop: 2 }}>Khẩn cấp</div>
-                        </div>
-
-                        <Divider type="vertical" style={{ height: 34 }} />
-
-                        <div className="daily-task-stat-card is-progress">
-                            <div style={{ fontSize: 22, fontWeight: 'bold', color: '#16a34a' }}>
-                                {totalTasks > 0 ? Math.round((completedTasks / totalTasks) * 100) : 0}%
-                            </div>
-                            <Progress
-                                percent={totalTasks > 0 ? Math.round((completedTasks / totalTasks) * 100) : 0}
-                                showInfo={false}
-                                size="small"
-                                strokeColor="#16a34a"
-                            />
-                            <div style={{ fontSize: 12, color: '#64748b', marginTop: 4 }}>Tiến độ hôm nay</div>
-                        </div>
+                    <Space wrap>
+                        <Button
+                            size="large"
+                            icon={<QrcodeOutlined />}
+                            loading={mobileEvidenceStarting}
+                            onClick={() => {
+                                if (mobileEvidenceSession) {
+                                    setMobileEvidenceOpen(true);
+                                } else if (isAdmin && !isRolePreview) {
+                                    setMobileEvidenceTargetOpen(true);
+                                } else {
+                                    void startMobileEvidence(isRolePreview ? user?.username : undefined);
+                                }
+                            }}
+                            style={{ height: 40, borderRadius: 6, fontWeight: 750, color: '#075439', borderColor: '#8bb7a4' }}
+                        >
+                            Nộp qua điện thoại
+                        </Button>
+                        {isAdmin && <Button
+                            className="daily-tasks-add-button"
+                            type="primary"
+                            size="large"
+                            icon={<PlusOutlined />}
+                            onClick={activeTab === 'assignments' ? handleAddAssignment : () => handleAddTask()}
+                            style={{
+                                height: 40,
+                                fontSize: 15,
+                                fontWeight: 'bold',
+                                borderRadius: 6,
+                                boxShadow: 'none'
+                            }}
+                        >
+                            {activeTab === 'assignments' ? 'Giao việc mới' : 'Thêm công việc'}
+                        </Button>}
                     </Space>
-
-                    {isAdmin && <Button
-                        className="daily-tasks-add-button"
-                        type="primary"
-                        size="large"
-                        icon={<PlusOutlined />}
-                        onClick={activeTab === 'assignments' ? handleAddAssignment : () => handleAddTask()}
-                        style={{
-                            height: 40,
-                            fontSize: 15,
-                            fontWeight: 'bold',
-                            borderRadius: 6,
-                            boxShadow: 'none'
-                        }}
-                    >
-                        {activeTab === 'assignments' ? 'Giao việc mới' : 'Thêm công việc'}
-                    </Button>}
                 </div>
             </Card>
 
@@ -3571,6 +3523,67 @@ const DailyTasks = () => {
                         setWorkDatePickerOpen(false);
                     }}
                 />
+            </Modal>
+
+            <Modal
+                title={<Space><QrcodeOutlined /> Chọn nhân viên để kiểm thử</Space>}
+                open={mobileEvidenceTargetOpen}
+                onCancel={() => setMobileEvidenceTargetOpen(false)}
+                okText="Tạo QR kiểm thử"
+                cancelText="Hủy"
+                confirmLoading={mobileEvidenceStarting}
+                okButtonProps={{ disabled: !mobileEvidenceTarget }}
+                onOk={() => mobileEvidenceTarget && void startMobileEvidence(mobileEvidenceTarget)}
+                destroyOnHidden
+            >
+                <Alert
+                    showIcon
+                    type="warning"
+                    message="Đây là kiểm thử trên dữ liệu thật"
+                    description="Ảnh hợp lệ sẽ được lưu vào R2 và công việc của nhân viên được chọn sẽ chuyển sang hoàn thành. Lịch sử sẽ ghi admin là người thao tác."
+                    style={{ marginBottom: 16 }}
+                />
+                <Select
+                    showSearch
+                    value={mobileEvidenceTarget}
+                    onChange={setMobileEvidenceTarget}
+                    placeholder="Chọn nhân viên có công việc cần nộp ảnh"
+                    optionFilterProp="label"
+                    style={{ width: '100%' }}
+                    options={assigneeList.map(username => ({ value: username, label: username }))}
+                />
+            </Modal>
+
+            <Modal
+                title={<Space><QrcodeOutlined /> Nộp qua điện thoại</Space>}
+                open={mobileEvidenceOpen}
+                onCancel={() => setMobileEvidenceOpen(false)}
+                width={520}
+                footer={mobileEvidenceSession ? [
+                    <Button key="disconnect" danger onClick={() => void stopMobileEvidence()}>Ngắt điện thoại</Button>,
+                    <Button key="close" type="primary" onClick={() => setMobileEvidenceOpen(false)}>Đóng</Button>,
+                ] : null}
+                destroyOnHidden={false}
+            >
+                {mobileEvidenceSession && <div className="daily-tasks-mobile-evidence">
+                    <div className="daily-tasks-mobile-evidence__qr">
+                        <QRCodeSVG value={mobileEvidenceSession.url} size={220} level="M" marginSize={2} />
+                    </div>
+                    <div className="daily-tasks-mobile-evidence__copy">
+                        <strong>{mobileEvidenceSession.employee}</strong>
+                        <span>{mobileEvidenceSession.taskCount} công việc đang chờ nộp ảnh</span>
+                        {mobileEvidenceSession.operatedBy && <span>Kiểm thử bởi admin: {mobileEvidenceSession.operatedBy}</span>}
+                        <span>Phiên hết hạn lúc {dayjs(mobileEvidenceSession.expiresAt).format('HH:mm DD/MM/YYYY')}</span>
+                    </div>
+                    <Alert
+                        showIcon
+                        type={mobileEvidenceSession.secure ? 'success' : 'warning'}
+                        message={mobileEvidenceSession.secure ? 'Sẵn sàng quét bằng điện thoại' : 'Đang dùng kết nối Wi-Fi nội bộ'}
+                        description={mobileEvidenceSession.secure
+                            ? 'Quét một lần để xem và nộp lần lượt các công việc được giao cho tài khoản này.'
+                            : `Điện thoại cần dùng cùng mạng Wi-Fi với máy tính${mobileEvidenceSession.address ? ` (${mobileEvidenceSession.address})` : ''}.`}
+                    />
+                </div>}
             </Modal>
 
             {/* Tab Switcher */}
@@ -3627,7 +3640,7 @@ const DailyTasks = () => {
                     >
                         Cần xử lý <Badge count={dailyTasks.filter(task => task.status !== 'completed' && (isOverdue(task) || getEvidence(task).required)).length + pendingAssignments.length} offset={[8, -4]} />
                     </Radio.Button>
-                    {/* Legacy full history tab removed; the right-side history panel is the current view. */}
+                    {/* History remains available through date snapshots; no separate history tab is shown here. */}
                     {false && <Radio.Button
                         value="history"
                         style={{
@@ -4010,7 +4023,7 @@ const DailyTasks = () => {
             {activeTab === 'triage' && <PriorityWorkspace scope="all" />}
             {activeTab === 'assignments' && <PriorityWorkspace scope="deadline" />}
 
-            {/* Legacy full history calendar view removed; keep the compact history panel in PriorityWorkspace. */}
+            {/* Legacy full history calendar view is intentionally disabled. */}
             {false && activeTab === 'history' && (
                 <HistoryListView
                     selectedDate={selectedWorkDate}

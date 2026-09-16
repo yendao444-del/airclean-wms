@@ -10,6 +10,7 @@ if not exist "node_modules\electron\dist\electron.exe" (
 
 echo Starting cached production renderer + Electron (fast mode)...
 set "DBYPOS_FAST_START=1"
+set "DBYPOS_DISABLE_AUTO_UPDATE="
 node "scripts\start-electron-dev.js"
 
 if errorlevel 1 (

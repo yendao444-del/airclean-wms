@@ -4165,6 +4165,8 @@ export default function Attendance() {
 
     // === State cho danh sách kỳ đã chốt ===
     const [lockedPeriods, setLockedPeriods] = useState<LockedPeriod[]>([]);
+    const lockedSnapshotRequestsRef = useRef(new Set<string>());
+    const [lockedSnapshotError, setLockedSnapshotError] = useState('');
 
     // === Ghi đè lương thủ công (Admin) ===
     const [payrollOverrides, setPayrollOverrides] = useState<Record<string, PayrollOverride>>({});
@@ -4320,7 +4322,12 @@ export default function Attendance() {
                 };
                 const [usersRes, rs] = await Promise.all([
                     measurePrimary('users', api.users.getAll()).catch(() => null),
-                    measurePrimary('attendanceData', api.appConfig.get('attendanceData')),
+                    measurePrimary(
+                        'attendanceData',
+                        api.attendance?.getInitialData
+                            ? api.attendance.getInitialData()
+                            : api.appConfig.get('attendanceData')
+                    ),
                 ]);
                 try {
                     if (usersRes?.success && usersRes.data) {
@@ -5158,7 +5165,9 @@ export default function Attendance() {
     const loadPurchaseVatTracking = async (since?: string, requestKey?: string) => {
         try {
             const api = (window as any).electronAPI;
-            const result = await api.purchases.getAll({ since, limit: 10000 });
+            const result = api.purchases.getVatPenaltyReadModel
+                ? await api.purchases.getVatPenaltyReadModel({ since })
+                : await api.purchases.getAll({ since, limit: 10000 });
             if (!requestKey || fineSourcesRangeKeyRef.current === requestKey) {
                 startBackgroundTransition(() => setPurchaseVatTracking(result?.success && Array.isArray(result.data) ? result.data : []));
             }
@@ -5171,7 +5180,7 @@ export default function Attendance() {
     const loadReturnOverdueTracking = async (requestKey?: string) => {
         try {
             const api = (window as any).electronAPI;
-            const result = await api.returns.getAll();
+            const result = await api.returns.getAll({ compact: true });
             if (!requestKey || fineSourcesRangeKeyRef.current === requestKey) {
                 startBackgroundTransition(() => setReturnOverdueTracking(result?.success && Array.isArray(result.data) ? result.data : []));
             }
@@ -5184,7 +5193,7 @@ export default function Attendance() {
     const loadRefundOverdueTracking = async (requestKey?: string) => {
         try {
             const api = (window as any).electronAPI;
-            const result = await api.refunds.getAll();
+            const result = await api.refunds.getAll({ compact: true });
             if (!requestKey || fineSourcesRangeKeyRef.current === requestKey) {
                 startBackgroundTransition(() => setRefundOverdueTracking(result?.success && Array.isArray(result.data) ? result.data : []));
             }
@@ -5199,7 +5208,7 @@ export default function Attendance() {
         try {
             const api = (window as any).electronAPI;
             const [result, penaltyResult, balanceResult, stockCheckResult] = await Promise.all([
-                api.dailyTasks.list({}),
+                api.dailyTasks.list({ summary: true }),
                 api.dailyTasks.listEvidencePenalties({
                     startDate: overviewDateRange[0].format('YYYY-MM-DD'),
                     endDate: overviewDateRange[1].format('YYYY-MM-DD'),
@@ -5339,29 +5348,12 @@ export default function Attendance() {
     }, [isDbLoaded, overviewDateRange, activeTab, fineSourcesRangeKey]);
 
     // Packing is independent from the auxiliary fine sources. Start it as soon
-    // as the primary attendance snapshot is ready so the overview does not sit
-    // in "Đang tổng hợp" while unrelated endpoints finish.
+    // as the overview mounts. The IPC call is asynchronous, so deferring it
+    // behind requestIdleCallback only adds latency to the payroll readiness gate
+    // without reducing database work or changing the rendered result.
     useEffect(() => {
         if (!isDbLoaded || activeTab !== 'overview') return;
-        let cancelled = false;
-        let timeoutId: number | null = null;
-        let idleId: number | null = null;
-        const run = () => {
-            if (cancelled) return;
-            void loadPackingOrders(getPackingLoadStart(overviewDateRange[0]).toISOString(), { range: overviewDateRange });
-        };
-        if (typeof (window as any).requestIdleCallback === 'function') {
-            idleId = (window as any).requestIdleCallback(run, { timeout: 1200 });
-        } else {
-            timeoutId = window.setTimeout(run, 250);
-        }
-        return () => {
-            cancelled = true;
-            if (timeoutId !== null) window.clearTimeout(timeoutId);
-            if (idleId !== null && typeof (window as any).cancelIdleCallback === 'function') {
-                (window as any).cancelIdleCallback(idleId);
-            }
-        };
+        void loadPackingOrders(getPackingLoadStart(overviewDateRange[0]).toISOString(), { range: overviewDateRange });
     }, [activeTab, isDbLoaded, overviewDateRange]);
 
     // Đóng gói dùng khoảng tuần riêng; không thay đổi kỳ tháng của các tab còn lại.
@@ -6061,6 +6053,34 @@ export default function Attendance() {
         dayjs(lp.start).isSame(overviewDateRange[0], 'day') &&
         dayjs(lp.end).isSame(overviewDateRange[1], 'day')
     ), [lockedPeriods, overviewDateRange]);
+    useEffect(() => {
+        if (!isDbLoaded || !currentLockedPeriod || currentLockedPeriod.payrollSnapshot) return;
+        const api = (window as any).electronAPI;
+        if (!api?.attendance?.getLockedPeriodSnapshot) return;
+        const requestKey = `${currentLockedPeriod.start}|${currentLockedPeriod.end}`;
+        if (lockedSnapshotRequestsRef.current.has(requestKey)) return;
+        lockedSnapshotRequestsRef.current.add(requestKey);
+        let cancelled = false;
+        setLockedSnapshotError('');
+        void api.attendance.getLockedPeriodSnapshot({
+            start: currentLockedPeriod.start,
+            end: currentLockedPeriod.end,
+        }).then((result: any) => {
+            if (cancelled) return;
+            const period = result?.data as LockedPeriod | undefined;
+            if (!result?.success || !period?.payrollSnapshot) {
+                throw new Error(result?.error || 'Kỳ đã khóa chưa có snapshot lương an toàn.');
+            }
+            setLockedPeriods(current => current.map(item => (
+                item.start === currentLockedPeriod.start && item.end === currentLockedPeriod.end
+                    ? { ...item, payrollSnapshot: period.payrollSnapshot }
+                    : item
+            )));
+        }).catch((error: any) => {
+            if (!cancelled) setLockedSnapshotError(error?.message || String(error));
+        });
+        return () => { cancelled = true; };
+    }, [currentLockedPeriod, isDbLoaded]);
     const lockedPayrollSnapshot = currentLockedPeriod?.payrollSnapshot;
     const lockedSalesBonusSummary = lockedPayrollSnapshot?.sourceSummary?.salesBonusSummary as SalesBonusSummary | undefined;
     const activeSalesBonusSummary = currentLockedPeriod
@@ -10317,8 +10337,10 @@ const openConfigModal = () => {
                         </Tag>
                     )}
                     {showPayrollManagementControls && isCurrentPeriodLocked && !lockedPayrollSnapshot && (
-                        <Tooltip title="Kỳ này được khóa bằng cơ chế cũ, chưa có snapshot bất biến. Admin cần mở khóa rồi Chốt & Khóa lại sau khi kiểm tra số liệu.">
-                            <Tag color="warning" icon={<WarningOutlined />}>Cần chốt lại an toàn</Tag>
+                        <Tooltip title={lockedSnapshotError || 'Đang tải snapshot lương của kỳ đã khóa từ Supabase.'}>
+                            <Tag color={lockedSnapshotError ? 'warning' : 'processing'} icon={lockedSnapshotError ? <WarningOutlined /> : <SyncOutlined spin />}>
+                                {lockedSnapshotError ? 'Cần chốt lại an toàn' : 'Đang tải kỳ đã khóa'}
+                            </Tag>
                         </Tooltip>
                     )}
                     {showPayrollManagementControls && <Button className="att-btn-config" icon={<SettingOutlined />} onClick={openConfigModal} disabled={isCurrentPeriodLocked}>Cấu hình</Button>}

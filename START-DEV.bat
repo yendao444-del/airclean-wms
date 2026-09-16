@@ -10,6 +10,7 @@ if not exist "node_modules\electron\dist\electron.exe" (
 
 echo Starting Vite + Electron (development mode)...
 set "DBYPOS_FAST_START="
+set "DBYPOS_DISABLE_AUTO_UPDATE=1"
 node "scripts\start-electron-dev.js"
 
 if errorlevel 1 (

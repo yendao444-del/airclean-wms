@@ -224,6 +224,63 @@ function startNode(entry, args, label, envOverrides = {}) {
   return child;
 }
 
+function startViteAndWaitForListener(args) {
+  let resolveReady;
+  let rejectReady;
+  let outputBuffer = '';
+  let readySettled = false;
+  const ready = new Promise((resolve, reject) => {
+    resolveReady = resolve;
+    rejectReady = reject;
+  });
+  const child = spawn(process.execPath, [viteEntry, ...args], {
+    cwd: projectRoot,
+    env: process.env,
+    // Keep the terminal output visible while also observing Vite's own
+    // listening banner. Waiting for an HTTP GET made the launcher trigger the
+    // first dependency transform itself and delayed Electron by several seconds.
+    stdio: ['inherit', 'pipe', 'pipe'],
+    windowsHide: true,
+  });
+  children.add(child);
+
+  const finishReady = (error) => {
+    if (readySettled) return;
+    readySettled = true;
+    clearTimeout(readyTimer);
+    if (error) rejectReady(error);
+    else resolveReady();
+  };
+  const inspectOutput = (chunk, target) => {
+    target.write(chunk);
+    outputBuffer = `${outputBuffer}${chunk.toString('utf8')}`
+      .replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, '')
+      .slice(-8192);
+    if (/\bLocal:\s+https?:\/\/127\.0\.0\.1:\d+/i.test(outputBuffer)
+      || /\bready in\s+\d+(?:\.\d+)?\s*ms/i.test(outputBuffer)) {
+      finishReady();
+    }
+  };
+  child.stdout.on('data', (chunk) => inspectOutput(chunk, process.stdout));
+  child.stderr.on('data', (chunk) => inspectOutput(chunk, process.stderr));
+  child.once('error', (error) => finishReady(error));
+  child.once('exit', (code, signal) => {
+    children.delete(child);
+    if (!readySettled) {
+      finishReady(new Error(`VITE exited before listening (${signal || code})`));
+    }
+    if (!shuttingDown && code !== 0) {
+      console.error(`[VITE] exited (${signal || code}) after ${elapsed()}`);
+      shutdown(code || 1);
+    }
+  });
+  const readyTimer = setTimeout(() => {
+    finishReady(new Error('Vite did not announce a listening server within 30 seconds.'));
+  }, 30000);
+  readyTimer.unref?.();
+  return { child, ready };
+}
+
 function readDevServerPage(url) {
   return new Promise((resolve) => {
     const request = http.get(url, (response) => {
@@ -268,15 +325,6 @@ async function findFreePort() {
     if (await isPortFree(port)) return port;
   }
   throw new Error('No free development port found between 5173 and 5190.');
-}
-
-async function waitForDevServer(url, timeoutMs = 30000) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (await isDbyDevServer(url)) return true;
-    await new Promise((resolve) => setTimeout(resolve, 100));
-  }
-  return false;
 }
 
 function terminateTree(child) {
@@ -410,11 +458,13 @@ async function main() {
     const port = await findFreePort();
     devServerUrl = `http://127.0.0.1:${port}`;
     console.log(`[START] Launching Vite at ${devServerUrl}`);
-    startNode(viteEntry, ['--host', '127.0.0.1', '--port', String(port), '--strictPort', '--clearScreen', 'false'], 'VITE');
-
-    if (!(await waitForDevServer(devServerUrl))) {
-      throw new Error('Vite did not become ready within 30 seconds.');
-    }
+    const vite = startViteAndWaitForListener([
+      '--host', '127.0.0.1',
+      '--port', String(port),
+      '--strictPort',
+      '--clearScreen', 'false',
+    ]);
+    await vite.ready;
   }
 
   console.log(`[START] Vite ready after ${elapsed()}; launching Electron`);

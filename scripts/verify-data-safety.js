@@ -173,7 +173,10 @@ const cancelSessionHandler = cancelSessionStart >= 0 && cancelSessionEnd > cance
   : '';
 requireText(cancelSessionHandler, 'requireRole("admin");', 'Stock-check cancellation must remain admin-only');
 requireText(cancelSessionHandler, 'await lockStockCheckSessions(tx);', 'Stock-check cancellation must hold the shared session lock');
-const submitEvidenceStart = ipc.indexOf('ipcMain.handle("dailyTasks:submitEvidence"');
+const submitEvidenceFunctionStart = ipc.indexOf('async function submitDailyTaskEvidence(');
+const submitEvidenceStart = submitEvidenceFunctionStart >= 0
+  ? submitEvidenceFunctionStart
+  : ipc.indexOf('ipcMain.handle("dailyTasks:submitEvidence"');
 const submitEvidenceEnd = ipc.indexOf('"dailyTasks:reviewEvidence"', submitEvidenceStart);
 const submitEvidenceHandler = submitEvidenceStart >= 0 && submitEvidenceEnd > submitEvidenceStart
   ? ipc.slice(submitEvidenceStart, submitEvidenceEnd)
@@ -490,7 +493,12 @@ requireText(devLauncher, "await runNode(viteEntry, ['build']);", 'Fast runtime l
 requireText(devLauncher, 'if (electronRestartRequested)', 'Electron must restart only after a watched backend change');
 requireText(devLauncher, 'shutdown(code || 0);', 'Closing Electron normally must stop the launcher instead of reopening it');
 requireText(fastStartBatch, 'set "DBYPOS_FAST_START=1"', 'START.bat must select the cached production renderer');
+requireText(fastStartBatch, 'set "DBYPOS_DISABLE_AUTO_UPDATE="', 'START.bat must keep production auto-update enabled');
 requireText(devStartBatch, 'set "DBYPOS_FAST_START="', 'START-DEV.bat must explicitly select Vite development mode');
+requireText(devStartBatch, 'set "DBYPOS_DISABLE_AUTO_UPDATE=1"', 'START-DEV.bat must disable production auto-update');
+requireText(appPage, 'if (import.meta.env.DEV && !isUpdateUiPreview)', 'Development renderer must bypass the forced update gate');
+requireText(read('electron/update-handlers.js'), "process.env.DBYPOS_DISABLE_AUTO_UPDATE === '1'", 'Update backend must honor the development auto-update disable flag');
+requireText(read('electron/update-handlers.js'), 'requireUpdatesEnabled();', 'Update installation must be blocked while development auto-update is disabled');
 requireText(ipc, 'ecommerceExports:getPackingReadModel', 'Packing payroll read model is missing');
 requireText(ipc, 'before.revision !== after.revision', 'Packing read model must reject a mixed cross-workstation revision');
 requireText(ipc, 'packingReadModelInFlight', 'Packing read model must deduplicate concurrent period reads');

@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <title>DBY - Nộp bằng chứng công việc</title>
+  <style>
+    :root { --green:#075439; --mint:#e8f5ee; --ink:#17362b; --muted:#668078; --red:#b42318; --line:#cfe1d8; }
+    * { box-sizing:border-box; }
+    body { margin:0; min-height:100vh; padding:20px 15px calc(28px + env(safe-area-inset-bottom)); font:16px/1.45 ui-rounded,system-ui,sans-serif; color:var(--ink); background:radial-gradient(circle at top right,#d9f1e5,transparent 42%),#f6faf8; }
+    main { width:min(100%,540px); margin:auto; }
+    h1 { margin:5px 0 2px; font-size:27px; }
+    p { color:var(--muted); }
+    button { min-height:48px; padding:10px 14px; border:0; border-radius:12px; color:white; background:var(--green); font:inherit; font-weight:750; }
+    button.secondary { color:var(--green); border:1px solid #a9cabb; background:white; }
+    button:disabled { opacity:.48; }
+    .badge { display:inline-flex; padding:6px 10px; border-radius:999px; color:var(--green); background:var(--mint); font-size:13px; font-weight:750; }
+    .summary { display:flex; align-items:center; justify-content:space-between; gap:14px; margin:18px 0 12px; padding:16px; border:1px solid var(--line); border-radius:18px; background:rgba(255,255,255,.92); }
+    .summary strong { display:block; font-size:18px; }
+    .progress { min-width:76px; color:var(--green); font-size:20px; font-weight:800; text-align:right; }
+    .task-list { display:grid; gap:10px; }
+    .task-row { display:grid; grid-template-columns:40px minmax(0,1fr) auto; align-items:center; gap:11px; padding:13px; border:1px solid var(--line); border-left:4px solid #94a3b8; border-radius:15px; background:white; box-shadow:0 5px 18px rgba(7,84,57,.045); }
+    .task-row.done { border-left-color:#16a34a; background:#f3fbf6; }
+    .task-count { display:grid; place-items:center; width:36px; height:36px; border-radius:50%; color:#475569; background:#edf2ef; font-size:13px; font-weight:800; }
+    .task-row.done .task-count { color:white; background:#16a34a; }
+    .task-copy { min-width:0; }
+    .task-copy strong { display:block; margin-bottom:5px; }
+    .task-copy small { display:block; color:var(--muted); }
+    .task-row button { min-height:40px; padding:8px 11px; }
+    .empty { padding:28px 16px; border:1px dashed #b7cec2; border-radius:15px; color:var(--muted); text-align:center; }
+    .editor { display:none; }
+    .editor.active { display:block; }
+    .editor-header { display:flex; align-items:flex-start; gap:10px; margin-bottom:14px; }
+    .back { flex:0 0 auto; width:44px; min-height:44px; padding:0; color:var(--green); border:1px solid #a9cabb; background:white; font-size:22px; }
+    .editor-header h2 { margin:0; font-size:20px; }
+    .editor-header p { margin:3px 0 0; font-size:13px; }
+    .card { padding:18px; border:1px solid var(--line); border-radius:20px; background:rgba(255,255,255,.96); box-shadow:0 12px 40px rgba(7,84,57,.09); }
+    input[type=file] { position:absolute; width:1px; height:1px; opacity:0; pointer-events:none; }
+    .capture,.submit { width:100%; }
+    .capture { margin-bottom:10px; }
+    .photos { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px; margin:12px 0; }
+    .photo { position:relative; overflow:hidden; min-height:130px; border:1px solid var(--line); border-radius:14px; background:#edf5f1; }
+    .photo img { display:block; width:100%; height:130px; object-fit:cover; }
+    .photo span { display:block; overflow:hidden; padding:7px 9px; color:var(--muted); font-size:12px; text-overflow:ellipsis; white-space:nowrap; }
+    .photo button { position:absolute; top:6px; right:6px; width:32px; min-height:32px; padding:0; border-radius:50%; background:rgba(0,0,0,.62); }
+    .status { display:none; margin-top:13px; padding:13px; border-radius:13px; font-weight:650; text-align:center; }
+    .status.show { display:block; }
+    .status.loading { color:#7a4a00; background:#fff1d6; }
+    .status.success { color:#086c49; background:#dff7eb; }
+    .status.error { color:var(--red); background:#ffebe9; }
+    .hint { margin-bottom:0; font-size:12px; }
+    @media (max-width:420px) { .task-row { grid-template-columns:36px minmax(0,1fr); } .task-row button { grid-column:1/-1; width:100%; } }
+  </style>
+</head>
+<body>
+  <main>
+    <div id="listView">
+      <div class="badge">DBY · NỘP QUA ĐIỆN THOẠI</div>
+      <h1 id="employeeTitle">Công việc của tôi</h1>
+      <p>Chọn công việc, chụp đủ ảnh và gửi. Bạn không cần quét lại QR cho công việc tiếp theo.</p>
+      <div class="summary"><div><strong>Tiến độ trong phiên</strong><span id="summaryText">Đang tải...</span></div><div class="progress" id="summaryProgress">—</div></div>
+      <div id="taskList" class="task-list"><div class="empty">Đang xác minh phiên điện thoại...</div></div>
+    </div>
+    <section id="editorView" class="editor">
+      <div class="editor-header"><button id="back" class="back" type="button" aria-label="Quay lại">‹</button><div><h2 id="taskTitle"></h2><p id="taskMeta"></p></div></div>
+      <div class="card">
+        <input id="cameraInput" type="file" accept="image/jpeg" capture="environment">
+        <button id="capture" class="capture secondary" type="button">Chụp thêm ảnh</button>
+        <div id="emptyPhotos" class="empty">Chưa có ảnh.</div><div id="photos" class="photos"></div>
+        <button id="submit" class="submit" type="button" disabled>Gửi bằng chứng</button>
+        <div id="status" class="status"></div>
+        <p class="hint">Ảnh được xác minh, chống trùng, nén và lưu vào hệ thống bằng chứng của DBY.</p>
+      </div>
+    </section>
+  </main>
+  <script>
+    const session = new URLSearchParams(location.search).get('session') || '';
+    const listView = document.querySelector('#listView');
+    const editorView = document.querySelector('#editorView');
+    const taskList = document.querySelector('#taskList');
+    const input = document.querySelector('#cameraInput');
+    const captureButton = document.querySelector('#capture');
+    const submitButton = document.querySelector('#submit');
+    const photos = document.querySelector('#photos');
+    const emptyPhotos = document.querySelector('#emptyPhotos');
+    const statusBox = document.querySelector('#status');
+    let sessionData = null;
+    let activeTask = null;
+    let selectedFiles = [];
+    let previewUrls = [];
+
+    function setStatus(kind, text) { statusBox.className = `status show ${kind}`; statusBox.textContent = text; }
+    function formatDue(value) { const date = new Date(value); return Number.isNaN(date.getTime()) ? 'trong ca' : date.toLocaleString('vi-VN', { hour:'2-digit', minute:'2-digit', day:'2-digit', month:'2-digit' }); }
+    function renderTaskList() {
+      const tasks = sessionData?.tasks || [];
+      const completed = tasks.filter(task => task.completed).length;
+      document.querySelector('#employeeTitle').textContent = `Công việc của ${sessionData?.employee || 'nhân viên'}`;
+      document.querySelector('#summaryText').textContent = sessionData?.operatedBy
+        ? `${completed}/${tasks.length} công việc đã nộp · Admin ${sessionData.operatedBy} đang kiểm thử`
+        : `${completed}/${tasks.length} công việc đã nộp`;
+      document.querySelector('#summaryProgress').textContent = `${completed}/${tasks.length}`;
+      taskList.replaceChildren();
+      if (!tasks.length) { const empty = document.createElement('div'); empty.className = 'empty'; empty.textContent = 'Không còn công việc cần nộp bằng chứng.'; taskList.append(empty); return; }
+      tasks.forEach(task => {
+        const row = document.createElement('div'); row.className = `task-row${task.completed ? ' done' : ''}`;
+        const count = document.createElement('div'); count.className = 'task-count'; count.textContent = task.completed ? '✓' : task.requiredCount;
+        const copy = document.createElement('div'); copy.className = 'task-copy';
+        const title = document.createElement('strong'); title.textContent = task.title;
+        const meta = document.createElement('small'); meta.textContent = `${task.category} · Hạn ${formatDue(task.dueAt)} · ${task.requiredCount} ảnh`;
+        copy.append(title, meta);
+        const action = document.createElement('button'); action.type = 'button'; action.className = task.completed ? 'secondary' : ''; action.textContent = task.completed ? 'Đã hoàn tất' : 'Chụp bằng chứng'; action.disabled = task.completed; action.onclick = () => openTask(task.id);
+        row.append(count, copy, action); taskList.append(row);
+      });
+    }
+    function renderPhotos() {
+      previewUrls.forEach(URL.revokeObjectURL); previewUrls = []; photos.replaceChildren();
+      emptyPhotos.style.display = selectedFiles.length ? 'none' : 'block';
+      selectedFiles.forEach((file, index) => {
+        const url = URL.createObjectURL(file); previewUrls.push(url);
+        const item = document.createElement('div'); item.className = 'photo';
+        const image = document.createElement('img'); image.src = url; image.alt = `Ảnh bằng chứng ${index + 1}`;
+        const name = document.createElement('span'); name.textContent = `${index + 1}. ${file.name || 'Ảnh camera'}`;
+        const remove = document.createElement('button'); remove.type = 'button'; remove.textContent = '×'; remove.onclick = () => { selectedFiles.splice(index, 1); renderPhotos(); };
+        item.append(image, name, remove); photos.append(item);
+      });
+      submitButton.disabled = !activeTask || selectedFiles.length < (activeTask?.requiredCount || 1);
+      submitButton.textContent = `Gửi bằng chứng (${selectedFiles.length}/${activeTask?.requiredCount || 1})`;
+      captureButton.disabled = selectedFiles.length >= 5;
+    }
+    function openTask(taskId) {
+      activeTask = sessionData.tasks.find(task => task.id === taskId && !task.completed); if (!activeTask) return;
+      selectedFiles = []; statusBox.className = 'status';
+      document.querySelector('#taskTitle').textContent = activeTask.title;
+      document.querySelector('#taskMeta').textContent = `${activeTask.category} · Hạn ${formatDue(activeTask.dueAt)} · Cần ${activeTask.requiredCount} ảnh`;
+      emptyPhotos.textContent = `Chụp tối thiểu ${activeTask.requiredCount} ảnh thực tế bằng camera.`;
+      listView.style.display = 'none'; editorView.classList.add('active'); renderPhotos();
+    }
+    function closeTask() { selectedFiles = []; previewUrls.forEach(URL.revokeObjectURL); previewUrls = []; activeTask = null; editorView.classList.remove('active'); listView.style.display = 'block'; renderTaskList(); }
+    async function loadSession() {
+      const response = await fetch(`/daily-evidence/session?session=${encodeURIComponent(session)}`);
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok || !result.success) throw new Error(result.error || 'Không thể mở phiên QR.');
+      sessionData = result; renderTaskList();
+    }
+    document.querySelector('#back').onclick = closeTask;
+    captureButton.onclick = () => input.click();
+    input.onchange = () => {
+      const file = input.files?.[0]; input.value = ''; if (!file) return;
+      if (file.type !== 'image/jpeg') { setStatus('error', 'Chỉ nhận ảnh JPG/JPEG chụp trực tiếp từ camera.'); return; }
+      if (file.size > 15 * 1024 * 1024) { setStatus('error', 'Mỗi ảnh không được vượt quá 15 MB.'); return; }
+      if (selectedFiles.length >= 5) return;
+      selectedFiles.push(file); statusBox.className = 'status'; renderPhotos();
+    };
+    submitButton.onclick = async () => {
+      if (!activeTask || selectedFiles.length < activeTask.requiredCount) return;
+      const taskId = activeTask.id; const filesToSend = [...selectedFiles]; submitButton.disabled = true; captureButton.disabled = true;
+      try {
+        const images = [];
+        for (let index = 0; index < filesToSend.length; index += 1) {
+          const file = filesToSend[index]; setStatus('loading', `Đang xác minh ảnh ${index + 1}/${filesToSend.length}...`);
+          const response = await fetch(`/daily-evidence/validate?session=${encodeURIComponent(session)}&task=${taskId}`, { method:'POST', headers:{ 'content-type':file.type, 'x-file-name':encodeURIComponent(file.name || `camera-${index + 1}.jpg`) }, body:file });
+          const result = await response.json().catch(() => ({}));
+          if (!response.ok || !result.success) throw new Error(result.error || `Không thể xác minh ảnh ${index + 1}.`);
+          images.push({ validationToken:result.data.validationToken, name:file.name || `camera-${index + 1}.jpg` });
+        }
+        setStatus('loading', 'Đang lưu ảnh và hoàn tất công việc...');
+        const response = await fetch(`/daily-evidence/submit?session=${encodeURIComponent(session)}`, { method:'POST', headers:{ 'content-type':'application/json' }, body:JSON.stringify({ taskId, images }) });
+        const result = await response.json().catch(() => ({}));
+        if (!response.ok || !result.success) throw new Error(result.error || 'Không thể hoàn tất công việc.');
+        await loadSession(); selectedFiles = []; renderPhotos(); setStatus('success', 'Đã nộp bằng chứng và hoàn tất công việc.'); setTimeout(closeTask, 900);
+      } catch (error) { setStatus('error', error?.message || 'Không thể gửi ảnh. Vui lòng thử lại.'); renderPhotos(); }
+    };
+    addEventListener('pagehide', () => previewUrls.forEach(URL.revokeObjectURL));
+    loadSession().catch(error => { taskList.replaceChildren(); const box = document.createElement('div'); box.className = 'empty'; box.textContent = error?.message || 'Phiên QR không hợp lệ hoặc đã hết hạn.'; taskList.append(box); });
+  </script>
+</body>
+</html>

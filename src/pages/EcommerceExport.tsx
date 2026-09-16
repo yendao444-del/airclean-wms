@@ -21,7 +21,7 @@ import {
     Col,
     Statistic,
 } from 'antd';
-import { EditOutlined, DeleteOutlined, SendOutlined, FormOutlined, FileExcelOutlined, ScanOutlined, MoreOutlined, DownloadOutlined, BarcodeOutlined, FolderOpenOutlined, SettingOutlined, SearchOutlined, UserOutlined } from '@ant-design/icons';
+import { EditOutlined, DeleteOutlined, SendOutlined, FormOutlined, FileExcelOutlined, ScanOutlined, MoreOutlined, DownloadOutlined, BarcodeOutlined, FolderOpenOutlined, SettingOutlined, SearchOutlined, UserOutlined, ClockCircleOutlined, ThunderboltOutlined } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
 import dayjs from 'dayjs';
 import './EcommerceExport.css';
@@ -294,6 +294,59 @@ function getOrderCreatedAt(record: Partial<EcommerceExport>): string {
     return record.orderPlacedAt || record.ecommerceExportDate || '';
 }
 
+function getPickupCompletedAt(record: Partial<EcommerceExport>): string {
+    return record.completedAt || (record.status === 'completed' ? record.ecommerceExportDate : '') || '';
+}
+
+function getCompletedDeliveryTiming(record: Partial<EcommerceExport>) {
+    const completedAt = dayjs(getPickupCompletedAt(record));
+    const deadline = dayjs(record.slaDeadlineAt);
+    if (!completedAt.isValid() || !deadline.isValid()) return 'unknown' as const;
+    return completedAt.valueOf() <= deadline.valueOf() ? 'on-time' as const : 'late' as const;
+}
+
+type SlaTone = 'critical' | 'warning' | 'today' | 'safe' | 'unknown';
+
+function getSlaPresentation(deadlineValue: string | undefined, now: number) {
+    if (!deadlineValue) return { tone: 'unknown' as SlaTone, label: 'Chưa có hạn', deadline: '' };
+    const deadline = dayjs(deadlineValue);
+    if (!deadline.isValid()) return { tone: 'unknown' as SlaTone, label: 'Chưa có hạn', deadline: '' };
+
+    const remainingMinutes = Math.ceil((deadline.valueOf() - now) / 60000);
+    const absoluteMinutes = Math.abs(remainingMinutes);
+    const durationLabel = absoluteMinutes < 60
+        ? `${Math.max(1, absoluteMinutes)} phút`
+        : absoluteMinutes < 24 * 60
+            ? `${Math.max(1, Math.ceil(absoluteMinutes / 60))} giờ`
+            : `${Math.max(1, Math.ceil(absoluteMinutes / (24 * 60)))} ngày`;
+
+    if (remainingMinutes < 0) {
+        return { tone: 'critical' as SlaTone, label: `Quá hạn ${durationLabel}`, deadline: deadline.format('DD/MM HH:mm') };
+    }
+    if (remainingMinutes <= 120) {
+        return { tone: 'warning' as SlaTone, label: `Sắp trễ ${durationLabel}`, deadline: deadline.format('DD/MM HH:mm') };
+    }
+    if (deadline.format('YYYY-MM-DD') === dayjs(now).format('YYYY-MM-DD')) {
+        return { tone: 'today' as SlaTone, label: `Hôm nay ${deadline.format('HH:mm')}`, deadline: deadline.format('DD/MM HH:mm') };
+    }
+    return { tone: 'safe' as SlaTone, label: `Còn ${durationLabel}`, deadline: deadline.format('DD/MM HH:mm') };
+}
+
+function getShippingProvider(notes?: string): string {
+    if (!notes) return '';
+    const shippingMatch = notes.match(/Shipping: ([^|]+)/);
+    return shippingMatch ? shippingMatch[1].trim() : '';
+}
+
+function getCarrierPresentation(shipping: string) {
+    const normalized = normalizeHeaderText(shipping);
+    if (normalized.includes('giao hang nhanh') || normalized === 'ghn') return { code: 'GHN', name: 'GHN', tone: 'orange' };
+    if (normalized.includes('j&t') || normalized.includes('jnt')) return { code: 'J&T', name: 'J&T', tone: 'red' };
+    if (normalized.includes('shopee') || normalized.includes('spx')) return { code: 'SPX', name: 'SPX', tone: 'orange' };
+    if (normalized.includes('viettel') || normalized.includes('vtp')) return { code: 'VTP', name: 'VTP', tone: 'red' };
+    return { code: shipping.slice(0, 3).toUpperCase() || '-', name: shipping || '-', tone: 'neutral' };
+}
+
 function calculateImportedOrderTotal(orderItems: any[]): number {
     if (orderItems[0]?.customerName === 'TikTok') {
         return Math.max(0, ...orderItems.map(entry => parseMarketplaceNumber(entry.totalAmount)));
@@ -308,6 +361,7 @@ export default function EcommerceExportPage() {
 
     const [ecommerceExports, setEcommerceExports] = useState<EcommerceExport[]>([]);
     const [products, setProducts] = useState<Product[]>([]);
+    const productsLoadInFlightRef = useRef<Promise<void> | null>(null);
     const [loading, setLoading] = useState(false);
     const [saving, setSaving] = useState(false);
     const [hasMoreExports, setHasMoreExports] = useState(false);
@@ -358,7 +412,7 @@ export default function EcommerceExportPage() {
     const alertBufRef = useRef<AudioBuffer | null>(null);
 
     // 🔍 State cho bộ lọc trạng thái
-    const [statusFilter, setStatusFilter] = useState<'all' | 'pending' | 'completed' | 'overdue' | 'mismatch' | 'cancelled'>('all');
+    const [statusFilter, setStatusFilter] = useState<'all' | 'pending' | 'completed' | 'overdue' | 'mismatch' | 'cancelled'>('pending');
 
     // 🚫 Danh sách tracking ID scan nhưng không có trong data
     const [unmatchedScans, setUnmatchedScans] = useState<{ trackingId: string; scannedAt: string }[]>([]);
@@ -407,7 +461,6 @@ export default function EcommerceExportPage() {
         window.addEventListener('click', resumeCtx, { once: true });
         window.addEventListener('keydown', resumeCtx, { once: true });
 
-        loadProducts();
         loadPackerEmployees();
 
         // Load telegram settings from database
@@ -598,23 +651,26 @@ export default function EcommerceExportPage() {
 
         if (currentStatus === 'completed') {
             base.statusIn = ['completed'];
-            base.limit = base.limit || 500;
+            base.limit = base.limit || 200;
             base.sinceField = 'completedAt';
             base.since = dayjs().startOf('day').toISOString();
         } else if (currentStatus === 'cancelled') {
             base.statusIn = ['cancelled'];
-            base.limit = base.limit || 500;
+            base.limit = base.limit || 200;
             delete base.until;
         } else if (currentStatus === 'overdue') {
             // Một tab "Đơn trễ" duy nhất: gồm đơn quá SLA và đơn không còn trong file mới.
             base.statusIn = ['pending', 'mismatch'];
-            base.limit = base.limit || 500;
+            base.operationalState = 'overdue';
+            base.limit = base.limit || 200;
             delete base.until;
         } else if (currentStatus === 'all') {
-            base.limit = base.limit || 1000;
+            base.limit = base.limit || 200;
         } else {
             base.statusIn = ['pending'];
-            base.limit = base.limit || 1000;
+            // Lọc ngay ở database thay vì tải cả đơn pending quá hạn rồi bỏ ở renderer.
+            base.operationalState = 'active';
+            base.limit = base.limit || 200;
             delete base.until;
         }
 
@@ -731,15 +787,30 @@ export default function EcommerceExportPage() {
         loadEcommerceExports();
     };
 
-    const loadProducts = async () => {
-        try {
-            const result = await window.electronAPI.products.getAll();
-            if (result.success && result.data) {
-                setProducts(result.data);
+    const loadProducts = () => {
+        if (products.length > 0) return Promise.resolve();
+        if (productsLoadInFlightRef.current) return productsLoadInFlightRef.current;
+
+        let request: Promise<void>;
+        request = (async () => {
+            try {
+                const productApi = window.electronAPI.products;
+                const result = productApi.getCatalogForSale
+                    ? await productApi.getCatalogForSale()
+                    : await productApi.getAll();
+                if (result.success && result.data) {
+                    setProducts(result.data);
+                }
+            } catch (error) {
+                message.error('Lỗi khi tải sản phẩm');
             }
-        } catch (error) {
-            message.error('Lỗi khi tải sản phẩm');
-        }
+        })().finally(() => {
+            if (productsLoadInFlightRef.current === request) {
+                productsLoadInFlightRef.current = null;
+            }
+        });
+        productsLoadInFlightRef.current = request;
+        return request;
     };
 
     const handleAdd = () => {
@@ -759,11 +830,13 @@ export default function EcommerceExportPage() {
     const handleMethodSelect = (method: 'manual' | 'excel') => {
         setMethodModalVisible(false);
         if (method === 'manual') {
+            void loadProducts();
             setModalVisible(true);
         }
     };
 
     const handleEdit = (ecommerceExportRecord: EcommerceExport) => {
+        void loadProducts();
         setEditingEcommerceExport(ecommerceExportRecord);
         form.setFieldsValue({
             ...ecommerceExportRecord,
@@ -2273,20 +2346,25 @@ Thời gian: ${currentTime}`;
             title: 'Thời gian tạo đơn hàng',
             dataIndex: 'orderPlacedAt',
             key: 'orderPlacedAt',
-            width: 150,
+            width: 118,
             className: 'ecommerce-cell ecommerce-cell--date',
             render: (_date, record) => {
                 const parsed = dayjs(getOrderCreatedAt(record));
                 // Kiểm tra xem có thời gian cụ thể không (giờ/phút/giây khác 00:00:00)
                 const hasTime = parsed.format('HH:mm:ss') !== '00:00:00';
-                return hasTime ? parsed.format('DD/MM/YYYY HH:mm') : parsed.format('DD/MM/YYYY');
+                return (
+                    <div className="ecommerce-order-time">
+                        <span>{parsed.format('DD/MM/YYYY')}</span>
+                        {hasTime && <span>{parsed.format('HH:mm')}</span>}
+                    </div>
+                );
             },
         },
         {
             title: 'Nguồn',
             dataIndex: 'customerName',
             key: 'customerName',
-            width: 90,
+            width: 65,
             align: 'center' as const,
             className: 'ecommerce-cell ecommerce-cell--source',
             render: (name) => {
@@ -2297,7 +2375,7 @@ Thời gian: ${currentTime}`;
                             style={{
                                 background: 'linear-gradient(135deg, #ee4d2d 0%, #ff6b35 100%)',
                                 color: '#fff',
-                                padding: '4px 6px',
+                                padding: '3px 6px',
                                 borderRadius: 6,
                                 fontSize: 10,
                                 fontWeight: 700,
@@ -2317,7 +2395,7 @@ Thời gian: ${currentTime}`;
                             style={{
                                 background: 'linear-gradient(135deg, #000000 0%, #ff0050 50%, #00f2ea 100%)',
                                 color: '#fff',
-                                padding: '4px 6px',
+                                padding: '3px 6px',
                                 borderRadius: 6,
                                 fontSize: 10,
                                 fontWeight: 700,
@@ -2339,7 +2417,7 @@ Thời gian: ${currentTime}`;
             title: 'Mã đơn / Mã vận đơn',
             dataIndex: 'orderNumber',
             key: 'orderTracking',
-            width: 180,
+            width: 150,
             className: 'ecommerce-cell ecommerce-cell--order',
             render: (orderNumber, record) => {
                 const tracking = getUsableTracking(record) || '-';
@@ -2354,18 +2432,13 @@ Thời gian: ${currentTime}`;
                 };
 
                 return (
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                    <div className="ecommerce-order-codes">
                         {/* Order ID - dòng trên */}
                         <div style={{ fontSize: 11, color: '#8c8c8c' }}>
                             {orderNumber ? (
                                 <Tag
                                     color="blue"
-                                    style={{
-                                        fontSize: 11,
-                                        padding: '0 6px',
-                                        cursor: 'pointer',
-                                        userSelect: 'none'
-                                    }}
+                                    style={{ cursor: 'pointer', userSelect: 'none' }}
                                     onDoubleClick={() => handleCopy(orderNumber, 'mã đơn')}
                                     title="Nhấp đúp để sao chép"
                                 >
@@ -2380,12 +2453,7 @@ Thời gian: ${currentTime}`;
                             {tracking !== '-' ? (
                                 <Tag
                                     color="orange"
-                                    style={{
-                                        fontSize: 11,
-                                        padding: '0 6px',
-                                        cursor: 'pointer',
-                                        userSelect: 'none'
-                                    }}
+                                    style={{ cursor: 'pointer', userSelect: 'none' }}
                                     onDoubleClick={() => handleCopy(tracking, 'mã vận đơn')}
                                     title="Nhấp đúp để sao chép"
                                 >
@@ -2402,7 +2470,7 @@ Thời gian: ${currentTime}`;
         {
             title: 'Tên sản phẩm',
             key: 'productName',
-            width: 200,
+            width: 160,
             ellipsis: true,
             className: 'ecommerce-cell ecommerce-cell--product',
             render: (_, record) => {
@@ -2412,25 +2480,17 @@ Thời gian: ${currentTime}`;
                 const firstItem = parsed[0];
 
                 return (
-                    <span
-                        title={firstItem.productName}
-                        style={{
-                            display: 'block',
-                            overflow: 'hidden',
-                            textOverflow: 'ellipsis',
-                            whiteSpace: 'nowrap',
-                            maxWidth: '180px'
-                        }}
-                    >
-                        {firstItem.productName || '-'}
-                    </span>
+                    <div className="ecommerce-product-summary" title={firstItem.productName}>
+                        <span>{firstItem.productName || '-'}</span>
+                        {firstItem.color && <small>{firstItem.color}</small>}
+                    </div>
                 );
             },
         },
         {
             title: 'SKU',
             key: 'skuCount',
-            width: 80,
+            width: 60,
             align: 'center' as const,
             className: 'ecommerce-cell ecommerce-cell--sku',
             render: (_, record) => {
@@ -2442,6 +2502,17 @@ Thời gian: ${currentTime}`;
                     return <Tag color="red" style={{ fontWeight: 700, fontSize: 12 }}>{count} SKU</Tag>;
                 }
                 return <Tag color="green" style={{ fontWeight: 700, fontSize: 12 }}>1 SKU</Tag>;
+            },
+        },
+        {
+            title: 'SL',
+            key: 'quantity',
+            width: 40,
+            align: 'center' as const,
+            className: 'ecommerce-cell ecommerce-cell--quantity',
+            render: (_, record) => {
+                const totalQuantity = getParsedItems(record).reduce((sum, item) => sum + Number(item.quantity || 0), 0);
+                return <span className="ecommerce-quantity">{totalQuantity || '-'}</span>;
             },
         },
         {
@@ -2474,47 +2545,57 @@ Thời gian: ${currentTime}`;
             },
         },
         {
-            title: 'Tổng tiền',
+            title: 'Tiền thu',
             dataIndex: 'totalAmount',
             key: 'totalAmount',
-            width: 120,
+            width: 80,
             align: 'right',
             className: 'ecommerce-cell ecommerce-cell--amount',
             render: (amount) => (
                 <span style={{ fontWeight: 600, whiteSpace: 'nowrap', display: 'inline-block' }}>
-                    {amount.toLocaleString('vi-VN')} VND
+                    {amount.toLocaleString('vi-VN')} đ
                 </span>
             ),
         },
         {
-            title: 'Đơn vị vận chuyển',
+            title: 'DVVC',
             dataIndex: 'notes',
             key: 'shippingProvider',
-            width: 130,
+            width: 80,
             className: 'ecommerce-cell ecommerce-cell--shipping',
             render: (notes) => {
-                if (!notes) return <span style={{ color: '#bfbfbf' }}>-</span>;
-                const shippingMatch = notes.match(/Shipping: ([^|]+)/);
-                const shipping = shippingMatch ? shippingMatch[1].trim() : 'N/A';
-                return <Tag color="green">{shipping}</Tag>;
+                const shipping = getShippingProvider(notes);
+                if (!shipping) return <span style={{ color: '#bfbfbf' }}>-</span>;
+                const carrier = getCarrierPresentation(shipping);
+                return (
+                    <div className="ecommerce-carrier" title={shipping}>
+                        <span className={`ecommerce-carrier__logo ecommerce-carrier__logo--${carrier.tone}`}>{carrier.code}</span>
+                        <span>{carrier.name}</span>
+                    </div>
+                );
             },
         },
         {
-            title: 'Hạn gửi hàng',
+            title: 'Tình trạng hạn gửi',
             dataIndex: 'slaDeadlineAt',
             key: 'slaDeadlineAt',
-            width: 145,
+            width: 125,
+            className: 'ecommerce-cell ecommerce-cell--sla',
             render: (value, record) => {
-                if (!value) return <span style={{ color: '#bfbfbf' }}>Chưa có</span>;
-                const late = record.status === 'pending' && dayjs(value).valueOf() < slaNow;
-                return <Tag color={late ? 'error' : 'blue'}>{dayjs(value).format('DD/MM HH:mm')}</Tag>;
+                const sla = getSlaPresentation(value, slaNow);
+                return (
+                    <div className={`ecommerce-sla ecommerce-sla--${sla.tone}`}>
+                        <span className="ecommerce-sla__badge"><ClockCircleOutlined />{sla.label}</span>
+                        {sla.deadline && <small>Hạn: {sla.deadline}</small>}
+                    </div>
+                );
             },
         },
         {
             title: 'Trạng thái',
             dataIndex: 'status',
             key: 'status',
-            width: 120,
+            width: 90,
             className: 'ecommerce-cell ecommerce-cell--status',
             render: (value, record) => {
                 if (value === 'mismatch') return <Tag color="error">ĐƠN TRỄ</Tag>;
@@ -2531,7 +2612,7 @@ Thời gian: ${currentTime}`;
         {
             title: '',
             key: 'actions',
-            width: 100,
+            width: 34,
             fixed: 'right',
             className: 'ecommerce-cell ecommerce-cell--actions',
             render: (_, record) => {
@@ -2554,30 +2635,32 @@ Thời gian: ${currentTime}`;
                     });
                 }
 
-                if (menuItems.length === 0) return <span style={{ color: '#bfbfbf' }}>-</span>;
+                if (menuItems.length === 0) return <MoreOutlined className="ecommerce-action-placeholder" />;
 
                 return (
                     <Dropdown getPopupContainer={getEcommercePopupContainer} menu={{ items: menuItems }} trigger={['click']}>
-                        <Button size="small">
-                            Xem thêm <MoreOutlined />
-                        </Button>
+                        <Button type="text" size="small" className="ecommerce-more-button" icon={<MoreOutlined />} aria-label="Xem thao tác" />
                     </Dropdown>
                 );
             },
         },
     ];
 
-    // Keep the SLA deadline beside the order-created time in every tab so the
-    // operator can compare the two timestamps without scanning across the row.
-    const displayedColumns: ColumnsType<EcommerceExport> = (() => {
-        const deadlineColumn = columns.find(column => column.key === 'slaDeadlineAt');
-        if (!deadlineColumn) return columns;
-        return [
-            columns[0],
-            deadlineColumn,
-            ...columns.slice(1).filter(column => column !== deadlineColumn),
-        ];
-    })();
+    // Compact operational order from the selected design. Variation remains
+    // visible as the second product line instead of consuming a full column.
+    const displayedColumns: ColumnsType<EcommerceExport> = [
+        'orderPlacedAt',
+        'slaDeadlineAt',
+        'customerName',
+        'orderTracking',
+        'productName',
+        'skuCount',
+        'quantity',
+        'shippingProvider',
+        'totalAmount',
+        'status',
+        'actions',
+    ].map(key => columns.find(column => column.key === key)).filter(Boolean) as ColumnsType<EcommerceExport>;
 
     const itemColumns: ColumnsType<ExportItem> = [
         {
@@ -2638,7 +2721,7 @@ Thời gian: ${currentTime}`;
     // 🔍 Lọc dữ liệu theo trạng thái + Pre-parse items JSON 1 lần
     // ⚡ useMemo — tránh re-filter + re-parse mỗi lần render
     const filteredEcommerceExports = useMemo(() => {
-        return ecommerceExports.filter(ecommerceExport => {
+        const filtered = ecommerceExports.filter(ecommerceExport => {
             const isLate = ecommerceExport.status === 'pending'
                 && !!ecommerceExport.slaDeadlineAt
                 && dayjs(ecommerceExport.slaDeadlineAt).valueOf() < slaNow;
@@ -2661,6 +2744,14 @@ Thời gian: ${currentTime}`;
 
             return true;
         });
+        if (statusFilter === 'pending' || statusFilter === 'overdue') {
+            return [...filtered].sort((left, right) => {
+                const leftDeadline = left.slaDeadlineAt ? dayjs(left.slaDeadlineAt).valueOf() : Number.MAX_SAFE_INTEGER;
+                const rightDeadline = right.slaDeadlineAt ? dayjs(right.slaDeadlineAt).valueOf() : Number.MAX_SAFE_INTEGER;
+                return leftDeadline - rightDeadline;
+            });
+        }
+        return filtered;
     }, [ecommerceExports, statusFilter, searchKeyword, slaNow]);
 
     useEffect(() => {
@@ -2856,48 +2947,17 @@ Thời gian: ${currentTime}`;
                                     className={`ecommerce-packer-chip ${isActive ? 'ecommerce-packer-chip--active' : ''}`}
                                     key={emp.id}
                                     onClick={() => handleSelectPacker(emp.username)}
-                                    style={{
-                                        display: 'flex', alignItems: 'center', gap: 10,
-                                        padding: isActive ? '8px 20px' : '6px 14px',
-                                        borderRadius: 12, cursor: 'pointer',
-                                        transition: 'all 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275)',
-                                        background: isActive
-                                            ? 'linear-gradient(135deg, #0DD173 0%, #00B159 100%)'
-                                            : '#fff',
-                                        border: isActive ? '3px solid #00C868' : '1px solid #d9d9d9',
-                                        color: isActive ? '#fff' : '#595959',
-                                        boxShadow: isActive ? '0 8px 16px rgba(0, 200, 104, 0.4)' : '0 2px 4px rgba(0,0,0,0.02)',
-                                        transform: isActive ? 'scale(1.08) translateY(-2px)' : (activePacker ? 'scale(0.95)' : 'scale(1)'),
-                                        opacity: activePacker && !isActive ? 0.5 : 1,
-                                    }}
                                 >
-                                    <div style={{
-                                        width: isActive ? 32 : 28, height: isActive ? 32 : 28, borderRadius: '50%',
-                                        background: isActive ? 'rgba(255,255,255,0.25)' : '#f0f0f0',
-                                        display: 'flex', alignItems: 'center', justifyContent: 'center',
-                                        fontSize: isActive ? 15 : 13, fontWeight: 800,
-                                        transition: 'all 0.3s ease',
-                                        color: isActive ? '#fff' : '#8c8c8c',
-                                    }}>
+                                    <div className="ecommerce-packer-avatar">
                                         {shortName?.charAt(0).toUpperCase()}
                                     </div>
-                                    <span style={{ fontWeight: isActive ? 800 : 600, fontSize: isActive ? 15 : 13, letterSpacing: isActive ? 0.5 : 0 }}>
+                                    <span className="ecommerce-packer-name">
                                         {shortName}
                                     </span>
-                                    {isActive && <span style={{ fontSize: 16, textShadow: '0 2px 4px rgba(0,0,0,0.3)' }}>✓</span>}
                                 </div>
                             );
                         })}
                     </div>
-                    {activePacker && (
-                        <div className="ecommerce-active-packer" style={{
-                            display: 'flex', flexDirection: 'column', alignItems: 'flex-end',
-                            background: '#ECFFF3', padding: '6px 12px', borderRadius: 8, border: '1px dashed #A2F0C1'
-                        }}>
-                            <span style={{ fontSize: 10, color: '#00C868', fontWeight: 700, textTransform: 'uppercase' }}>Đang gán cho</span>
-                            <span style={{ fontSize: 15, color: '#00A352', fontWeight: 900 }}>{activePacker}</span>
-                        </div>
-                    )}
                 </div>
             )}
 
@@ -2906,8 +2966,8 @@ Thời gian: ${currentTime}`;
                 className="scan-input-wrap ecommerce-scan-bar"
                 style={{
                     display: 'flex', gap: 10, alignItems: 'center', marginBottom: 8, padding: '8px 14px',
-                    border: activePacker ? '3px solid #00C868' : '2px solid transparent',
-                    background: activePacker ? '#ECFFF3' : 'transparent',
+                    border: '2px solid #1fc51c',
+                    background: activePacker ? '#f3fff7' : '#fff',
                     borderRadius: 12,
                     transition: 'all 0.3s ease',
                     boxShadow: activePacker ? '0 0 15px rgba(0, 200, 104, 0.15)' : 'none'
@@ -2938,15 +2998,15 @@ Thời gian: ${currentTime}`;
                     icon={<ScanOutlined />}
                     onClick={() => handleScan(scanValue)}
                     style={{
-                        background: activePacker ? 'linear-gradient(135deg, #0DD173 0%, #00B159 100%)' : '#bfbfbf',
-                        borderColor: activePacker ? '#00C868' : '#bfbfbf',
+                        background: 'linear-gradient(135deg, #0DD173 0%, #00A95C 100%)',
+                        borderColor: '#00B866',
                         flexShrink: 0, height: 44, paddingInline: 24, fontWeight: 600,
-                        boxShadow: activePacker ? '0 4px 10px rgba(0, 200, 104, 0.3)' : 'none',
+                        boxShadow: '0 4px 10px rgba(0, 184, 102, 0.24)',
                         transition: 'all 0.3s ease',
                         color: activePacker ? '#fff' : '#fff'
                     }}
                 >
-                    {activePacker ? 'QUÉT GÁN ĐƠN' : 'Quét'}
+                    Quét
                 </Button>
             </div>
 
@@ -2976,6 +3036,15 @@ Thời gian: ${currentTime}`;
                 </div>
             )}
 
+            {(statusFilter === 'pending' || statusFilter === 'overdue') && (
+                <div className="ecommerce-priority-bar">
+                    <span><ThunderboltOutlined /> Ưu tiên xử lý</span>
+                    <Text type="secondary">
+                        Đang hiển thị {filteredEcommerceExports.length} đơn {statusFilter === 'pending' ? 'chờ lấy hàng' : 'trễ'}, sắp xếp theo mức độ ưu tiên (quá hạn → sắp quá hạn → còn thời gian)
+                    </Text>
+                </div>
+            )}
+
             {/* Bảng đơn hàng dùng chung cho tất cả bộ lọc, bao gồm Đơn trễ. */}
                 <Card
                     className="ecommerce-table-card"
@@ -2991,10 +3060,14 @@ Thời gian: ${currentTime}`;
                             // ⚡ Dùng indexOf thay vì JSON.parse — nhanh hơn 100x
                             try {
                                 const firstComma = record.items.indexOf('},{');
+                                const slaTone = record.status === 'pending'
+                                    ? getSlaPresentation(record.slaDeadlineAt, slaNow).tone
+                                    : 'unknown';
                                 return [
                                     'ecommerce-table-row',
                                     firstComma !== -1 ? 'multi-sku-row ecommerce-table-row--multi' : '',
                                     `ecommerce-table-row--${record.status || 'pending'}`,
+                                    `ecommerce-table-row--sla-${slaTone}`,
                                     record.status === 'pending' && record.slaDeadlineAt && dayjs(record.slaDeadlineAt).valueOf() < slaNow
                                         ? 'ecommerce-table-row--overdue'
                                         : '',
@@ -3009,7 +3082,7 @@ Thời gian: ${currentTime}`;
                             onChange: (selectedKeys) => {
                                 setSelectedRowKeys(selectedKeys as number[]);
                             },
-                            columnWidth: 50,
+                            columnWidth: 36,
                             getCheckboxProps: (record) => ({
                                 disabled: record.status === 'completed',
                                 name: record.orderNumber || record.ecommerceExportCode || `ecommerceExport-${record.id}`,
@@ -3060,7 +3133,7 @@ Thời gian: ${currentTime}`;
                                 }
                             },
                         }}
-                        scroll={{ x: 1200, scrollToFirstRowOnChange: false }}
+                        scroll={{ x: 1000, scrollToFirstRowOnChange: false }}
                     />
                     {hasMoreExports && (
                         <div style={{ display: 'flex', justifyContent: 'center', paddingTop: 12 }}>

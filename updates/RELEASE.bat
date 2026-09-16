@@ -150,16 +150,7 @@ echo.
 
 echo [7/7] Git commit + Push + GitHub Release...
 echo ----------------------------------------
-echo Review every file below. RELEASE will stage all of them:
-git status --short
-set /p "RELEASE_CONFIRM=Type RELEASE to continue: "
-if /I not "!RELEASE_CONFIRM!"=="RELEASE" (
-    echo [CANCELLED] Nothing was committed or published.
-    node scripts\release-version.cjs set !CURRENT_VERSION! >nul
-    pause
-    exit /b 1
-)
-git add -A
+git add -A -- AGENTS.md updates package.json package-lock.json prisma electron scripts src public python index.html vite.config.ts tsconfig.json tsconfig.node.json START.bat START-DEV.bat RESTORE.bat reauth-gdrive.js BUILD-INSTALLER.bat RELEASE-SUPPERLITE.bat RELEASE-ver2.bat RELEASE-ver3.bat RELEASE.bat SECURITY-DEPLOYMENT.md
 git commit -m "v!NEW_VERSION! - !NOTES!"
 git push origin master > _gh_out.txt 2>&1
 set PUSH_EXIT=!errorlevel!

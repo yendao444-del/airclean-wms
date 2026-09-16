@@ -86,6 +86,15 @@ contextBridge.exposeInMainWorld('electronAPI', {
             return () => electronIpcRenderer.removeListener('mobileScan:device', listener);
         },
     },
+    mobileEvidenceTest: {
+        start: (session) => rawInvoke('mobileEvidence:start', session),
+        stop: () => rawInvoke('mobileEvidence:stop'),
+        onReceived: (callback) => {
+            const listener = (_event, data) => callback(data);
+            electronIpcRenderer.on('mobileEvidence:received', listener);
+            return () => electronIpcRenderer.removeListener('mobileEvidence:received', listener);
+        },
+    },
     // Products
     products: {
         getAll: () => ipcRenderer.invoke('products:getAll'),
@@ -130,6 +139,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     },
     purchases: {
         getAll: (filters) => ipcRenderer.invoke('purchases:getAll', filters),
+        getVatPenaltyReadModel: (filters) => ipcRenderer.invoke('purchases:getVatPenaltyReadModel', filters),
         getVatAlertSummary: () => ipcRenderer.invoke('purchases:getVatAlertSummary'),
         getMyVatPenaltyAlerts: () => ipcRenderer.invoke('purchases:getMyVatPenaltyAlerts'),
         create: (data) => ipcRenderer.invoke('purchases:create', data),
@@ -252,6 +262,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
         uploadEvidenceImage: (payload) => ipcRenderer.invoke('dailyTasks:uploadEvidenceImage', payload),
         validateEvidenceSource: (payload) => ipcRenderer.invoke('dailyTasks:validateEvidenceSource', payload),
         submitEvidence: (payload) => ipcRenderer.invoke('dailyTasks:submitEvidence', payload),
+        startMobileEvidence: (options) => ipcRenderer.invoke('dailyTasks:startMobileEvidence', options),
+        stopMobileEvidence: () => ipcRenderer.invoke('dailyTasks:stopMobileEvidence'),
+        onMobileEvidenceUpdated: (callback) => {
+            const handler = (_event, data) => callback(data);
+            ipcRenderer.on('dailyTasks:mobileEvidenceUpdated', handler);
+            return () => ipcRenderer.removeListener('dailyTasks:mobileEvidenceUpdated', handler);
+        },
         reviewEvidence: (taskId, approved, reviewContext) => ipcRenderer.invoke('dailyTasks:reviewEvidence', taskId, approved, reviewContext),
         requestAssignmentCompletion: (taskId) => ipcRenderer.invoke('dailyTasks:requestAssignmentCompletion', taskId),
         completeRegularTask: (taskId, payload) => ipcRenderer.invoke('dailyTasks:completeRegularTask', taskId, payload),
@@ -352,7 +369,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
     // Returns (TRẢ HÀNG)
     returns: {
-        getAll: () => ipcRenderer.invoke('returns:getAll'),
+        getAll: (args) => ipcRenderer.invoke('returns:getAll', args),
         create: (data) => ipcRenderer.invoke('returns:create', data),
         update: (id, data) => ipcRenderer.invoke('returns:update', id, data),
         updateWorkflow: (id, field, value, expectedUpdatedAt) => ipcRenderer.invoke('returns:updateWorkflow', { id, field, value, expectedUpdatedAt }),
@@ -535,6 +552,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
         detect: (image) => ipcRenderer.invoke('attendance:detect', { image }),
         register: (data) => ipcRenderer.invoke('attendance:register', data),
         getLogs: (filters) => ipcRenderer.invoke('attendance:getLogs', filters),
+        getInitialData: () => ipcRenderer.invoke('attendance:getInitialData'),
+        getLockedPeriodSnapshot: (data) => ipcRenderer.invoke('attendance:getLockedPeriodSnapshot', data),
         getRewardSummary: (periodKey) => ipcRenderer.invoke('attendance:getRewardSummary', periodKey),
         getSalesBonusSummary: (filters) => ipcRenderer.invoke('attendance:getSalesBonusSummary', filters),
         updateLeaveStatus: (data) => ipcRenderer.invoke('attendance:updateLeaveStatus', data),
