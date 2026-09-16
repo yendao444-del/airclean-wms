@@ -245,6 +245,11 @@ export interface ElectronAPI {
     onReceived: (callback: (data: { code: string; employee: string; deviceId: string; status: 'success' | 'fail'; message: string; at: string }) => void) => () => void;
     onDevice: (callback: (data: { deviceId: string; employee?: string; connected: boolean }) => void) => () => void;
   };
+  mobileEvidenceTest: {
+    start: (session: { employee: string; tasks: Array<{ id: string; title: string; category: string; dueTime: string; requiredCount: number }> }) => Promise<{ success: boolean; url: string; address: string; secure: boolean; expiresAt: number; employee: string; tasks: Array<{ id: string; title: string; category: string; dueTime: string; requiredCount: number }> }>;
+    stop: () => Promise<{ success: boolean }>;
+    onReceived: (callback: (data: { id: string; taskId: string; taskTitle: string; requiredCount: number; name: string; mimeType: string; size: number; dataUrl: string; at: string }) => void) => () => void;
+  };
   products: {
     getAll: () => Promise<{
       success: boolean;
@@ -380,6 +385,11 @@ export interface ElectronAPI {
       since?: string;
       limit?: number;
     }) => Promise<{ success: boolean; data?: any[]; error?: string }>;
+    getVatPenaltyReadModel?: (filters?: { since?: string }) => Promise<{
+      success: boolean;
+      data?: any[];
+      error?: string;
+    }>;
     getVatAlertSummary: () => Promise<{
       success: boolean;
       data?: any[];
@@ -812,6 +822,21 @@ export interface ElectronAPI {
       error?: string;
       reauthRequired?: boolean;
     }>;
+    startMobileEvidence: (options?: { targetUsername?: string }) => Promise<{
+      success: boolean;
+      url?: string;
+      secure?: boolean;
+      address?: string;
+      employee?: string;
+      operatedBy?: string | null;
+      taskCount?: number;
+      expiresAt?: number;
+      error?: string;
+    }>;
+    stopMobileEvidence: () => Promise<{ success: boolean; error?: string }>;
+    onMobileEvidenceUpdated: (
+      callback: (data: { taskId: number; submittedAt: string }) => void,
+    ) => () => void;
     reviewEvidence: (
       taskId: number,
       approved: boolean,
@@ -943,6 +968,7 @@ export interface ElectronAPI {
       search?: string;
       statusIn?: string[];
       statusNotIn?: string[];
+      operationalState?: 'active' | 'overdue';
       compact?: boolean;
       skip?: number;
     }) => Promise<{

@@ -389,8 +389,7 @@
 .daily-tasks-hero-row,
 .daily-tasks-title-tools,
 .daily-tasks-main-grid,
-.daily-tasks-list-panel,
-.daily-tasks-history-panel {
+.daily-tasks-list-panel {
     min-width: 0;
 }
 
@@ -407,10 +406,6 @@
     overflow-x: auto;
     overflow-y: hidden;
     scrollbar-width: thin;
-}
-
-.daily-tasks-stats {
-    flex: 0 1 auto;
 }
 
 .daily-tasks-tabs {
@@ -439,11 +434,6 @@
     .daily-tasks-main-grid {
         grid-template-columns: minmax(0, 1fr) !important;
     }
-}
-
-.daily-tasks-history-list {
-    max-height: none;
-    overflow: visible;
 }
 
 @container daily-tasks (max-width: 1100px) {
@@ -494,11 +484,6 @@
         width: 100%;
     }
 
-    .daily-tasks-stats {
-        width: 100%;
-        justify-content: space-between;
-    }
-
     .daily-tasks-add-button {
         flex: 1 1 220px;
     }
@@ -511,15 +496,6 @@
 
     .daily-tasks-title-tools h1 {
         font-size: 20px !important;
-    }
-
-    .daily-tasks-stats {
-        flex-wrap: wrap;
-        gap: 10px !important;
-    }
-
-    .daily-tasks-stats > .ant-space-item:has(.ant-divider) {
-        display: none;
     }
 
     .daily-tasks-tab-group .ant-radio-button-wrapper {
@@ -1215,63 +1191,6 @@
     border-color: #00a85a !important;
 }
 
-.daily-tasks-stats.ant-space {
-    order: 3;
-    width: 100%;
-    display: grid !important;
-    grid-template-columns: repeat(4, minmax(150px, 1fr));
-    gap: 14px !important;
-}
-
-.daily-tasks-stats > .ant-space-item {
-    min-width: 0;
-}
-
-.daily-tasks-stats > .ant-space-item:has(.ant-divider) {
-    display: none;
-}
-
-.daily-task-stat-card {
-    position: relative;
-    min-height: 104px;
-    padding: 16px 18px;
-    overflow: hidden;
-    text-align: left;
-    background: #fff;
-    border: 1px solid var(--daily-line);
-    border-radius: 11px;
-    box-shadow: 0 1px 2px rgba(15, 23, 42, .025);
-}
-
-.daily-task-stat-card::before {
-    content: '';
-    position: absolute;
-    inset: 0 auto 0 0;
-    width: 3px;
-    background: #94a3b8;
-}
-
-.daily-task-stat-card.is-success::before,
-.daily-task-stat-card.is-progress::before {
-    background: #16a34a;
-}
-
-.daily-task-stat-card.is-danger::before {
-    background: #ef4444;
-}
-
-.daily-task-stat-card.is-warning::before {
-    background: #f59e0b;
-}
-
-.daily-task-stat-card > div:last-child {
-    color: var(--daily-muted) !important;
-}
-
-.daily-task-stat-card .ant-progress {
-    margin: 6px 0 0;
-}
-
 .daily-tasks-tabs {
     padding: 8px;
     display: flex;
@@ -1355,6 +1274,22 @@
     border-color: #fecaca;
 }
 
+.daily-task-expired-action {
+    min-height: 34px;
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 0 10px;
+    color: #b91c1c;
+    background: #fef2f2;
+    border: 1px solid #fecaca;
+    border-radius: 8px;
+    font-size: 12px;
+    font-weight: 750;
+    white-space: nowrap;
+    cursor: not-allowed;
+}
+
 .daily-task-overflow-button.ant-btn {
     width: 34px;
     height: 34px;
@@ -1414,10 +1349,6 @@
 }
 
 @container daily-tasks (max-width: 820px) {
-    .daily-tasks-stats.ant-space {
-        grid-template-columns: repeat(2, minmax(140px, 1fr));
-    }
-
     .daily-tasks-tab-tools {
         grid-template-columns: 1fr;
     }
@@ -1476,10 +1407,32 @@
         justify-content: flex-end;
     }
 }
+.daily-tasks-mobile-evidence {
+    display: grid;
+    gap: 16px;
+    padding-top: 8px;
+}
 
-.daily-tasks-panel-status {
+.daily-tasks-mobile-evidence__qr {
+    display: grid;
+    place-items: center;
+    width: fit-content;
+    margin: 0 auto;
+    padding: 14px;
+    border: 1px solid #cfe1d8;
+    border-radius: 18px;
+    background: #fff;
+    box-shadow: 0 12px 34px rgba(7, 84, 57, 0.1);
+}
+
+.daily-tasks-mobile-evidence__copy {
+    display: grid;
+    gap: 4px;
+    text-align: center;
     color: #64748b;
-    font-size: 12px;
-    font-weight: 650;
-    white-space: nowrap;
+}
+
+.daily-tasks-mobile-evidence__copy strong {
+    color: #17362b;
+    font-size: 18px;
 }

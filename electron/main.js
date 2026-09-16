@@ -71,6 +71,16 @@ let mobileScanServer = null;
 let mobileScanSession = null;
 let mobileScanSockets = new Map();
 let mobileScanTunnel = null;
+let mobileEvidenceSession = null;
+let mobileEvidenceTunnel = null;
+
+const MOBILE_EVIDENCE_MAX_SOURCE_BYTES = 15 * 1024 * 1024;
+const MOBILE_EVIDENCE_MAX_IMAGES = 5;
+
+function writeJson(response, statusCode, payload, headers = {}) {
+    response.writeHead(statusCode, { ...headers, 'Content-Type': 'application/json; charset=utf-8' });
+    response.end(JSON.stringify(payload));
+}
 
 function getLanAddress() {
     const interfaces = os.networkInterfaces();
@@ -90,6 +100,122 @@ function startMobileScanServer() {
         if (request.method === 'GET' && url.pathname === '/') {
             response.writeHead(200, { ...headers, 'Content-Type': 'text/html; charset=utf-8' });
             response.end(fs.readFileSync(path.join(__dirname, 'mobile-scanner-test.html')));
+            return;
+        }
+        if (request.method === 'GET' && url.pathname === '/evidence') {
+            response.writeHead(200, { ...headers, 'Content-Type': 'text/html; charset=utf-8' });
+            response.end(fs.readFileSync(path.join(__dirname, 'mobile-evidence-test.html')));
+            return;
+        }
+        if (request.method === 'GET' && url.pathname === '/evidence-session') {
+            const sessionToken = url.searchParams.get('session');
+            if (!mobileEvidenceSession || sessionToken !== mobileEvidenceSession.token || mobileEvidenceSession.expiresAt <= Date.now()) {
+                writeJson(response, 401, { success: false, error: 'Phiên QR không hợp lệ hoặc đã hết hạn.' }, headers);
+                return;
+            }
+            writeJson(response, 200, {
+                success: true,
+                employee: mobileEvidenceSession.employee,
+                tasks: mobileEvidenceSession.tasks.map((task) => ({
+                    ...task,
+                    receivedCount: mobileEvidenceSession.receivedCounts.get(task.id) || 0,
+                })),
+                expiresAt: mobileEvidenceSession.expiresAt,
+            }, headers);
+            return;
+        }
+        if (request.method === 'POST' && url.pathname === '/evidence-upload') {
+            const sessionToken = url.searchParams.get('session');
+            if (!mobileEvidenceSession || sessionToken !== mobileEvidenceSession.token || mobileEvidenceSession.expiresAt <= Date.now()) {
+                request.resume();
+                writeJson(response, 401, { success: false, error: 'Phiên QR không hợp lệ hoặc đã hết hạn.' }, headers);
+                return;
+            }
+            const evidenceSessionAtStart = mobileEvidenceSession;
+            const taskId = String(url.searchParams.get('task') || '');
+            const selectedTask = evidenceSessionAtStart.tasks.find((task) => task.id === taskId);
+            if (!selectedTask) {
+                request.resume();
+                writeJson(response, 404, { success: false, error: 'Công việc không thuộc phiên điện thoại này.' }, headers);
+                return;
+            }
+            const currentTaskCount = evidenceSessionAtStart.receivedCounts.get(taskId) || 0;
+            if (currentTaskCount >= MOBILE_EVIDENCE_MAX_IMAGES) {
+                request.resume();
+                writeJson(response, 409, { success: false, error: `Mỗi công việc thử chỉ nhận tối đa ${MOBILE_EVIDENCE_MAX_IMAGES} ảnh.` }, headers);
+                return;
+            }
+            const mimeType = String(request.headers['content-type'] || '').split(';')[0].trim().toLowerCase();
+            const contentLength = Number(request.headers['content-length'] || 0);
+            if (mimeType !== 'image/jpeg') {
+                request.resume();
+                writeJson(response, 415, { success: false, error: 'Chỉ nhận ảnh JPG/JPEG chụp từ camera.' }, headers);
+                return;
+            }
+            if (contentLength > MOBILE_EVIDENCE_MAX_SOURCE_BYTES) {
+                request.resume();
+                writeJson(response, 413, { success: false, error: 'Ảnh không được vượt quá 15 MB.' }, headers);
+                return;
+            }
+            const chunks = [];
+            let receivedBytes = 0;
+            let tooLarge = false;
+            request.on('data', (chunk) => {
+                receivedBytes += chunk.length;
+                if (receivedBytes > MOBILE_EVIDENCE_MAX_SOURCE_BYTES) {
+                    tooLarge = true;
+                    chunks.length = 0;
+                    return;
+                }
+                if (!tooLarge) chunks.push(chunk);
+            });
+            request.on('end', () => {
+                if (mobileEvidenceSession !== evidenceSessionAtStart || evidenceSessionAtStart.expiresAt <= Date.now()) {
+                    writeJson(response, 409, { success: false, error: 'Phiên điện thoại đã thay đổi hoặc hết hạn trong lúc tải ảnh.' }, headers);
+                    return;
+                }
+                if (tooLarge) {
+                    writeJson(response, 413, { success: false, error: 'Ảnh không được vượt quá 15 MB.' }, headers);
+                    return;
+                }
+                const buffer = Buffer.concat(chunks);
+                const isJpeg = buffer.length >= 4 && buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff;
+                if (!isJpeg) {
+                    writeJson(response, 400, { success: false, error: 'Dữ liệu gửi lên không phải ảnh JPEG hợp lệ.' }, headers);
+                    return;
+                }
+                const latestTaskCount = evidenceSessionAtStart.receivedCounts.get(taskId) || 0;
+                if (latestTaskCount >= MOBILE_EVIDENCE_MAX_IMAGES) {
+                    writeJson(response, 409, { success: false, error: `Mỗi công việc thử chỉ nhận tối đa ${MOBILE_EVIDENCE_MAX_IMAGES} ảnh.` }, headers);
+                    return;
+                }
+                let fileName = 'camera-evidence.jpg';
+                try { fileName = decodeURIComponent(String(request.headers['x-file-name'] || fileName)); } catch { }
+                const receivedCount = latestTaskCount + 1;
+                evidenceSessionAtStart.receivedCounts.set(taskId, receivedCount);
+                const receipt = {
+                    id: crypto.randomBytes(8).toString('hex'),
+                    taskId: selectedTask.id,
+                    taskTitle: selectedTask.title,
+                    requiredCount: selectedTask.requiredCount,
+                    name: fileName.slice(0, 160),
+                    mimeType,
+                    size: buffer.length,
+                    dataUrl: `data:${mimeType};base64,${buffer.toString('base64')}`,
+                    at: new Date().toISOString(),
+                };
+                mainWindow?.webContents.send('mobileEvidence:received', receipt);
+                writeJson(response, 200, {
+                    success: true,
+                    taskId,
+                    receivedCount,
+                    requiredCount: selectedTask.requiredCount,
+                    completed: receivedCount >= selectedTask.requiredCount,
+                }, headers);
+            });
+            request.on('error', () => {
+                if (!response.headersSent) writeJson(response, 400, { success: false, error: 'Kết nối tải ảnh bị gián đoạn.' }, headers);
+            });
             return;
         }
         if (request.method === 'GET' && url.pathname === '/zxing.js') {
@@ -140,6 +266,67 @@ ipcMain.handle('mobileScan:start', async () => {
     });
 });
 ipcMain.handle('mobileScan:stop', () => { mobileScanSession = null; for (const socket of mobileScanSockets.values()) socket.close(1000, 'Phiên đã dừng'); mobileScanSockets.clear(); if (mobileScanTunnel) { mobileScanTunnel.kill(); mobileScanTunnel = null; } return { success: true }; });
+ipcMain.handle('mobileEvidence:start', async (_event, sessionPayload = {}) => {
+    startMobileScanServer();
+    if (mobileEvidenceTunnel) { mobileEvidenceTunnel.kill(); mobileEvidenceTunnel = null; }
+    const employee = String(sessionPayload.employee || 'Nhân viên kiểm thử').slice(0, 80);
+    const sourceTasks = Array.isArray(sessionPayload.tasks) ? sessionPayload.tasks.slice(0, 30) : [];
+    const seenTaskIds = new Set();
+    const testTasks = sourceTasks.map((taskPayload, index) => {
+        const fallbackId = `test-task-${index + 1}`;
+        const id = String(taskPayload?.id || fallbackId).slice(0, 80);
+        if (seenTaskIds.has(id)) throw new Error('Danh sách công việc có mã bị trùng.');
+        seenTaskIds.add(id);
+        return {
+            id,
+            title: String(taskPayload?.title || `Công việc ${index + 1}`).slice(0, 160),
+            category: String(taskPayload?.category || 'Công việc hàng ngày').slice(0, 80),
+            dueTime: String(taskPayload?.dueTime || '20:00').slice(0, 20),
+            requiredCount: Math.max(1, Math.min(MOBILE_EVIDENCE_MAX_IMAGES, Math.floor(Number(taskPayload?.requiredCount) || 1))),
+        };
+    });
+    if (testTasks.length === 0) throw new Error('Phiên điện thoại phải có ít nhất một công việc.');
+    mobileEvidenceSession = {
+        token: crypto.randomBytes(24).toString('base64url'),
+        expiresAt: Date.now() + 8 * 60 * 60 * 1000,
+        employee,
+        tasks: testTasks,
+        receivedCounts: new Map(),
+    };
+    const sessionToken = mobileEvidenceSession.token;
+    const pagePath = `/evidence?session=${encodeURIComponent(sessionToken)}`;
+    const localOrigin = `http://${getLanAddress()}:47821`;
+    const cloudflaredPath = path.join(__dirname, '..', 'node_modules', 'cloudflared', 'bin', process.platform === 'win32' ? 'cloudflared.exe' : 'cloudflared');
+    const sessionInfo = { employee, tasks: testTasks };
+    if (!fs.existsSync(cloudflaredPath)) return { success: true, url: `${localOrigin}${pagePath}`, address: getLanAddress(), secure: false, expiresAt: mobileEvidenceSession.expiresAt, ...sessionInfo };
+    return await new Promise((resolve) => {
+        let settled = false;
+        let tunnelOrigin = '';
+        let tunnelConnected = false;
+        const finish = (origin, secure) => {
+            if (settled) return;
+            settled = true;
+            resolve({ success: true, url: `${origin}${pagePath}`, address: getLanAddress(), secure, expiresAt: mobileEvidenceSession?.expiresAt || Date.now(), ...sessionInfo });
+        };
+        mobileEvidenceTunnel = spawn(cloudflaredPath, ['tunnel', '--protocol', 'http2', '--url', 'http://127.0.0.1:47821', '--no-autoupdate'], { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+        const inspect = (chunk) => {
+            const output = String(chunk);
+            const match = output.match(/https:\/\/[-a-z0-9]+\.trycloudflare\.com/i);
+            if (match) tunnelOrigin = match[0];
+            if (/Registered tunnel connection/i.test(output)) tunnelConnected = true;
+            if (tunnelOrigin && tunnelConnected) setTimeout(() => finish(tunnelOrigin, true), 5000);
+        };
+        mobileEvidenceTunnel.stdout.on('data', inspect); mobileEvidenceTunnel.stderr.on('data', inspect);
+        mobileEvidenceTunnel.on('error', () => finish(localOrigin, false));
+        mobileEvidenceTunnel.on('exit', () => { mobileEvidenceTunnel = null; if (!settled) finish(localOrigin, false); });
+        setTimeout(() => { if (!settled) { mobileEvidenceTunnel?.kill(); mobileEvidenceTunnel = null; finish(localOrigin, false); } }, 20000);
+    });
+});
+ipcMain.handle('mobileEvidence:stop', () => {
+    mobileEvidenceSession = null;
+    if (mobileEvidenceTunnel) { mobileEvidenceTunnel.kill(); mobileEvidenceTunnel = null; }
+    return { success: true };
+});
 let pythonProcess = null;
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
 
@@ -596,9 +783,11 @@ app.whenReady().then(() => {
 
 app.on('window-all-closed', () => {
     mobileScanSession = null;
+    mobileEvidenceSession = null;
     for (const socket of mobileScanSockets.values()) socket.close(1000, 'Ứng dụng đã đóng');
     mobileScanSockets.clear();
     if (mobileScanTunnel) { mobileScanTunnel.kill(); mobileScanTunnel = null; }
+    if (mobileEvidenceTunnel) { mobileEvidenceTunnel.kill(); mobileEvidenceTunnel = null; }
     mobileScanServer?.close();
     mobileScanServer = null;
     stopPythonService();

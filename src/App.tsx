@@ -969,6 +969,7 @@ function SessionUpdateGate({ children }: { children: React.ReactNode }) {
     const isUpdateUiPreview = import.meta.env.DEV && new URLSearchParams(window.location.search).has('updateUiTest');
     const isNotificationUiPreview = import.meta.env.DEV && new URLSearchParams(window.location.search).has('notificationUiTest');
     const isAttendanceUiPreview = import.meta.env.DEV && new URLSearchParams(window.location.search).has('attendanceUiTest');
+    if (import.meta.env.DEV && !isUpdateUiPreview) return <>{children}</>;
     if (isNotificationUiPreview || isAttendanceUiPreview) return <>{children}</>;
     return isAuthenticated || isUpdateUiPreview ? <ForceUpdateGate>{children}</ForceUpdateGate> : <>{children}</>;
 }

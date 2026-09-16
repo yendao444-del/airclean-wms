@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import dayjs from 'dayjs';
+import { useAuth } from '../contexts/AuthContext';
 
 interface TickerAlert {
     key: string;
@@ -19,6 +20,7 @@ const PAUSE_BETWEEN_CYCLES = 20 * 60 * 1000; // 20 phút giữa các vòng
 const PAUSE_BETWEEN_ALERTS = 1500; // 1.5s nghỉ giữa mỗi thông báo
 
 export default function HeaderTaskTicker({ onNavigate }: HeaderTaskTickerProps) {
+    const { user, isRolePreview } = useAuth();
     const [alerts, setAlerts] = useState<TickerAlert[]>([]);
     const [currentIndex, setCurrentIndex] = useState(0);
     const [phase, setPhase] = useState<'scrolling' | 'pausing' | 'sleeping'>('scrolling');
@@ -32,12 +34,18 @@ export default function HeaderTaskTicker({ onNavigate }: HeaderTaskTickerProps) 
     const loadData = useCallback(async () => {
         const result: TickerAlert[] = [];
 
-        try {
-            const taskRes = await (window as any).electronAPI.dailyTasks.list({
+        const [taskRequest, vatRequest] = await Promise.allSettled([
+            (window as any).electronAPI.dailyTasks.list({
                 type: 'assignment',
                 excludeCompleted: true,
                 summary: true,
-            });
+                viewerUsername: isRolePreview ? user?.username : undefined,
+            }),
+            (window as any).electronAPI.purchases.getVatAlertSummary(),
+        ]);
+
+        try {
+            const taskRes = taskRequest.status === 'fulfilled' ? taskRequest.value : null;
             if (taskRes.success && taskRes.data) {
                 const now = dayjs();
                 const urgent = taskRes.data
@@ -70,7 +78,7 @@ export default function HeaderTaskTicker({ onNavigate }: HeaderTaskTickerProps) 
         } catch { }
 
         try {
-            const purRes = await (window as any).electronAPI.purchases.getVatAlertSummary();
+            const purRes = vatRequest.status === 'fulfilled' ? vatRequest.value : null;
             if (purRes.success && purRes.data) {
                 const CUTOFF = dayjs('2026-03-19');
                 const now = dayjs();
@@ -106,7 +114,7 @@ export default function HeaderTaskTicker({ onNavigate }: HeaderTaskTickerProps) 
         setAlerts(result);
         setCurrentIndex(0);
         setPhase('scrolling');
-    }, []);
+    }, [isRolePreview, user?.username]);
 
     // ⚡ Delay 10s lần đầu để Dashboard load xong, sau đó poll mỗi 5 phút
     useEffect(() => {

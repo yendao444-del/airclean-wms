@@ -126,12 +126,6 @@ for %%F in ("!PATCH_ZIP_PATH!") do (
 
 echo [8/8] Publish release...
 echo.
-echo Review the release source files below. tmp, qa and design output are excluded:
-git status --short -- AGENTS.md updates package.json package-lock.json prisma electron scripts src public index.html vite.config.ts tsconfig.json tsconfig.node.json START.bat START-DEV.bat RESTORE.bat reauth-gdrive.js python\BUILD_FACE_SERVICE.md "Tai lieu\NHAT_KY_AUDIT_HIEU_NANG.md" BUILD-INSTALLER.bat RELEASE-SUPPERLITE.bat RELEASE-ver2.bat RELEASE-ver3.bat RELEASE.bat SECURITY-DEPLOYMENT.md
-echo.
-set /p "RELEASE_CONFIRM=Type RELEASE to commit, push and publish v!NEW_VERSION!: "
-if /I not "!RELEASE_CONFIRM!"=="RELEASE" goto release_cancelled
-
 rem Stage only application and release sources. Never include tmp, qa or generated design files.
 git add -A -- AGENTS.md updates package.json package-lock.json prisma electron scripts src public index.html vite.config.ts tsconfig.json tsconfig.node.json START.bat START-DEV.bat RESTORE.bat reauth-gdrive.js python\BUILD_FACE_SERVICE.md "Tai lieu\NHAT_KY_AUDIT_HIEU_NANG.md" BUILD-INSTALLER.bat RELEASE-SUPPERLITE.bat RELEASE-ver2.bat RELEASE-ver3.bat RELEASE.bat SECURITY-DEPLOYMENT.md
 if errorlevel 1 goto release_failed
@@ -149,13 +143,6 @@ echo.
 echo PRISMA PATCH COMPLETED: v!NEW_VERSION! (~!FILE_SIZE_MB! MB)
 pause
 exit /b 0
-
-:release_cancelled
-echo [CANCELLED] ZIP was kept locally and nothing was published.
-rmdir /S /Q "!PATCH_TEMP!" 2>nul
-if "!VERSION_CHANGED!"=="1" call node scripts\release-version.cjs set !CURRENT_VERSION! >nul
-pause
-exit /b 1
 
 :release_failed
 echo.

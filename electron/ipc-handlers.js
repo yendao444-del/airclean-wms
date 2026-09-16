@@ -277,8 +277,10 @@ const {
 } = require("./ecommerce-sla");
 const https = require("https");
 const http = require("http");
+const os = require("os");
 const crypto = require("crypto");
 const zlib = require("zlib");
+const { spawn } = require("child_process");
 
 function getEvidenceStorageConfigPath() {
   return path.join(app.getPath("userData"), "supabase-storage.json");
@@ -2296,8 +2298,6 @@ if (!DATA_SAFETY_MODE) {
 // ========================================
 // SYSTEM INFO
 // ========================================
-
-const os = require("os");
 
 const ATTENDANCE_DEVICE_FILE = "attendance-device-identity.json";
 const ATTENDANCE_APPROVED_NETWORKS_KEY = "attendanceApprovedNetworks";
@@ -6505,6 +6505,119 @@ function generateVatIdFromFile(fileName = "", fileSize = 0) {
   return `VAT-${digest}`;
 }
 
+// Compact read model used by Attendance fine reconciliation. It avoids
+// purchase line/product payloads, invoice files and import receipts; the
+// general purchases:getAll endpoint remains unchanged for the full screen.
+ipcMain.handle("purchases:getVatPenaltyReadModel", async (event, { since } = {}) => {
+  try {
+    const startedAt = Date.now();
+    requireRole("admin", "manager");
+    if (!prisma) throw new Error("Prisma not available");
+    const [vatGroups, vatFileMeta, purchaseItemCompanies, purchaseCompanyVat, goodsCompanies, purchases] = await Promise.all([
+      getPurchaseVatGroups(),
+      getPurchaseVatFileMeta(),
+      getPurchaseItemCompanies(),
+      getPurchaseCompanyVat(),
+      readGoodsCompanies(),
+      prisma.purchaseOrder.findMany({
+        where: {
+          status: { not: "cancelled" },
+          ...(since ? { createdAt: { gte: new Date(since) } } : {}),
+        },
+        select: {
+          id: true,
+          poNumber: true,
+          createdBy: true,
+          receivedAt: true,
+          createdAt: true,
+          vatInvoiceStatus: true,
+          vatInvoiceNumber: true,
+          vatInvoiceDate: true,
+          vatInvoiceFile: true,
+          vatInvoiceDriveUrl: true,
+          supplier: { select: { name: true } },
+          items: { select: { id: true, productId: true, variantSku: true } },
+        },
+        orderBy: { createdAt: "desc" },
+      }),
+    ]);
+
+    const goodsCompanyByProductId = new Map();
+    goodsCompanies.forEach((company) => {
+      (Array.isArray(company.productIds) ? company.productIds : []).forEach((productId) => {
+        goodsCompanyByProductId.set(Number(productId), company);
+      });
+    });
+    const vatGroupByPurchaseId = new Map();
+    Object.entries(vatGroups || {}).forEach(([groupId, group]) => {
+      (Array.isArray(group?.purchaseIds) ? group.purchaseIds : []).forEach((purchaseId) => {
+        vatGroupByPurchaseId.set(Number(purchaseId), { id: groupId, group });
+      });
+    });
+
+    const formatted = purchases.map((purchase) => {
+      const itemCompanyMap = purchaseItemCompanies[String(purchase.id)] || {};
+      const byItemId = itemCompanyMap.byItemId || {};
+      const requiredCompanies = [...new Set(purchase.items.map((item) => {
+        const explicit = byItemId[getPurchaseItemCompanyKey(item)]
+          || itemCompanyMap[getPurchaseItemCompanyKey({ ...item, id: null })];
+        const catalogCompany = goodsCompanyByProductId.get(Number(item.productId));
+        return repairLegacyCompanyName(explicit || catalogCompany?.name) || "";
+      }).filter((company) => company && normalizeSearchText(company) !== normalizeSearchText("Chưa chọn công ty")))];
+
+      const groupMeta = vatGroupByPurchaseId.get(Number(purchase.id));
+      const group = groupMeta?.group || null;
+      const fileMeta = vatFileMeta[String(purchase.id)] || {};
+      const storedVat = purchaseCompanyVat[String(purchase.id)] || {};
+      const companyVatByGroup = Object.fromEntries(Object.entries(storedVat).map(([company, vat]) => {
+        const driveUrls = Array.isArray(vat?.driveUrls)
+          ? vat.driveUrls.filter(Boolean)
+          : String(vat?.driveUrls || "").split("\n").filter(Boolean);
+        const isLocalOnlyUpload = vat?.status === "uploaded" && driveUrls.length === 0;
+        return [repairLegacyCompanyName(company), {
+          ...vat,
+          driveUrls,
+          status: isLocalOnlyUpload ? "pending" : vat?.status,
+          needsReupload: isLocalOnlyUpload,
+        }];
+      }));
+      const hasLegacyVat = ["uploaded", "verified"].includes(String(purchase.vatInvoiceStatus || "").toLowerCase())
+        || Boolean(purchase.vatInvoiceNumber || purchase.vatInvoiceFile || purchase.vatInvoiceDriveUrl || fileMeta.vatId)
+        || Boolean(group?.vatInvoiceFile || group?.vatInvoiceNumber || group?.vatInvoiceDriveUrl);
+      if (requiredCompanies.length === 1 && !companyVatByGroup[requiredCompanies[0]] && hasLegacyVat) {
+        companyVatByGroup[requiredCompanies[0]] = {
+          status: "uploaded",
+          invoiceNumber: purchase.vatInvoiceNumber || group?.vatInvoiceNumber || fileMeta.vatId || null,
+          invoiceDate: purchase.vatInvoiceDate || group?.vatInvoiceDate || null,
+          driveUrls: purchase.vatInvoiceDriveUrl
+            ? String(purchase.vatInvoiceDriveUrl).split("\n").filter(Boolean)
+            : group?.vatInvoiceDriveUrl ? String(group.vatInvoiceDriveUrl).split("\n").filter(Boolean) : [],
+        };
+      }
+      const recoverableLegacyVat = String(purchase.vatInvoiceStatus || "").toLowerCase() === "pending"
+        && Boolean(purchase.vatInvoiceFile || purchase.vatInvoiceDriveUrl || fileMeta.vatId);
+      return {
+        id: purchase.id,
+        poNumber: purchase.poNumber,
+        supplierName: purchase.supplier?.name,
+        createdBy: purchase.createdBy,
+        createdAt: purchase.createdAt?.toISOString?.() || null,
+        purchaseDate: (purchase.receivedAt || purchase.createdAt)?.toISOString?.() || null,
+        vatInvoiceStatus: recoverableLegacyVat ? "uploaded" : purchase.vatInvoiceStatus,
+        vatGroupId: groupMeta?.id || null,
+        vatGroupHasVat: Boolean(group?.vatInvoiceFile),
+        companyVatByGroup,
+        vatRequiredCompanies: requiredCompanies,
+      };
+    });
+    console.log(`[Perf] purchases:getVatPenaltyReadModel rows=${formatted.length} bytes=${Buffer.byteLength(JSON.stringify(formatted))} ms=${Date.now() - startedAt}`);
+    return { success: true, data: formatted };
+  } catch (error) {
+    console.error("❌ Get VAT penalty read model error:", error);
+    return { success: false, error: error.message };
+  }
+});
+
 // Get all purchases
 ipcMain.handle("purchases:getAll", async (event, { since, limit } = {}) => {
   try {
@@ -6947,17 +7060,54 @@ ipcMain.handle("handlingUnits:exportLabelsPdf", async (event, payload = {}) => {
   }
 });
 
+let attendancePackingCatalogCache = null;
+let attendancePackingCatalogInFlight = null;
+
+async function getAttendancePackingCatalogSnapshot() {
+  if (attendancePackingCatalogInFlight) return attendancePackingCatalogInFlight;
+  const request = (async () => {
+    const [productRevision, comboRevision] = await Promise.all([
+      prisma.product.aggregate({ _count: { id: true }, _max: { updatedAt: true } }),
+      prisma.comboProduct.aggregate({ _count: { id: true }, _max: { updatedAt: true } }),
+    ]);
+    const revision = [
+      productRevision._count.id,
+      productRevision._max.updatedAt?.toISOString() || "none",
+      comboRevision._count.id,
+      comboRevision._max.updatedAt?.toISOString() || "none",
+    ].join(":");
+    if (attendancePackingCatalogCache?.revision === revision) {
+      return { ...attendancePackingCatalogCache, cached: true };
+    }
+    const [products, combos] = await Promise.all([
+      prisma.product.findMany({
+        select: { sku: true, name: true, variants: true },
+        orderBy: { createdAt: "desc" },
+      }),
+      prisma.comboProduct.findMany({
+        select: { id: true, sku: true, name: true, items: true, status: true },
+        orderBy: { createdAt: "desc" },
+      }),
+    ]);
+    attendancePackingCatalogCache = { revision, products, combos };
+    return { ...attendancePackingCatalogCache, cached: false };
+  })();
+  attendancePackingCatalogInFlight = request;
+  try {
+    return await request;
+  } finally {
+    if (attendancePackingCatalogInFlight === request) attendancePackingCatalogInFlight = null;
+  }
+}
+
 // Packing payroll only needs SKU identity and variant membership. Avoid
 // transferring stock, pricing and category fields to the Attendance renderer.
 ipcMain.handle("products:getPackingCatalog", async () => {
   try {
     requireRole();
     if (!prisma) throw new Error("Prisma not available");
-    const products = await prisma.product.findMany({
-      select: { sku: true, name: true, variants: true },
-      orderBy: { createdAt: "desc" },
-    });
-    return { success: true, data: products };
+    const snapshot = await getAttendancePackingCatalogSnapshot();
+    return { success: true, data: snapshot.products, cached: snapshot.cached };
   } catch (error) {
     return { success: false, error: error.message };
   }
@@ -17084,6 +17234,13 @@ ipcMain.handle("system:deleteBackup", async (event, backupPath) => {
 // ========================================
 
 const MAX_EVIDENCE_IMAGES = 5;
+const MOBILE_DAILY_EVIDENCE_PORT = 47822;
+const MOBILE_DAILY_EVIDENCE_TTL_MS = 8 * 60 * 60 * 1000;
+const MOBILE_DAILY_EVIDENCE_MAX_TASKS = 30;
+let mobileDailyEvidenceServer = null;
+let mobileDailyEvidenceSession = null;
+let mobileDailyEvidenceTunnel = null;
+let mobileDailyEvidenceSender = null;
 const TASK_PENALTY_KEY_PREFIX = "dailyTaskEvidencePenalty:";
 const ASSIGNMENT_EVIDENCE_PENALTY_KEY_PREFIX = "assignmentEvidencePenalty:";
 const REJECTED_EVIDENCE_PENALTY_KEY_PREFIX = "rejectedEvidencePenalty:";
@@ -17876,10 +18033,10 @@ async function createEvidencePenaltyIfDue(
   now = new Date(),
   knownActiveUsers,
 ) {
-  if (DATA_SAFETY_MODE) return null;
   const attachments = parseTaskAttachments(task.attachments);
   const evidence = attachments.evidence || {};
   if (!evidence.required) return null;
+  if (attachments?.archive?.archived || task.status === "cancelled") return null;
   if (task.type === "assignment")
     return createAssignmentEvidencePenaltyIfDue(task, now, knownActiveUsers);
   if (!task.assignee || !isFixedAssignee(attachments)) return null;
@@ -17919,9 +18076,13 @@ async function createEvidencePenaltyIfDue(
   const baseFine = Math.floor(totalFine / recipients.length);
   const remainder = totalFine % recipients.length;
   const created = [];
-  // Migrate the old single-recipient record before writing split penalties.
+  // Keep legacy rows intact in safety mode. A single-recipient legacy row is
+  // already the correct penalty and must not be duplicated.
   const legacyKey = `${TASK_PENALTY_KEY_PREFIX}${task.id}:${dueKey}`;
-  await prisma.appConfig.deleteMany({ where: { key: legacyKey } });
+  const legacyPenalty = await prisma.appConfig.findUnique({
+    where: { key: legacyKey },
+  });
+  if (legacyPenalty && recipients.length === 1) return [];
 
   for (const [index, assignee] of recipients.entries()) {
     const key = `${TASK_PENALTY_KEY_PREFIX}${task.id}:${dueKey}:${assignee}`;
@@ -18204,7 +18365,6 @@ async function createAssignmentEvidencePenaltyIfDue(
 
 let evidencePenaltyReconcilePromise = null;
 function reconcileEvidencePenalties() {
-  if (DATA_SAFETY_MODE) return Promise.resolve([]);
   // The page loads tasks and penalties in parallel, while a timer also runs
   // every minute. Share one reconciliation to avoid duplicate repair writes.
   if (evidencePenaltyReconcilePromise) return evidencePenaltyReconcilePromise;
@@ -18249,7 +18409,6 @@ function reconcileEvidencePenalties() {
 }
 
 async function reconcileSnapshotEvidencePenalties(now = new Date(), range = {}) {
-  if (DATA_SAFETY_MODE) return [];
   const today = getLocalDateKey(now);
   await cleanupPrematureDailyEvidencePenalties();
   const startDate = /^\d{4}-\d{2}-\d{2}$/.test(String(range.startDate || ""))
@@ -18263,7 +18422,7 @@ async function reconcileSnapshotEvidencePenalties(now = new Date(), range = {}) 
     ...(startDate ? { gte: `dailyTasksSnapshot:${startDate}` } : {}),
     ...(endDate ? { lte: `dailyTasksSnapshot:${endDate}` } : {}),
   };
-  const [snapshotRows, existingPenaltyRows, activeUsers] = await Promise.all([
+  const [snapshotRows, existingPenaltyRows, activeUsers, currentTasks] = await Promise.all([
     prisma.appConfig.findMany({
       where: { key: snapshotKeyFilter },
       select: { key: true, value: true },
@@ -18276,7 +18435,11 @@ async function reconcileSnapshotEvidencePenalties(now = new Date(), range = {}) 
       where: { status: "active" },
       select: { username: true, fullName: true },
     }),
+    prisma.dailyTask.findMany({
+      select: { id: true, attachments: true, status: true },
+    }),
   ]);
+  const currentTaskById = new Map(currentTasks.map((task) => [task.id, task]));
   const existingPenaltyKeys = new Set(
     existingPenaltyRows.map((row) => row.key),
   );
@@ -18295,6 +18458,9 @@ async function reconcileSnapshotEvidencePenalties(now = new Date(), range = {}) 
     }
     for (const task of Array.isArray(snapshot?.tasks) ? snapshot.tasks : []) {
       if ((task?.type || "daily") !== "daily") continue;
+      const currentTask = currentTaskById.get(Number(task?.id));
+      const currentAttachments = parseTaskAttachments(currentTask?.attachments);
+      if (currentAttachments?.archive?.archived || currentTask?.status === "cancelled") continue;
       const dueAt = new Date(task?.dueDate);
       const attachments = parseTaskAttachments(task?.attachments);
       const recipients = getTaskRecipients(task, attachments);
@@ -18456,9 +18622,8 @@ ipcMain.handle("users:forcePasswordChange", async (event, userId) => {
   }
 });
 
-ipcMain.handle("dailyTasks:validateEvidenceSource", async (_event, payload) => {
+async function validateDailyTaskEvidenceSource(actor, payload) {
   try {
-    const actor = await getCurrentActor();
     const task = await prisma.dailyTask.findUnique({
       where: { id: Number(payload?.taskId) },
     });
@@ -18540,14 +18705,17 @@ ipcMain.handle("dailyTasks:validateEvidenceSource", async (_event, payload) => {
     console.error("Validate daily-task evidence source error:", errorMessage);
     return { success: false, error: errorMessage };
   }
-});
+}
 
-ipcMain.handle("dailyTasks:submitEvidence", async (_event, payload) => {
+ipcMain.handle("dailyTasks:validateEvidenceSource", async (_event, payload) =>
+  validateDailyTaskEvidenceSource(await getCurrentActor(), payload),
+);
+
+async function submitDailyTaskEvidence(actor, payload) {
   const uploadedR2Keys = [];
   const imageRegistryEntries = [];
   const reservedValidationTokens = [];
   try {
-    const actor = await getCurrentActor();
     const task = await prisma.dailyTask.findUnique({
       where: { id: Number(payload?.taskId) },
     });
@@ -18783,6 +18951,387 @@ ipcMain.handle("dailyTasks:submitEvidence", async (_event, payload) => {
     console.error("Submit daily-task evidence error:", errorMessage);
     return { success: false, error: errorMessage, reauthRequired: false };
   }
+}
+
+ipcMain.handle("dailyTasks:submitEvidence", async (_event, payload) =>
+  submitDailyTaskEvidence(await getCurrentActor(), payload),
+);
+
+function getMobileDailyEvidenceLanAddress() {
+  for (const entries of Object.values(os.networkInterfaces())) {
+    for (const entry of entries || []) {
+      if (
+        entry.family === "IPv4" &&
+        !entry.internal &&
+        !entry.address.startsWith("169.254.")
+      ) {
+        return entry.address;
+      }
+    }
+  }
+  return "127.0.0.1";
+}
+
+function writeMobileDailyEvidenceJson(response, statusCode, payload) {
+  response.writeHead(statusCode, {
+    "Cache-Control": "no-store",
+    "Content-Type": "application/json; charset=utf-8",
+    "X-Content-Type-Options": "nosniff",
+  });
+  response.end(JSON.stringify(payload));
+}
+
+function readMobileDailyEvidenceBody(request, maxBytes) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let receivedBytes = 0;
+    request.on("data", (chunk) => {
+      receivedBytes += chunk.length;
+      if (receivedBytes > maxBytes) {
+        reject(new Error("Dữ liệu gửi lên vượt quá giới hạn cho phép."));
+        request.destroy();
+        return;
+      }
+      chunks.push(chunk);
+    });
+    request.on("end", () => resolve(Buffer.concat(chunks)));
+    request.on("error", reject);
+  });
+}
+
+async function getMobileDailyEvidenceActor(session) {
+  if (
+    !session ||
+    session.expiresAt <= Date.now() ||
+    !currentSession?.id ||
+    Number(currentSession.id) !== Number(session.ownerUserId)
+  ) {
+    throw new Error("Phiên điện thoại đã hết hạn hoặc tài khoản đã đăng xuất.");
+  }
+  const user = await prisma.user.findUnique({
+    where: { id: session.ownerUserId },
+    select: { id: true, username: true, fullName: true, role: true, status: true },
+  });
+  if (!user || user.status !== "active") {
+    throw new Error("Tài khoản không còn hoạt động.");
+  }
+  return {
+    id: user.id,
+    username: user.username,
+    fullName: user.fullName || user.username,
+    role: user.role,
+  };
+}
+
+async function getMobileDailyEvidenceTargetActor(session) {
+  const user = await prisma.user.findUnique({
+    where: { id: session.targetUserId },
+    select: { id: true, username: true, fullName: true, role: true, status: true },
+  });
+  if (!user || user.status !== "active") {
+    throw new Error("Nhân viên được chọn không còn hoạt động.");
+  }
+  return {
+    id: user.id,
+    username: user.username,
+    fullName: user.fullName || user.username,
+    role: user.role,
+  };
+}
+
+async function listMobileDailyEvidenceTasks(actor, sessionTaskIds = null) {
+  const retainedTaskIds = Array.isArray(sessionTaskIds)
+    ? sessionTaskIds.map(Number).filter(Number.isInteger)
+    : [];
+  const candidates = await prisma.dailyTask.findMany({
+    where: retainedTaskIds.length > 0
+      ? { id: { in: retainedTaskIds } }
+      : { status: { in: ["pending", "in_progress", "overdue"] } },
+    orderBy: [{ dueDate: "asc" }, { id: "asc" }],
+    take: 200,
+  });
+  return candidates
+    .filter((task) => {
+      const attachments = parseTaskAttachments(task.attachments);
+      return (
+        attachments?.evidence?.required &&
+        !attachments?.archive?.archived &&
+        !attachments?.archive?.archivedAt &&
+        task.status !== "cancelled" &&
+        task.assignee &&
+        isFixedAssignee(attachments) &&
+        actorOwnsTask(actor, task)
+      );
+    })
+    .slice(0, MOBILE_DAILY_EVIDENCE_MAX_TASKS)
+    .map((task) => {
+      const attachments = parseTaskAttachments(task.attachments);
+      return {
+        id: task.id,
+        title: task.title,
+        category: task.category || "Công việc hàng ngày",
+        dueAt: task.dueDate.toISOString(),
+        requiredCount: getRequiredEvidenceImageCount(attachments.evidence),
+        completed: task.status === "completed",
+      };
+    });
+}
+
+function getMobileDailyEvidenceSession(requestUrl) {
+  const token = requestUrl.searchParams.get("session");
+  if (
+    !mobileDailyEvidenceSession ||
+    token !== mobileDailyEvidenceSession.token ||
+    mobileDailyEvidenceSession.expiresAt <= Date.now()
+  ) {
+    throw new Error("Phiên QR không hợp lệ hoặc đã hết hạn.");
+  }
+  return mobileDailyEvidenceSession;
+}
+
+function ensureMobileDailyEvidenceServer() {
+  if (mobileDailyEvidenceServer) return;
+  mobileDailyEvidenceServer = http.createServer(async (request, response) => {
+    const requestUrl = new URL(request.url || "/", "http://localhost");
+    try {
+      if (request.method === "GET" && requestUrl.pathname === "/daily-evidence") {
+        response.writeHead(200, {
+          "Cache-Control": "no-store",
+          "Content-Type": "text/html; charset=utf-8",
+          "X-Content-Type-Options": "nosniff",
+        });
+        response.end(
+          fs.readFileSync(path.join(__dirname, "mobile-daily-evidence.html")),
+        );
+        return;
+      }
+
+      const session = getMobileDailyEvidenceSession(requestUrl);
+      const actor = await getMobileDailyEvidenceActor(session);
+      const targetActor = await getMobileDailyEvidenceTargetActor(session);
+      if (request.method === "GET" && requestUrl.pathname === "/daily-evidence/session") {
+        const tasks = await listMobileDailyEvidenceTasks(targetActor, session.taskIds);
+        writeMobileDailyEvidenceJson(response, 200, {
+          success: true,
+          employee: targetActor.fullName,
+          operatedBy: actor.id === targetActor.id ? null : actor.fullName,
+          tasks,
+          expiresAt: session.expiresAt,
+        });
+        return;
+      }
+
+      if (request.method === "POST" && requestUrl.pathname === "/daily-evidence/validate") {
+        const taskId = Number(requestUrl.searchParams.get("task"));
+        const tasks = await listMobileDailyEvidenceTasks(targetActor, session.taskIds);
+        if (!tasks.some((task) => task.id === taskId && !task.completed)) {
+          throw new Error("Công việc không thuộc tài khoản hoặc không còn được phép nộp.");
+        }
+        const mimeType = String(request.headers["content-type"] || "")
+          .split(";")[0]
+          .trim()
+          .toLowerCase();
+        let name = "camera-evidence.jpg";
+        try {
+          name = decodeURIComponent(String(request.headers["x-file-name"] || name));
+        } catch {}
+        const source = await readMobileDailyEvidenceBody(
+          request,
+          MAX_EVIDENCE_SOURCE_BYTES,
+        );
+        const result = await validateDailyTaskEvidenceSource(actor, {
+          taskId,
+          mimeType,
+          name,
+          data: `data:${mimeType};base64,${source.toString("base64")}`,
+        });
+        writeMobileDailyEvidenceJson(response, result.success ? 200 : 400, result);
+        return;
+      }
+
+      if (request.method === "POST" && requestUrl.pathname === "/daily-evidence/submit") {
+        const body = await readMobileDailyEvidenceBody(request, 100 * 1024);
+        let payload;
+        try {
+          payload = JSON.parse(body.toString("utf8"));
+        } catch {
+          throw new Error("Yêu cầu hoàn tất không hợp lệ.");
+        }
+        const taskId = Number(payload?.taskId);
+        const tasks = await listMobileDailyEvidenceTasks(targetActor, session.taskIds);
+        if (!tasks.some((task) => task.id === taskId && !task.completed)) {
+          throw new Error("Công việc không thuộc tài khoản hoặc không còn được phép nộp.");
+        }
+        const result = await submitDailyTaskEvidence(actor, {
+          taskId,
+          images: Array.isArray(payload?.images) ? payload.images : [],
+        });
+        if (result.success) {
+          mobileDailyEvidenceSender?.send("dailyTasks:mobileEvidenceUpdated", {
+            taskId,
+            submittedAt: new Date().toISOString(),
+          });
+        }
+        writeMobileDailyEvidenceJson(response, result.success ? 200 : 400, result);
+        return;
+      }
+
+      writeMobileDailyEvidenceJson(response, 404, {
+        success: false,
+        error: "Không tìm thấy đường dẫn.",
+      });
+    } catch (error) {
+      if (!response.headersSent) {
+        writeMobileDailyEvidenceJson(response, 400, {
+          success: false,
+          error: error?.message || "Không thể xử lý yêu cầu từ điện thoại.",
+        });
+      }
+    }
+  });
+  mobileDailyEvidenceServer.on("error", (error) => {
+    console.error("Mobile daily evidence server error:", error.message);
+  });
+  mobileDailyEvidenceServer.listen(MOBILE_DAILY_EVIDENCE_PORT, "0.0.0.0");
+}
+
+function stopMobileDailyEvidenceSession() {
+  mobileDailyEvidenceSession = null;
+  mobileDailyEvidenceSender = null;
+  if (mobileDailyEvidenceTunnel) {
+    mobileDailyEvidenceTunnel.kill();
+    mobileDailyEvidenceTunnel = null;
+  }
+}
+
+ipcMain.handle("dailyTasks:startMobileEvidence", async (event, options = {}) => {
+  try {
+    const actor = await getCurrentActor();
+    const targetUsername = String(options?.targetUsername || "").trim();
+    let targetActor = actor;
+    if (targetUsername && normalizeActorName(targetUsername) !== normalizeActorName(actor.username)) {
+      if (actor.role !== "admin") {
+        throw new Error("Chỉ admin được tạo phiên kiểm thử cho nhân viên khác.");
+      }
+      const targetUser = await prisma.user.findUnique({
+        where: { username: targetUsername },
+        select: { id: true, username: true, fullName: true, role: true, status: true },
+      });
+      if (!targetUser || targetUser.status !== "active" || targetUser.role === "admin") {
+        throw new Error("Nhân viên được chọn không hợp lệ hoặc không còn hoạt động.");
+      }
+      targetActor = {
+        id: targetUser.id,
+        username: targetUser.username,
+        fullName: targetUser.fullName || targetUser.username,
+        role: targetUser.role,
+      };
+    }
+    const tasks = await listMobileDailyEvidenceTasks(targetActor);
+    if (tasks.length === 0) {
+      throw new Error(`${targetActor.fullName} chưa có công việc nào đang chờ nộp ảnh bằng chứng.`);
+    }
+    ensureMobileDailyEvidenceServer();
+    stopMobileDailyEvidenceSession();
+    mobileDailyEvidenceSender = event.sender;
+    mobileDailyEvidenceSession = {
+      token: crypto.randomBytes(32).toString("base64url"),
+      ownerUserId: actor.id,
+      targetUserId: targetActor.id,
+      taskIds: tasks.map((task) => task.id),
+      expiresAt: Date.now() + MOBILE_DAILY_EVIDENCE_TTL_MS,
+    };
+    const token = mobileDailyEvidenceSession.token;
+    const pagePath = `/daily-evidence?session=${encodeURIComponent(token)}`;
+    const lanAddress = getMobileDailyEvidenceLanAddress();
+    const localOrigin = `http://${lanAddress}:${MOBILE_DAILY_EVIDENCE_PORT}`;
+    const sessionInfo = {
+      employee: targetActor.fullName,
+      operatedBy: actor.id === targetActor.id ? null : actor.fullName,
+      taskCount: tasks.length,
+      expiresAt: mobileDailyEvidenceSession.expiresAt,
+      address: lanAddress,
+    };
+    const cloudflaredPath = path.join(
+      __dirname,
+      "..",
+      "node_modules",
+      "cloudflared",
+      "bin",
+      process.platform === "win32" ? "cloudflared.exe" : "cloudflared",
+    );
+    if (!fs.existsSync(cloudflaredPath)) {
+      return {
+        success: true,
+        url: `${localOrigin}${pagePath}`,
+        secure: false,
+        ...sessionInfo,
+      };
+    }
+    return await new Promise((resolve) => {
+      let settled = false;
+      let tunnelOrigin = "";
+      let tunnelConnected = false;
+      const finish = (origin, secure) => {
+        if (settled) return;
+        settled = true;
+        resolve({
+          success: true,
+          url: `${origin}${pagePath}`,
+          secure,
+          ...sessionInfo,
+        });
+      };
+      mobileDailyEvidenceTunnel = spawn(
+        cloudflaredPath,
+        [
+          "tunnel",
+          "--protocol",
+          "http2",
+          "--url",
+          `http://127.0.0.1:${MOBILE_DAILY_EVIDENCE_PORT}`,
+          "--no-autoupdate",
+        ],
+        { windowsHide: true, stdio: ["ignore", "pipe", "pipe"] },
+      );
+      const inspect = (chunk) => {
+        const output = String(chunk);
+        const match = output.match(/https:\/\/[-a-z0-9]+\.trycloudflare\.com/i);
+        if (match) tunnelOrigin = match[0];
+        if (/Registered tunnel connection/i.test(output)) tunnelConnected = true;
+        if (tunnelOrigin && tunnelConnected) {
+          setTimeout(() => finish(tunnelOrigin, true), 3000);
+        }
+      };
+      mobileDailyEvidenceTunnel.stdout.on("data", inspect);
+      mobileDailyEvidenceTunnel.stderr.on("data", inspect);
+      mobileDailyEvidenceTunnel.on("error", () => finish(localOrigin, false));
+      mobileDailyEvidenceTunnel.on("exit", () => {
+        mobileDailyEvidenceTunnel = null;
+        if (!settled) finish(localOrigin, false);
+      });
+      setTimeout(() => {
+        if (settled) return;
+        mobileDailyEvidenceTunnel?.kill();
+        mobileDailyEvidenceTunnel = null;
+        finish(localOrigin, false);
+      }, 20000);
+    });
+  } catch (error) {
+    stopMobileDailyEvidenceSession();
+    return { success: false, error: error?.message || "Không thể tạo phiên điện thoại." };
+  }
+});
+
+ipcMain.handle("dailyTasks:stopMobileEvidence", () => {
+  stopMobileDailyEvidenceSession();
+  return { success: true };
+});
+
+app.on("before-quit", () => {
+  stopMobileDailyEvidenceSession();
+  mobileDailyEvidenceServer?.close();
+  mobileDailyEvidenceServer = null;
 });
 
 ipcMain.handle(
@@ -19490,7 +20039,7 @@ ipcMain.handle("dailyTasks:listEvidencePenalties", async (_event, options = {}) 
 
 ipcMain.handle("dailyTasks:list", async (event, filters = {}) => {
   try {
-    requireRole();
+    const actor = await getCurrentActor();
     const {
       status,
       assignee,
@@ -19502,7 +20051,28 @@ ipcMain.handle("dailyTasks:list", async (event, filters = {}) => {
       summary,
       maintenance,
       includeArchived,
+      viewerUsername,
     } = filters;
+    let visibilityActor = actor;
+    const requestedViewerUsername = String(viewerUsername || "").trim();
+    if (requestedViewerUsername) {
+      if (actor.role !== "admin") {
+        throw new Error("Chỉ admin được dùng chế độ xem quyền.");
+      }
+      const previewUser = await prisma.user.findUnique({
+        where: { username: requestedViewerUsername },
+        select: { id: true, username: true, fullName: true, role: true, status: true },
+      });
+      if (!previewUser || previewUser.status !== "active" || previewUser.role === "admin") {
+        throw new Error("Tài khoản xem thử không hợp lệ hoặc không còn hoạt động.");
+      }
+      visibilityActor = {
+        id: previewUser.id,
+        username: previewUser.username,
+        fullName: previewUser.fullName || previewUser.username,
+        role: previewUser.role,
+      };
+    }
     // Expensive maintenance belongs to the full Daily Tasks screen. Global
     // alerts poll a compact read model and must not start a full DB scan.
     if (maintenance) {
@@ -19565,10 +20135,17 @@ ipcMain.handle("dailyTasks:list", async (event, filters = {}) => {
       orderBy: [{ status: "asc" }, { dueDate: "asc" }],
     });
 
-    const visibleTasks = includeArchived
+    const visibleTasks = (includeArchived
       ? tasks
       : tasks.filter(
-          (task) => !parseTaskAttachments(task.attachments)?.archive?.archivedAt,
+          (task) => {
+            const archive = parseTaskAttachments(task.attachments)?.archive;
+            return !archive?.archivedAt && !archive?.archived;
+          },
+        )).filter((task) =>
+          (!requestedViewerUsername && actor.role === "admin") ||
+          (!requestedViewerUsername && isTestOperatorActor(actor)) ||
+          actorOwnsTask(visibilityActor, task),
         );
 
     return { success: true, data: visibleTasks };
@@ -20758,8 +21335,30 @@ async function pruneDailyTaskSnapshots() {
 
 let dailyTaskMaintenancePromise = null;
 function scheduleDailyTaskMaintenance() {
-  if (DATA_SAFETY_MODE) return;
   if (dailyTaskMaintenancePromise) return;
+
+  if (DATA_SAFETY_MODE) {
+    // Penalty reconciliation is append-only and safe to run while the wider
+    // maintenance jobs remain disabled by data-safety mode.
+    setTimeout(() => {
+      if (dailyTaskMaintenancePromise) return;
+      dailyTaskMaintenancePromise = Promise.allSettled([
+        reconcileSnapshotEvidencePenalties(new Date()),
+        reconcileEvidencePenalties(),
+      ])
+        .then((results) => {
+          results.forEach((result) => {
+            if (result.status === "rejected") {
+              console.error("Daily evidence penalty scan failed:", result.reason);
+            }
+          });
+        })
+        .finally(() => {
+          dailyTaskMaintenancePromise = null;
+        });
+    }, 250);
+    return;
+  }
 
   // Maintenance must not hold up the visible day rollover. The immutable
   // snapshot created by reset keeps yesterday's evidence safe for this scan.
@@ -21194,11 +21793,8 @@ ipcMain.handle("combos:getPackingComponents", async () => {
   try {
     requireRole();
     if (!prisma) throw new Error("Database chưa sẵn sàng.");
-    const data = await prisma.comboProduct.findMany({
-      select: { id: true, sku: true, name: true, items: true, status: true },
-      orderBy: { createdAt: "desc" },
-    });
-    return { success: true, data };
+    const snapshot = await getAttendancePackingCatalogSnapshot();
+    return { success: true, data: snapshot.combos, cached: snapshot.cached };
   } catch (error) {
     return { success: false, error: error.message };
   }
@@ -22280,6 +22876,7 @@ ipcMain.handle(
       search,
       statusIn,
       statusNotIn,
+      operationalState,
       skip,
       compact,
     } = {},
@@ -22315,9 +22912,10 @@ ipcMain.handle(
         statusFilter.notIn = statusNotIn.map((s) => String(s));
       }
 
-      const where = search
-        ? {
-            OR: [
+      const queryFilters = [];
+      if (search) {
+        queryFilters.push({
+          OR: [
               { orderNumber: { contains: trimmedSearch, mode: "insensitive" } },
               {
                 ecommerceExportCode: {
@@ -22331,24 +22929,44 @@ ipcMain.handle(
               { notes: { contains: trimmedSearch, mode: "insensitive" } },
               ...(numericId ? [{ id: numericId }] : []),
             ],
-            ...(Object.keys(statusFilter).length > 0
-              ? { status: statusFilter }
-              : {}),
-          }
-        : {
-            ...(Object.keys(dateFilter).length > 0
-              ? { [field]: dateFilter }
-              : {}),
-            ...(Object.keys(statusFilter).length > 0
-              ? { status: statusFilter }
-              : {}),
-          };
+        });
+      } else if (Object.keys(dateFilter).length > 0) {
+        queryFilters.push({ [field]: dateFilter });
+      }
+      if (Object.keys(statusFilter).length > 0) {
+        queryFilters.push({ status: statusFilter });
+      }
+
+      const operationalCutoff = new Date();
+      if (operationalState === "active") {
+        queryFilters.push({
+          OR: [
+            { slaDeadlineAt: null },
+            { slaDeadlineAt: { gte: operationalCutoff } },
+          ],
+        });
+      } else if (operationalState === "overdue") {
+        queryFilters.push({
+          OR: [
+            { status: "mismatch" },
+            { status: "pending", slaDeadlineAt: { lt: operationalCutoff } },
+          ],
+        });
+      }
+
+      const where = queryFilters.length === 0
+        ? undefined
+        : queryFilters.length === 1
+          ? queryFilters[0]
+          : { AND: queryFilters };
 
       const take = search ? 50 : limit || 2000;
 
       const exports = await prisma.ecommerceExport.findMany({
-        where: Object.keys(where).length > 0 ? where : undefined,
-        orderBy: { [field]: "desc" },
+        where,
+        orderBy: operationalState
+          ? [{ slaDeadlineAt: "asc" }, { [field]: "desc" }, { id: "desc" }]
+          : [{ [field]: "desc" }, { id: "desc" }],
         skip: skip || 0,
         take: take + 1,
         ...(compact
@@ -25390,12 +26008,24 @@ ipcMain.handle("exportOrders:delete", async (event, id, options = {}) => {
 // RETURNS HANDLERS (TRẢ HÀNG)
 // ========================================
 
-ipcMain.handle("returns:getAll", async (event, { since } = {}) => {
+ipcMain.handle("returns:getAll", async (event, { since, compact } = {}) => {
   try {
     requireRole("admin", "manager");
     if (!prisma) throw new Error("Prisma not available");
     const returns = await prisma.return.findMany({
       where: since ? { createdAt: { gte: new Date(since) } } : undefined,
+      ...(compact
+        ? {
+            select: {
+              id: true,
+              returnCode: true,
+              orderNumber: true,
+              returnDate: true,
+              status: true,
+              packer: true,
+            },
+          }
+        : {}),
       orderBy: { createdAt: "desc" },
       take: 500, // ⚡ Giới hạn 500 phiếu trả gần nhất
     });
@@ -25728,12 +26358,23 @@ ipcMain.handle("returns:bulkCreate", async (event, records) => {
 // REFUNDS HANDLERS (HÀNG HOÀN)
 // ========================================
 
-ipcMain.handle("refunds:getAll", async (event, { since, limit } = {}) => {
+ipcMain.handle("refunds:getAll", async (event, { since, limit, compact } = {}) => {
   try {
     requireRole("admin", "manager");
     if (!prisma) throw new Error("Prisma not available");
     const refunds = await prisma.refund.findMany({
       where: since ? { createdAt: { gte: new Date(since) } } : undefined,
+      ...(compact
+        ? {
+            select: {
+              id: true,
+              refundCode: true,
+              orderNumber: true,
+              refundDate: true,
+              status: true,
+            },
+          }
+        : {}),
       orderBy: { createdAt: "desc" },
       take: limit || 1000,
     });
@@ -26990,34 +27631,114 @@ function requireConfigAccess(key, operation) {
 }
 
 let attendanceReadCache = null;
+let attendanceSnapshotReadInFlight = null;
+let attendanceCoreReadCache = null;
+let attendanceCoreReadInFlight = null;
+
+function stripAttendancePayrollSnapshots(data, includedPeriod = null) {
+  return {
+    ...(data || {}),
+    lockedPeriods: (Array.isArray(data?.lockedPeriods) ? data.lockedPeriods : []).map((period) => {
+      const includeSnapshot = includedPeriod
+        && String(period?.start || "") === String(includedPeriod.start || "")
+        && String(period?.end || "") === String(includedPeriod.end || "");
+      if (includeSnapshot || !period?.payrollSnapshot) return period;
+      const { payrollSnapshot: _omittedSnapshot, ...metadata } = period;
+      return metadata;
+    }),
+  };
+}
+
+async function getAttendanceCoreSnapshot() {
+  if (attendanceCoreReadInFlight) return attendanceCoreReadInFlight;
+  const request = (async () => {
+    if (attendanceCoreReadCache) {
+      const revision = await prisma.appConfig.findUnique({
+        where: { key: "attendanceData" },
+        select: { updatedAt: true },
+      });
+      const revisionKey = revision?.updatedAt?.toISOString() || null;
+      if (revisionKey === attendanceCoreReadCache.updatedAt) {
+        return { data: attendanceCoreReadCache.data, updatedAt: revisionKey, cached: true };
+      }
+    }
+
+    const rows = await prisma.$queryRaw(Prisma.sql`
+      SELECT jsonb_set(
+        "value"::jsonb,
+        '{lockedPeriods}',
+        COALESCE((
+          SELECT jsonb_agg(period_row - 'payrollSnapshot')
+          FROM jsonb_array_elements(
+            COALESCE(("value"::jsonb)->'lockedPeriods', '[]'::jsonb)
+          ) AS period_row
+        ), '[]'::jsonb)
+      )::text AS "value", "updatedAt"
+      FROM "AppConfig"
+      WHERE "key" = 'attendanceData'
+      LIMIT 1
+    `);
+    const record = rows?.[0] || null;
+    let data = {};
+    try {
+      data = record?.value ? JSON.parse(record.value) : {};
+    } catch {
+      throw new Error("Dữ liệu chấm công hiện hành không hợp lệ.");
+    }
+    const updatedAt = record?.updatedAt?.toISOString?.() || null;
+    attendanceCoreReadCache = { data, updatedAt };
+    return { data, updatedAt, cached: false };
+  })();
+  attendanceCoreReadInFlight = request;
+  try {
+    return await request;
+  } finally {
+    if (attendanceCoreReadInFlight === request) attendanceCoreReadInFlight = null;
+  }
+}
 
 // Reuse the large attendance configuration between policy/notification reads.
 // A lightweight updatedAt check keeps the cache coherent without mutating data.
 async function getAttendanceDataSnapshot() {
-  if (attendanceReadCache) {
-    const revision = await prisma.appConfig.findUnique({
-      where: { key: "attendanceData" },
-      select: { updatedAt: true },
-    });
-    const revisionKey = revision?.updatedAt?.toISOString() || null;
-    if (revisionKey === attendanceReadCache.updatedAt) {
-      return { data: attendanceReadCache.data, updatedAt: revisionKey, cached: true };
-    }
-  }
+  if (attendanceSnapshotReadInFlight) return attendanceSnapshotReadInFlight;
 
-  const record = await prisma.appConfig.findUnique({
-    where: { key: "attendanceData" },
-    select: { value: true, updatedAt: true },
-  });
-  let data = {};
+  const request = (async () => {
+    if (attendanceReadCache) {
+      const revision = await prisma.appConfig.findUnique({
+        where: { key: "attendanceData" },
+        select: { updatedAt: true },
+      });
+      const revisionKey = revision?.updatedAt?.toISOString() || null;
+      if (revisionKey === attendanceReadCache.updatedAt) {
+        return { data: attendanceReadCache.data, updatedAt: revisionKey, cached: true };
+      }
+    }
+
+    const record = await prisma.appConfig.findUnique({
+      where: { key: "attendanceData" },
+      select: { value: true, updatedAt: true },
+    });
+    let data = {};
+    try {
+      data = record?.value ? JSON.parse(record.value) : {};
+    } catch {
+      throw new Error("Cấu hình chính sách hiện hành không hợp lệ.");
+    }
+    const updatedAt = record?.updatedAt?.toISOString() || null;
+    attendanceReadCache = { success: true, data, updatedAt };
+    attendanceCoreReadCache = {
+      data: stripAttendancePayrollSnapshots(data),
+      updatedAt,
+    };
+    return { data, updatedAt, cached: false };
+  })();
+
+  attendanceSnapshotReadInFlight = request;
   try {
-    data = record?.value ? JSON.parse(record.value) : {};
-  } catch {
-    throw new Error("Cấu hình chính sách hiện hành không hợp lệ.");
+    return await request;
+  } finally {
+    if (attendanceSnapshotReadInFlight === request) attendanceSnapshotReadInFlight = null;
   }
-  const updatedAt = record?.updatedAt?.toISOString() || null;
-  attendanceReadCache = { success: true, data, updatedAt };
-  return { data, updatedAt, cached: false };
 }
 
 ipcMain.handle("policies:getCurrent", async () => {
@@ -27026,7 +27747,7 @@ ipcMain.handle("policies:getCurrent", async () => {
     requireRole();
     if (!prisma) throw new Error("Prisma not available");
 
-    const attendanceSnapshot = await getAttendanceDataSnapshot();
+    const attendanceSnapshot = await getAttendanceCoreSnapshot();
     const attendanceData = attendanceSnapshot.data || {};
     const updatedAt = attendanceSnapshot.updatedAt;
 
@@ -27162,6 +27883,50 @@ ipcMain.handle("policies:getCurrent", async () => {
   }
 });
 
+ipcMain.handle("attendance:getInitialData", async () => {
+  try {
+    requireRole("admin", "manager", "staff");
+    if (!prisma) throw new Error("Prisma not available");
+    const snapshot = await getAttendanceCoreSnapshot();
+    return {
+      success: true,
+      data: snapshot.data,
+      updatedAt: snapshot.updatedAt,
+      cached: snapshot.cached,
+    };
+  } catch (error) {
+    console.error("❌ attendance:getInitialData error:", error);
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle("attendance:getLockedPeriodSnapshot", async (_event, payload = {}) => {
+  try {
+    requireRole("admin", "manager", "staff");
+    if (!prisma) throw new Error("Prisma not available");
+    const start = String(payload.start || "");
+    const end = String(payload.end || "");
+    if (!start || !end) throw new Error("Kỳ lương đã khóa không hợp lệ.");
+    const rows = await prisma.$queryRaw(Prisma.sql`
+      SELECT period_row AS "period"
+      FROM "AppConfig",
+        jsonb_array_elements(
+          COALESCE(("value"::jsonb)->'lockedPeriods', '[]'::jsonb)
+        ) AS period_row
+      WHERE "key" = 'attendanceData'
+        AND period_row->>'start' = ${start}
+        AND period_row->>'end' = ${end}
+      LIMIT 1
+    `);
+    const period = rows?.[0]?.period || null;
+    if (!period) throw new Error("Không tìm thấy kỳ lương đã khóa trong dữ liệu hiện hành.");
+    return { success: true, data: period };
+  } catch (error) {
+    console.error("❌ attendance:getLockedPeriodSnapshot error:", error);
+    return { success: false, error: error.message };
+  }
+});
+
 ipcMain.handle("appConfig:get", async (event, key) => {
   try {
     requireConfigAccess(key, "read");
@@ -27171,17 +27936,13 @@ ipcMain.handle("appConfig:get", async (event, key) => {
       );
     }
     if (!prisma) throw new Error("Prisma not available");
-    // Validate against the database on every read; never use a time-based
-    // payroll cache. Access checks above also apply to cached responses.
-    if (key === "attendanceData" && attendanceReadCache) {
-      const revision = await prisma.appConfig.findUnique({
-        where: { key },
-        select: { updatedAt: true },
-      });
-      if (revision?.updatedAt?.toISOString() === attendanceReadCache.updatedAt) {
-        return attendanceReadCache;
-      }
-      attendanceReadCache = null;
+    if (key === "attendanceData") {
+      const snapshot = await getAttendanceDataSnapshot();
+      return {
+        success: true,
+        data: snapshot.data,
+        updatedAt: snapshot.updatedAt,
+      };
     }
     const config = await prisma.appConfig.findUnique({
       where: { key },
@@ -27192,7 +27953,6 @@ ipcMain.handle("appConfig:get", async (event, key) => {
         data: JSON.parse(config.value),
         updatedAt: config.updatedAt?.toISOString() || null,
       };
-      if (key === "attendanceData" && response.updatedAt) attendanceReadCache = response;
       return response;
     }
     return { success: true, data: null, updatedAt: null };
@@ -31665,6 +32425,7 @@ ipcMain.handle(
 );
 
 ipcMain.handle("users:logout", async (event, rememberToken) => {
+  stopMobileDailyEvidenceSession();
   const tokenToRevoke = readSecureRememberToken() || rememberToken;
   await revokeRememberToken(tokenToRevoke).catch(() => {});
   clearSecureRememberToken();
@@ -32762,37 +33523,55 @@ async function migrateFallbackPersonalNotifications(userId) {
   }
 }
 
-async function loadAttendanceRewardContext(periodKey) {
-  const row = await prisma.appConfig.findUnique({
-    where: { key: "attendanceData" },
-    select: { value: true },
-  });
-  const attendanceData = parseAttendanceDataValue(row?.value);
-  const config = normalizeAttendanceRewardConfig(attendanceData.config || {});
-  const employees = Array.isArray(attendanceData.employees) ? attendanceData.employees : [];
-  const now = new Date();
-  const nowKey = getBangkokDateKey(now);
-  const fromKey = addAttendanceRewardDays(nowKey, -config.historyDays);
-  const logs = await prisma.attendanceLog.findMany({
-    where: { date: { gte: fromKey } },
-    orderBy: { timestamp: "asc" },
-  });
-  const faceProfiles = await prisma.faceProfile.findMany({
-    select: { faceId: true, userId: true, userName: true },
-  });
-  const employeeUsernames = employees
-    .map((employee) => String(employee?.username || "").trim())
-    .filter(Boolean);
-  const users = employeeUsernames.length > 0
-    ? await prisma.user.findMany({
-        where: { username: { in: employeeUsernames } },
-        select: { id: true, username: true, fullName: true, role: true, status: true },
-      })
-    : [];
-  const requestedPeriod = /^\d{4}-\d{2}$/.test(String(periodKey || ""))
-    ? String(periodKey)
-    : nowKey.slice(0, 7);
-  return { attendanceData, config, employees, logs, faceProfiles, users, periodKey: requestedPeriod, now };
+// Concurrent reward-summary/notification calls used to read the same large
+// attendance snapshot and the same history in parallel. Share only the active
+// read (no TTL cache) so a later call always observes fresh database state.
+const attendanceRewardContextInFlight = new Map();
+
+function loadAttendanceRewardContext(periodKey) {
+  const requestedPeriodKey = String(periodKey || "");
+  const existing = attendanceRewardContextInFlight.get(requestedPeriodKey);
+  if (existing) return existing;
+
+  const request = (async () => {
+    const attendanceSnapshot = await getAttendanceCoreSnapshot();
+    const attendanceData = attendanceSnapshot.data || {};
+    const config = normalizeAttendanceRewardConfig(attendanceData.config || {});
+    const employees = Array.isArray(attendanceData.employees) ? attendanceData.employees : [];
+    const now = new Date();
+    const nowKey = getBangkokDateKey(now);
+    const fromKey = addAttendanceRewardDays(nowKey, -config.historyDays);
+    const employeeUsernames = employees
+      .map((employee) => String(employee?.username || "").trim())
+      .filter(Boolean);
+    const [logs, faceProfiles, users] = await Promise.all([
+      prisma.attendanceLog.findMany({
+        where: { date: { gte: fromKey } },
+        orderBy: { timestamp: "asc" },
+      }),
+      prisma.faceProfile.findMany({
+        select: { faceId: true, userId: true, userName: true },
+      }),
+      employeeUsernames.length > 0
+        ? prisma.user.findMany({
+          where: { username: { in: employeeUsernames } },
+          select: { id: true, username: true, fullName: true, role: true, status: true },
+        })
+        : Promise.resolve([]),
+    ]);
+    const resolvedPeriodKey = /^\d{4}-\d{2}$/.test(requestedPeriodKey)
+      ? requestedPeriodKey
+      : nowKey.slice(0, 7);
+    return { attendanceData, config, employees, logs, faceProfiles, users, periodKey: resolvedPeriodKey, now };
+  })();
+
+  attendanceRewardContextInFlight.set(requestedPeriodKey, request);
+  void request.finally(() => {
+    if (attendanceRewardContextInFlight.get(requestedPeriodKey) === request) {
+      attendanceRewardContextInFlight.delete(requestedPeriodKey);
+    }
+  }).catch(() => undefined);
+  return request;
 }
 
 function findAttendanceEmployeeUser(employee, users) {
@@ -32842,7 +33621,7 @@ async function createAttendanceUserNotification({ userId, eventKey, title, summa
 }
 
 async function reconcileAttendanceRewardNotifications(options = {}) {
-  const context = await loadAttendanceRewardContext(options.periodKey);
+  const context = options.context || await loadAttendanceRewardContext(options.periodKey);
   if (context.config.enabled === false) return { created: 0 };
   const summaries = calculateAllAttendanceRewardSummaries({
     employees: context.employees,
@@ -36513,7 +37292,10 @@ ipcMain.handle("attendance:getRewardSummary", async (_event, periodKey) => {
           const user = findAttendanceEmployeeUser(employee, context.users);
           return Number(user?.id) === Number(actor.id);
         });
-    void reconcileAttendanceRewardNotifications({ periodKey: context.periodKey })
+    void reconcileAttendanceRewardNotifications({
+      periodKey: context.periodKey,
+      context,
+    })
       .catch((error) => console.warn("[Attendance Rewards] Không đồng bộ summary notification:", error.message));
     return {
       success: true,
@@ -36749,19 +37531,31 @@ ipcMain.handle(
   "attendance:getLogs",
   async (event, { date, month, userId, today = false } = {}) => {
     try {
-      const serverClock = await getAttendanceServerClock();
       const where = {};
-      if (today) where.date = serverClock.dateKey;
-      else if (date) where.date = date;
-      else if (month) where.date = { startsWith: month }; // month: 'YYYY-MM'
-
-      if (userId) where.userId = userId;
-
-      const logs = await prisma.attendanceLog.findMany({
-        where,
-        orderBy: { timestamp: "desc" },
-        ...(date || today ? { take: 200 } : {}), // Limit if single date, fetch all for month
-      });
+      let serverClock;
+      let logs;
+      if (today) {
+        serverClock = await getAttendanceServerClock();
+        where.date = serverClock.dateKey;
+        if (userId) where.userId = userId;
+        logs = await prisma.attendanceLog.findMany({
+          where,
+          orderBy: { timestamp: "desc" },
+          take: 200,
+        });
+      } else {
+        if (date) where.date = date;
+        else if (month) where.date = { startsWith: month }; // month: 'YYYY-MM'
+        if (userId) where.userId = userId;
+        [serverClock, logs] = await Promise.all([
+          getAttendanceServerClock(),
+          prisma.attendanceLog.findMany({
+            where,
+            orderBy: { timestamp: "desc" },
+            ...(date ? { take: 200 } : {}),
+          }),
+        ]);
+      }
       return {
         success: true,
         data: logs,

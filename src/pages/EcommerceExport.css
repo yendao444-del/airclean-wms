@@ -32,13 +32,13 @@
 
 .ecommerce-toolbar {
     display: grid;
-    grid-template-columns: max-content minmax(220px, 320px) max-content;
-    gap: 8px 12px;
+    grid-template-columns: minmax(430px, max-content) minmax(180px, 1fr) max-content;
+    gap: 8px 10px;
     justify-content: space-between;
-    margin-bottom: 10px;
-    padding: 10px;
+    margin-bottom: 8px;
+    padding: 8px;
     border: 1px solid #e6ebe8;
-    border-radius: 13px;
+    border-radius: 10px;
     background: rgba(255, 255, 255, 0.88);
     box-shadow: 0 4px 18px rgba(25, 46, 35, 0.04);
 }
@@ -46,7 +46,7 @@
 .ecommerce-status-group,
 .ecommerce-toolbar-actions {
     min-width: 0;
-    gap: 6px;
+    gap: 7px;
 }
 
 .ecommerce-status-group {
@@ -56,12 +56,16 @@
 
 .ecommerce-status-chip.ant-tag {
     margin: 0;
+    min-height: 34px;
+    display: inline-flex;
+    align-items: center;
 }
 
 .ecommerce-search {
     min-width: 0;
     width: 100%;
-    max-width: 320px;
+    max-width: none;
+    height: 36px;
 }
 
 .ecommerce-toolbar-actions {
@@ -71,6 +75,8 @@
 
 .ecommerce-toolbar-button {
     flex: 0 0 auto;
+    height: 36px;
+    border-radius: 8px;
 }
 
 .ecommerce-import-button.ant-btn-primary {
@@ -88,6 +94,12 @@
     min-width: 0;
     gap: 8px;
     flex-wrap: wrap;
+    min-height: 58px;
+    margin-bottom: 8px !important;
+    padding: 8px 12px !important;
+    border-color: #e5e8e6 !important;
+    border-radius: 10px !important;
+    background: #fff !important;
 }
 
 .ecommerce-packer-list {
@@ -100,6 +112,48 @@
 .ecommerce-packer-chip {
     min-width: 0;
     max-width: 100%;
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    min-height: 40px;
+    padding: 5px 14px;
+    cursor: pointer;
+    border: 1px solid #e1e5e2;
+    border-radius: 11px;
+    background: #fff;
+    color: #404743;
+    box-shadow: 0 2px 7px rgba(25, 46, 35, 0.04);
+    transition: border-color 160ms ease, background 160ms ease, box-shadow 160ms ease;
+}
+
+.ecommerce-packer-chip:hover,
+.ecommerce-packer-chip--active {
+    border-color: #66cf9e;
+    background: #f1fff7;
+    box-shadow: 0 3px 10px rgba(0, 185, 107, 0.12);
+}
+
+.ecommerce-packer-avatar {
+    display: grid;
+    width: 28px;
+    height: 28px;
+    flex: 0 0 28px;
+    place-items: center;
+    border-radius: 50%;
+    background: #f0f1f1;
+    color: #7d8581;
+    font-size: 13px;
+    font-weight: 800;
+}
+
+.ecommerce-packer-chip--active .ecommerce-packer-avatar {
+    background: var(--ecommerce-green);
+    color: #fff;
+}
+
+.ecommerce-packer-name {
+    font-size: 13px;
+    font-weight: 600;
 }
 
 .ecommerce-packer-chip span {
@@ -121,6 +175,8 @@
 
 .ecommerce-scan-bar {
     min-width: 0;
+    min-height: 58px;
+    box-shadow: 0 3px 12px rgba(0, 185, 107, 0.06) !important;
 }
 
 .ecommerce-scan-input-wrap {
@@ -135,21 +191,232 @@
     min-width: 0;
     overflow: visible;
     border: 1px solid #e6ebe8;
-    border-radius: 14px;
+    border-radius: 10px;
     box-shadow: 0 6px 24px rgba(30, 43, 36, 0.045);
 }
 
 .ecommerce-table-card > .ant-card-body {
     min-width: 0;
-    padding: 14px 16px 4px;
+    padding: 0;
+}
+
+.ecommerce-priority-bar {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    min-height: 48px;
+    padding: 7px 10px;
+    overflow: hidden;
+    border: 1px solid #e6ebe8;
+    border-bottom: 0;
+    border-radius: 10px 10px 0 0;
+    background: #fff;
+}
+
+.ecommerce-priority-bar > span:first-child {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    flex: 0 0 auto;
+    min-height: 36px;
+    padding: 0 16px;
+    border-radius: 8px;
+    background: linear-gradient(135deg, #0dcc70 0%, #00a95c 100%);
+    color: #fff;
+    font-size: 13px;
+    font-weight: 800;
+    box-shadow: 0 4px 10px rgba(0, 185, 107, 0.18);
+}
+
+.ecommerce-priority-bar .ant-typography {
+    min-width: 0;
+    overflow: hidden;
+    font-size: 12px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.ecommerce-priority-bar + .ecommerce-table-card {
+    border-top-left-radius: 0;
+    border-top-right-radius: 0;
 }
 
 .ecommerce-table .ant-table-thead > tr > th,
 .ecommerce-mismatch-table .ant-table-thead > tr > th {
     color: #354039;
     background: #f7f9f8;
-    font-size: 12px;
+    padding: 10px 7px;
+    font-size: 11px;
     font-weight: 700;
+    line-height: 1.25;
+    white-space: normal;
+}
+
+.ecommerce-table .ant-table-tbody > tr > td {
+    height: 48px;
+    padding: 6px 7px;
+    color: #343b37;
+    font-size: 11px;
+    line-height: 1.25;
+}
+
+.ecommerce-table .ant-table-tbody > tr:hover > td {
+    background: #f8fcfa !important;
+}
+
+/* The global table stylesheet highlights every multi-SKU cell with orange
+   borders. The selected design keeps all rows neutral and shows urgency only. */
+.ecommerce-table .ant-table-tbody > tr.multi-sku-row > td {
+    border-left: 0 !important;
+    background: #fff !important;
+}
+
+.ecommerce-table .ant-table-tbody > tr.multi-sku-row:hover > td {
+    background: #f8fcfa !important;
+}
+
+.ecommerce-table .ant-tag {
+    margin-inline-end: 0;
+}
+
+.ecommerce-order-time,
+.ecommerce-order-codes,
+.ecommerce-product-summary,
+.ecommerce-sla {
+    display: flex;
+    min-width: 0;
+    flex-direction: column;
+}
+
+.ecommerce-order-time {
+    gap: 2px;
+    white-space: nowrap;
+}
+
+.ecommerce-order-codes {
+    align-items: flex-start;
+    gap: 2px;
+}
+
+.ecommerce-order-codes > div {
+    max-width: 100%;
+    line-height: 1;
+}
+
+.ecommerce-order-codes .ant-tag {
+    max-width: 100%;
+    padding: 0 5px;
+    overflow: hidden;
+    font-size: 10px;
+    line-height: 18px;
+    text-overflow: ellipsis;
+}
+
+.ecommerce-product-summary {
+    gap: 3px;
+}
+
+.ecommerce-product-summary > span,
+.ecommerce-product-summary > small {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.ecommerce-product-summary > small {
+    color: #7f8783;
+    font-size: 10px;
+}
+
+.ecommerce-cell--sku .ant-tag {
+    padding-inline: 5px;
+    font-size: 10px !important;
+    line-height: 19px;
+    white-space: nowrap;
+}
+
+.ecommerce-quantity {
+    font-weight: 600;
+}
+
+.ecommerce-carrier {
+    display: flex;
+    min-width: 0;
+    align-items: center;
+    gap: 5px;
+    white-space: nowrap;
+}
+
+.ecommerce-carrier__logo {
+    display: inline-grid;
+    width: 29px;
+    height: 24px;
+    flex: 0 0 29px;
+    place-items: center;
+    border-radius: 6px;
+    color: #fff;
+    font-size: 8px;
+    font-weight: 900;
+    letter-spacing: -0.3px;
+}
+
+.ecommerce-carrier__logo--orange { background: #ff5a16; }
+.ecommerce-carrier__logo--red { background: #ef233c; }
+.ecommerce-carrier__logo--neutral { background: #68736d; }
+
+.ecommerce-sla {
+    align-items: flex-start;
+    gap: 3px;
+}
+
+.ecommerce-sla__badge {
+    display: inline-flex;
+    max-width: 100%;
+    align-items: center;
+    gap: 4px;
+    padding: 3px 6px;
+    border-radius: 7px;
+    font-size: 10px;
+    font-weight: 800;
+    white-space: nowrap;
+}
+
+.ecommerce-sla > small {
+    color: #7d8581;
+    font-size: 9px;
+    white-space: nowrap;
+}
+
+.ecommerce-sla--critical .ecommerce-sla__badge { background: #fff0f0; color: #f5222d; }
+.ecommerce-sla--warning .ecommerce-sla__badge { background: #fff4e6; color: #fa7a00; }
+.ecommerce-sla--today .ecommerce-sla__badge { background: #eaf5ff; color: #1688f8; }
+.ecommerce-sla--safe .ecommerce-sla__badge { background: #eafbea; color: #18a53b; }
+.ecommerce-sla--unknown .ecommerce-sla__badge { background: #f2f3f3; color: #7d8581; }
+
+.ecommerce-cell--status .ant-tag {
+    padding-inline: 7px;
+    font-size: 10px;
+    line-height: 22px;
+    white-space: nowrap;
+}
+
+.ecommerce-more-button.ant-btn {
+    width: 28px;
+    min-width: 28px;
+    padding-inline: 0;
+}
+
+.ecommerce-action-placeholder {
+    color: #68716d;
+}
+
+.ecommerce-table-row--sla-critical > td:first-child { box-shadow: inset 3px 0 #ff2d32; }
+.ecommerce-table-row--sla-warning > td:first-child { box-shadow: inset 3px 0 #ff9f1a; }
+.ecommerce-table-row--sla-today > td:first-child,
+.ecommerce-table-row--sla-safe > td:first-child { box-shadow: inset 3px 0 #24c543; }
+
+.ecommerce-table .ant-table-pagination {
+    margin: 12px 14px;
 }
 
 .ecommerce-cell--actions,
@@ -200,6 +467,127 @@
     justify-content: flex-end;
     gap: 12px;
     margin-top: 24px;
+}
+
+/* Keep the compact layout unchanged at normal window sizes, then scale the
+   operational typography when the Electron content area becomes genuinely wide. */
+@container ecommerce-page (min-width: 1320px) {
+    .ecommerce-toolbar {
+        gap: 10px 12px;
+        padding: 10px;
+    }
+
+    .ecommerce-status-chip.ant-tag {
+        min-height: 38px;
+        padding-inline: 12px !important;
+        font-size: 13px !important;
+    }
+
+    .ecommerce-search,
+    .ecommerce-toolbar-button {
+        height: 40px;
+        font-size: 13px;
+    }
+
+    .ecommerce-packer-bar {
+        min-height: 64px;
+        padding: 9px 14px !important;
+    }
+
+    .ecommerce-packer-chip {
+        min-height: 44px;
+        padding-inline: 16px;
+    }
+
+    .ecommerce-packer-avatar {
+        width: 30px;
+        height: 30px;
+        flex-basis: 30px;
+        font-size: 14px;
+    }
+
+    .ecommerce-packer-name {
+        font-size: 14px;
+    }
+
+    .ecommerce-scan-bar {
+        min-height: 66px;
+        padding-block: 9px !important;
+    }
+
+    .ecommerce-scan-bar .ant-input {
+        font-size: 17px !important;
+    }
+
+    .ecommerce-scan-button.ant-btn {
+        height: 48px !important;
+        padding-inline: 28px !important;
+        font-size: 14px;
+    }
+
+    .ecommerce-priority-bar {
+        min-height: 52px;
+        padding-inline: 12px;
+    }
+
+    .ecommerce-priority-bar > span:first-child {
+        min-height: 38px;
+        font-size: 14px;
+    }
+
+    .ecommerce-priority-bar .ant-typography {
+        font-size: 13px;
+    }
+
+    .ecommerce-table .ant-table-thead > tr > th,
+    .ecommerce-mismatch-table .ant-table-thead > tr > th {
+        padding: 12px 10px;
+        font-size: 12px;
+    }
+
+    .ecommerce-table .ant-table-tbody > tr > td {
+        height: 56px;
+        padding: 8px 10px;
+        font-size: 13px;
+        line-height: 1.3;
+    }
+
+    .ecommerce-order-codes .ant-tag {
+        padding-inline: 7px;
+        font-size: 11px;
+        line-height: 20px;
+    }
+
+    .ecommerce-product-summary > small,
+    .ecommerce-sla > small {
+        font-size: 11px;
+    }
+
+    .ecommerce-cell--sku .ant-tag,
+    .ecommerce-sla__badge,
+    .ecommerce-cell--status .ant-tag {
+        font-size: 11px !important;
+    }
+
+    .ecommerce-sla__badge {
+        padding: 4px 7px;
+    }
+
+    .ecommerce-carrier {
+        gap: 7px;
+        font-size: 12px;
+    }
+
+    .ecommerce-carrier__logo {
+        width: 32px;
+        height: 26px;
+        flex-basis: 32px;
+        font-size: 9px;
+    }
+
+    .ecommerce-table .ant-table-pagination {
+        font-size: 13px;
+    }
 }
 
 @container ecommerce-page (max-width: 920px) {
@@ -257,8 +645,8 @@
         grid-template-columns: 30px minmax(160px, 1.1fr) minmax(150px, 1fr) minmax(125px, 0.8fr) minmax(135px, 0.9fr) 38px;
         grid-template-areas:
             "select order order product product actions"
-            "select source sku variation date actions"
-            "select shipping amount status date actions";
+            "select date sla source sku actions"
+            "select shipping amount quantity status actions";
         column-gap: 10px;
         padding: 0 10px;
         overflow: visible;
@@ -289,8 +677,8 @@
         grid-template-columns: minmax(160px, 1.1fr) minmax(150px, 1fr) minmax(125px, 0.8fr) minmax(135px, 0.9fr) 38px;
         grid-template-areas:
             "order order product product actions"
-            "source sku variation date actions"
-            "shipping amount status date actions";
+            "date sla source sku actions"
+            "shipping amount quantity status actions";
     }
 
     .ecommerce-table .ant-table-tbody > tr.ecommerce-table-row--multi:not(.ecommerce-table-row--completed) {
@@ -318,11 +706,12 @@
     }
 
     .ecommerce-cell--date { grid-area: date; }
+    .ecommerce-cell--sla { grid-area: sla; }
     .ecommerce-cell--source { grid-area: source; }
     .ecommerce-cell--order { grid-area: order; }
     .ecommerce-cell--product { grid-area: product; }
     .ecommerce-cell--sku { grid-area: sku; }
-    .ecommerce-cell--variation { grid-area: variation; }
+    .ecommerce-cell--quantity { grid-area: quantity; }
     .ecommerce-cell--amount { grid-area: amount; }
     .ecommerce-cell--shipping { grid-area: shipping; }
     .ecommerce-cell--status { grid-area: status; }
@@ -346,13 +735,14 @@
     }
 
     .ecommerce-cell--date::before { content: "Thời gian"; }
+    .ecommerce-cell--sla::before { content: "Hạn gửi"; }
     .ecommerce-cell--source::before { content: "Nguồn"; }
     .ecommerce-cell--order::before { content: "Mã đơn / vận đơn"; }
     .ecommerce-cell--product::before { content: "Sản phẩm"; }
     .ecommerce-cell--sku::before { content: "SKU"; }
-    .ecommerce-cell--variation::before { content: "Phân loại"; }
-    .ecommerce-cell--amount::before { content: "Tổng tiền"; }
-    .ecommerce-cell--shipping::before { content: "Đơn vị VC"; }
+    .ecommerce-cell--quantity::before { content: "SL"; }
+    .ecommerce-cell--amount::before { content: "Tiền thu"; }
+    .ecommerce-cell--shipping::before { content: "DVVC"; }
     .ecommerce-cell--status::before { content: "Trạng thái"; }
 
     .ecommerce-cell .ant-tag {
@@ -506,13 +896,14 @@
         grid-template-areas:
             "select order actions"
             "select product actions"
+            "select date actions"
+            "select sla actions"
             "select source actions"
             "select sku actions"
-            "select variation actions"
+            "select quantity actions"
             "select shipping actions"
             "select amount actions"
-            "select status actions"
-            "select date actions";
+            "select status actions";
         column-gap: 9px;
     }
 
@@ -521,13 +912,14 @@
         grid-template-areas:
             "order actions"
             "product actions"
+            "date actions"
+            "sla actions"
             "source actions"
             "sku actions"
-            "variation actions"
+            "quantity actions"
             "shipping actions"
             "amount actions"
-            "status actions"
-            "date actions";
+            "status actions";
     }
 
     .ecommerce-cell:not(.ecommerce-cell--actions) {

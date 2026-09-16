@@ -49,6 +49,13 @@ function requireUpdateSession() {
 const GITHUB_OWNER = 'yendao444-del';
 const GITHUB_REPO = 'airclean-wms';
 const GITHUB_RELEASE_HOST = 'github.com';
+const AUTO_UPDATE_DISABLED = process.env.DBYPOS_DISABLE_AUTO_UPDATE === '1';
+
+function requireUpdatesEnabled() {
+    if (AUTO_UPDATE_DISABLED) {
+        throw new Error('Cập nhật tự động đã tắt trong chế độ phát triển');
+    }
+}
 
 function isTrustedGitHubDownloadUrl(downloadUrl) {
     try {
@@ -125,6 +132,22 @@ async function assertTrustedDownloadUrl(downloadUrl) {
  */
 ipcMain.handle('update:check', async () => {
     try {
+        if (AUTO_UPDATE_DISABLED) {
+            const packageJson = require('../package.json');
+            return {
+                success: true,
+                data: {
+                    currentVersion: packageJson.version,
+                    latestVersion: packageJson.version,
+                    hasUpdate: false,
+                    releaseNotes: '',
+                    publishedAt: null,
+                    downloadUrl: null,
+                    downloadSize: 0,
+                    deferredReason: 'Chế độ phát triển không tự động cập nhật.'
+                }
+            };
+        }
         console.log('🔍 Checking for updates from GitHub...');
 
         // Lấy version hiện tại từ package.json
@@ -712,6 +735,7 @@ exit
 
 ipcMain.handle('update:download', async (event, downloadUrl) => {
     try {
+        requireUpdatesEnabled();
         requireUpdateSession();
         const { asset: trustedAsset, checksumAsset } = await assertTrustedDownloadUrl(downloadUrl);
         return await installTrustedUpdate({
@@ -728,6 +752,7 @@ ipcMain.handle('update:download', async (event, downloadUrl) => {
 
 ipcMain.handle('update:restoreVersion', async (event, version) => {
     try {
+        requireUpdatesEnabled();
         requireUpdateAdmin();
         const normalizedVersion = String(version || '').trim().replace(/^v/i, '');
         const release = await fetchReleaseByTag(normalizedVersion);
@@ -763,6 +788,7 @@ ipcMain.handle('update:getCurrentVersion', async () => {
  * Restart app
  */
 ipcMain.handle('update:restart', async () => {
+    requireUpdatesEnabled();
     requireUpdateSession();
     app.relaunch();
     app.exit(0);
