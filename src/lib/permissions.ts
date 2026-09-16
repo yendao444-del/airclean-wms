@@ -30,6 +30,7 @@ export type Permission =
     | 'einvoice.view'
     | 'einvoice.create'
     | 'stock-balance.view'
+    | 'prepack'
     | 'stock-check.view'
     | 'stock-check.create'
     | 'handling-units'
@@ -77,6 +78,7 @@ export const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
         'einvoice.create',
         'stock-check.view',
         'stock-check.create',
+        'prepack',
         'handling-units',
         'combos.view',
         'combos.create',
@@ -94,6 +96,7 @@ export const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
     ],
 
     staff: [
+        'prepack',
         'daily-tasks',
         'attendance',
     ],
@@ -193,6 +196,7 @@ export function getAccessibleMenuKeys(role: Role | undefined): string[] {
             'carrier-complaints',
             'einvoice',
             'stock-balance',
+            'prepack',
             'stock-check',
             'handling-units',
             'combos',

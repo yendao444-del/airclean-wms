@@ -1425,14 +1425,101 @@
     box-shadow: 0 12px 34px rgba(7, 84, 57, 0.1);
 }
 
-.daily-tasks-mobile-evidence__copy {
+.daily-tasks-mobile-evidence__guide {
     display: grid;
-    gap: 4px;
-    text-align: center;
-    color: #64748b;
+    grid-template-columns: 86px minmax(0, 1fr);
+    align-items: center;
+    gap: 18px;
+    padding: 15px 18px;
+    color: #164e3d;
+    background: linear-gradient(135deg, #ecfdf5 0%, #f0fdfa 100%);
+    border: 1px solid #a7f3d0;
+    border-radius: 14px;
 }
 
-.daily-tasks-mobile-evidence__copy strong {
-    color: #17362b;
-    font-size: 18px;
+.daily-tasks-mobile-evidence__phone {
+    position: relative;
+    display: grid;
+    place-items: center;
+    width: 72px;
+    height: 96px;
+    overflow: hidden;
+    color: #047857;
+    background: #fff;
+    border: 2px solid #34d399;
+    border-radius: 15px;
+    box-shadow: 0 8px 20px rgba(5, 150, 105, 0.14);
+}
+
+.daily-tasks-mobile-evidence__phone::after {
+    content: '';
+    position: absolute;
+    bottom: 5px;
+    width: 17px;
+    height: 3px;
+    background: #a7f3d0;
+    border-radius: 999px;
+}
+
+.daily-tasks-mobile-evidence__phone-icon {
+    position: absolute;
+    inset: 0;
+    display: grid;
+    place-items: center;
+    color: #d1fae5;
+    font-size: 68px;
+}
+
+.daily-tasks-mobile-evidence__scan-frame {
+    position: relative;
+    z-index: 1;
+    display: grid;
+    place-items: center;
+    width: 42px;
+    height: 42px;
+    color: #065f46;
+    font-size: 31px;
+    background: #f0fdf4;
+    border: 1px solid #6ee7b7;
+    border-radius: 8px;
+}
+
+.daily-tasks-mobile-evidence__scan-line {
+    position: absolute;
+    z-index: 2;
+    left: 14px;
+    right: 14px;
+    top: 31px;
+    height: 2px;
+    background: #ef4444;
+    border-radius: 999px;
+    box-shadow: 0 0 7px rgba(239, 68, 68, 0.65);
+    animation: daily-tasks-qr-scan 1.8s ease-in-out infinite;
+}
+
+.daily-tasks-mobile-evidence__guide-copy {
+    display: grid;
+    gap: 6px;
+    line-height: 1.5;
+}
+
+.daily-tasks-mobile-evidence__guide-copy strong {
+    color: #065f46;
+    font-size: 16px;
+}
+
+.daily-tasks-mobile-evidence__guide-copy span {
+    color: #42675b;
+    font-size: 13px;
+}
+
+@keyframes daily-tasks-qr-scan {
+    0%, 100% { transform: translateY(0); opacity: .7; }
+    50% { transform: translateY(31px); opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .daily-tasks-mobile-evidence__scan-line {
+        animation: none;
+    }
 }

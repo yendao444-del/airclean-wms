@@ -83,6 +83,7 @@ const AttendancePage = lazy(loadAttendancePage);
 const StockCheckPage = lazy(() => import('./pages/StockCheck'));
 const MyProfilePage = lazy(() => import('./pages/MyProfile'));
 const HandlingUnitsPage = lazy(() => import('./pages/HandlingUnits'));
+const PrepackedGoodsPage = lazy(() => import('./pages/PrepackedGoods'));
 
 const { Header, Sider, Content } = Layout;
 const { Title, Text } = Typography;
@@ -129,6 +130,7 @@ const menuGeometric = (Icon: ComponentType<any>) => (
 function AppContent() {
     const isNotificationUiTest = import.meta.env.DEV && new URLSearchParams(window.location.search).has('notificationUiTest');
     const isAttendanceUiTest = import.meta.env.DEV && new URLSearchParams(window.location.search).has('attendanceUiTest');
+    const isPrepackedUiTest = import.meta.env.DEV && new URLSearchParams(window.location.search).has('prepackedUiTest');
     const {
         user,
         actualUser,
@@ -139,7 +141,7 @@ function AppContent() {
         logout,
     } = useAuth();
     const { getAccessibleMenuKeys, hasPermission } = usePermissions();
-    const [selectedKey, setSelectedKey] = useState(isAttendanceUiTest ? 'attendance' : 'dashboard');
+    const [selectedKey, setSelectedKey] = useState(isAttendanceUiTest ? 'attendance' : isPrepackedUiTest ? 'prepack' : 'dashboard');
     const [collapsed, setCollapsed] = useState(false);
     const [previewAccounts, setPreviewAccounts] = useState<AuthUser[]>([]);
     const [previewAccountsLoading, setPreviewAccountsLoading] = useState(false);
@@ -190,7 +192,7 @@ function AppContent() {
             setPreviewAccountsError('');
             return;
         }
-        if (isAttendanceUiTest && !window.electronAPI) {
+        if ((isAttendanceUiTest || isPrepackedUiTest) && !window.electronAPI) {
             setPreviewAccounts([]);
             setPreviewAccountsLoading(false);
             setPreviewAccountsError('');
@@ -222,7 +224,7 @@ function AppContent() {
         return () => {
             cancelled = true;
         };
-    }, [actualUser?.id, actualUser?.role, isAttendanceUiTest]);
+    }, [actualUser?.id, actualUser?.role, isAttendanceUiTest, isPrepackedUiTest]);
 
     // Attendance is one of the largest screens. Warm its lazy chunk while the
     // dashboard is idle so the first menu click does not pay parse/compile cost.
@@ -448,6 +450,9 @@ function AppContent() {
         if (accessibleKeys.includes('stock-balance')) {
             inventoryChildren.push(createMenuItem('Tồn kho', 'stock-balance', menuGeometric(DatabaseOutlined)));
         }
+        if (accessibleKeys.includes('prepack')) {
+            inventoryChildren.push(createMenuItem('Đóng gói sẵn', 'prepack', menuGeometric(InboxOutlined)));
+        }
         if (accessibleKeys.includes('stock-check')) {
             inventoryChildren.push(createMenuItem('Kiểm hàng', 'stock-check', menuGeometric(AuditOutlined)));
         }
@@ -610,6 +615,8 @@ function AppContent() {
                 return <OrdersPage />;
             case 'stock-balance':
                 return withAppData(<StockBalancePage />, { products: true, ecomExports: true });
+            case 'prepack':
+                return <PrepackedGoodsPage />;
             case 'stock-check':
                 return withAppData(<StockCheckPage onExit={exitStockCheck} />, { products: true });
             case 'handling-units':

@@ -118,6 +118,15 @@ contextBridge.exposeInMainWorld('electronAPI', {
         },
     },
 
+    prepack: {
+        list: (filters) => ipcRenderer.invoke('prepack:list', filters),
+        create: (data) => ipcRenderer.invoke('prepack:create', data),
+        submitEvidence: (data) => ipcRenderer.invoke('prepack:submitEvidence', data),
+        accept: (data) => ipcRenderer.invoke('prepack:accept', data),
+        issue: (data) => ipcRenderer.invoke('prepack:issue', data),
+        getEvidenceUrl: (batchId, evidenceId) => ipcRenderer.invoke('prepack:getEvidenceUrl', batchId, evidenceId),
+    },
+
     // Categories
     categories: {
         getAll: () => ipcRenderer.invoke('categories:getAll'),
@@ -259,15 +268,17 @@ contextBridge.exposeInMainWorld('electronAPI', {
         updateStatus: (id, status) => ipcRenderer.invoke('dailyTasks:updateStatus', id, status),
         archive: (id, reason) => ipcRenderer.invoke('dailyTasks:archive', { id, reason }),
         deleteAssignment: (id) => ipcRenderer.invoke('dailyTasks:deleteAssignment', { id }),
-        uploadEvidenceImage: (payload) => ipcRenderer.invoke('dailyTasks:uploadEvidenceImage', payload),
-        validateEvidenceSource: (payload) => ipcRenderer.invoke('dailyTasks:validateEvidenceSource', payload),
-        submitEvidence: (payload) => ipcRenderer.invoke('dailyTasks:submitEvidence', payload),
         startMobileEvidence: (options) => ipcRenderer.invoke('dailyTasks:startMobileEvidence', options),
         stopMobileEvidence: () => ipcRenderer.invoke('dailyTasks:stopMobileEvidence'),
         onMobileEvidenceUpdated: (callback) => {
             const handler = (_event, data) => callback(data);
             ipcRenderer.on('dailyTasks:mobileEvidenceUpdated', handler);
             return () => ipcRenderer.removeListener('dailyTasks:mobileEvidenceUpdated', handler);
+        },
+        onMobileEvidenceUrlUpdated: (callback) => {
+            const handler = (_event, data) => callback(data);
+            ipcRenderer.on('dailyTasks:mobileEvidenceUrlUpdated', handler);
+            return () => ipcRenderer.removeListener('dailyTasks:mobileEvidenceUrlUpdated', handler);
         },
         reviewEvidence: (taskId, approved, reviewContext) => ipcRenderer.invoke('dailyTasks:reviewEvidence', taskId, approved, reviewContext),
         requestAssignmentCompletion: (taskId) => ipcRenderer.invoke('dailyTasks:requestAssignmentCompletion', taskId),
