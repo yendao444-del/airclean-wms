@@ -2007,24 +2007,117 @@
 }
 
 .att-staff-attendance-notice {
-    display: flex;
-    align-items: flex-start;
-    gap: 7px;
+    position: relative;
+    display: grid;
+    grid-template-columns: 34px minmax(0, 1fr);
+    align-items: center;
+    gap: 10px;
     margin-top: 12px;
-    padding: 10px 11px;
-    color: #176044;
-    background: #effcf5;
-    border: 1px solid #b7e8cf;
-    border-radius: 9px;
-    font-size: 11px;
-    font-weight: 650;
-    line-height: 1.45;
+    padding: 12px 58px 12px 12px;
+    overflow: hidden;
+    color: #164b38;
+    background: #f5fcf8;
+    border: 1px solid #9dd8bb;
+    border-top: 3px solid #d8ad52;
+    border-radius: 12px;
+    box-shadow: 0 8px 20px rgba(10, 86, 59, 0.09), inset 0 1px 0 #fff;
 }
 
-.att-staff-attendance-notice > .anticon {
-    flex: 0 0 auto;
-    margin-top: 1px;
-    color: #0b9b62;
+.att-staff-attendance-notice__medal {
+    display: grid;
+    place-items: center;
+    width: 34px;
+    height: 34px;
+    color: #8c6116;
+    background: #fff5d8;
+    border: 1px solid #e7c66f;
+    border-radius: 50%;
+    box-shadow: 0 4px 10px rgba(140, 97, 22, 0.13);
+    font-size: 16px;
+}
+
+.att-staff-attendance-notice__copy {
+    display: grid;
+    gap: 2px;
+    min-width: 0;
+}
+
+.att-staff-attendance-notice__copy > small {
+    color: #8a6a24;
+    font-size: 8px;
+    font-weight: 900;
+    letter-spacing: .8px;
+}
+
+.att-staff-attendance-notice__copy > strong {
+    color: #073f2b;
+    font-size: 12px;
+    font-weight: 850;
+    line-height: 1.25;
+}
+
+.att-staff-attendance-notice__copy > span {
+    color: #4d6d60;
+    font-size: 10px;
+    font-weight: 620;
+    line-height: 1.35;
+}
+
+.att-staff-attendance-notice__limit {
+    position: absolute;
+    top: 50%;
+    right: 10px;
+    display: grid;
+    justify-items: center;
+    min-width: 39px;
+    padding-left: 9px;
+    color: #0a6947;
+    border-left: 1px solid #c8e7d7;
+    transform: translateY(-50%);
+}
+
+.att-staff-attendance-notice__limit > strong {
+    font-size: 20px;
+    font-weight: 900;
+    line-height: 1;
+    letter-spacing: -1px;
+}
+
+.att-staff-attendance-notice__limit > small {
+    margin-top: 3px;
+    color: #769386;
+    font-size: 7px;
+    font-weight: 900;
+    letter-spacing: .7px;
+}
+
+.att-staff-attendance-notice.is-premium {
+    background: #fffaf0;
+    border-color: #dec06e;
+    border-top-color: #b98823;
+    box-shadow: 0 9px 22px rgba(124, 83, 12, 0.12), inset 0 1px 0 #fff;
+}
+
+.att-staff-attendance-notice.is-premium .att-staff-attendance-notice__limit {
+    color: #8c6116;
+    border-left-color: #ead9aa;
+}
+
+.att-staff-attendance-notice.is-used {
+    background: #f7f8f7;
+    border-color: #d8dfdb;
+    border-top-color: #95a29b;
+    box-shadow: none;
+}
+
+.att-staff-attendance-notice.is-used .att-staff-attendance-notice__medal {
+    color: #6e7973;
+    background: #eef1ef;
+    border-color: #d2d9d5;
+}
+
+.att-staff-attendance-notice.is-progress {
+    padding-right: 12px;
 }
 
 .att-staff-main {

@@ -7,6 +7,8 @@ echo ============================================
 echo   DBY POS - Build Windows Installer
 echo ============================================
 echo.
+echo [RULE] Dung file nay khi thay doi runtime Electron, native dependency, installer hoac dependency moi.
+echo [INFO] Neu preflight bao loi, hay chay dung file release duoc goi y trong thong bao.
 
 call node scripts\release-preflight.cjs full
 if errorlevel 1 (

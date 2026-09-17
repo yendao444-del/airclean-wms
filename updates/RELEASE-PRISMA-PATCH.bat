@@ -10,6 +10,7 @@ echo ============================================
 echo.
 echo [RULE] Use this file when schema, migration, Prisma delegate or Prisma field changes.
 echo [RULE] Use updates\RELEASE-ver2.bat instead when the Python service also changes.
+echo [INFO] Neu preflight bao loi, hay chay dung file release duoc goi y trong thong bao.
 echo.
 
 call node scripts\release-preflight.cjs prisma

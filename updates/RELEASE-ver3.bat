@@ -17,6 +17,7 @@ echo ============================================
 echo.
 echo [RULE] Khong dung file nay neu schema, migration, Prisma delegate/field thay doi.
 echo [RULE] Truong hop do phai dung updates\RELEASE-PRISMA-PATCH.bat.
+echo [INFO] Neu preflight bao loi, hay chay dung file release duoc goi y trong thong bao.
 echo.
 
 call node scripts\release-preflight.cjs quick

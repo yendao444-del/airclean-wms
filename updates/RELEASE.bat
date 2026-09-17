@@ -12,6 +12,7 @@ echo ============================================
 echo   DBY POS - Build ^& Release Tool
 echo ============================================
 echo.
+echo [INFO] Day la release day du. Chi dung khi thay doi can dong goi lai runtime/installer hoac nhieu tang cung luc.
 
 :: Read current version from package.json
 for /f %%v in ('node scripts\\release-version.cjs current') do set CURRENT_VERSION=%%v

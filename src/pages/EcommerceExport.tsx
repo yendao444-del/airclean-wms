@@ -232,9 +232,58 @@ function detectMarketplaceFromWorksheet(worksheet: any, XLSX: any, firstRow: any
     return null;
 }
 
-function isAuthoritativePendingSnapshot(fileName: string, source: 'Shopee' | 'TikTok'): boolean {
-    if (source === 'TikTok') return true;
-    return /(?:^|[._\-\s])toship(?:[._\-\s]|$)/i.test(fileName);
+type MarketplaceSnapshotKind = 'pending' | 'shipping' | 'unknown';
+
+function normalizeMarketplaceText(value: unknown): string {
+    return String(value || '')
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .toLowerCase()
+        .replace(/đ/g, 'd')
+        .trim();
+}
+
+function getTikTokBusinessRows(rows: any[]): any[] {
+    return (rows || []).filter((row) => {
+        const orderId = String(row?.['Order ID'] || '').trim();
+        return orderId && !orderId.includes('Platform unique');
+    });
+}
+
+function hasTikTokBusinessRows(rows: any[]): boolean {
+    return getTikTokBusinessRows(rows).length > 0;
+}
+
+function detectTikTokSnapshotKind(rows: any[]): MarketplaceSnapshotKind {
+    const businessRows = getTikTokBusinessRows(rows);
+    if (businessRows.length === 0) return 'unknown';
+    let pending = 0;
+    let shipping = 0;
+    for (const row of businessRows) {
+        const status = normalizeMarketplaceText(row?.['Order Status']);
+        const substatus = normalizeMarketplaceText(row?.['Order Substatus']);
+        const shippedAt = String(row?.['Shipped Time'] || '').trim();
+        const combined = `${status} ${substatus}`;
+        const shippingState = /in transit|shipped|delivered|dang van chuyen|da van chuyen|dang giao|da giao/.test(combined) || Boolean(shippedAt);
+        const pendingState = /cho lay hang|cho van chuyen|can van chuyen|awaiting pickup|awaiting collection|to ship/.test(combined) && !shippingState;
+        if (shippingState) shipping += 1;
+        else if (pendingState) pending += 1;
+    }
+    if (pending === businessRows.length) return 'pending';
+    if (shipping === businessRows.length) return 'shipping';
+    return 'unknown';
+}
+
+function detectMarketplaceSnapshotKind(fileName: string, source: 'Shopee' | 'TikTok', rows: any[] = []): MarketplaceSnapshotKind {
+    // TikTok may reuse the "Đang giao đơn hàng" filename for filtered waiting-pickup exports.
+    if (source === 'TikTok') return detectTikTokSnapshotKind(rows) as MarketplaceSnapshotKind;
+    if (/(?:^|[._\-\s])toship(?:[._\-\s]|$)/i.test(fileName)) return 'pending';
+    if (/(?:^|[._\-\s])shipping(?:[._\-\s]|$)/i.test(fileName)) return 'shipping';
+    return 'unknown';
+}
+
+function isAuthoritativePendingSnapshot(fileName: string, source: 'Shopee' | 'TikTok', rows: any[] = []): boolean {
+    return detectMarketplaceSnapshotKind(fileName, source, rows) === 'pending';
 }
 
 function isPickupEligibleStatus(status: string): boolean {
@@ -983,35 +1032,28 @@ export default function EcommerceExportPage() {
         });
     };
 
-    const handleResolveMismatch = (record: EcommerceExport, action: 'cancel' | 'pickup') => {
-        const orderLabel = record.orderNumber || record.ecommerceExportCode || `#${record.id}`;
-        Modal.confirm({
-            title: action === 'cancel' ? 'Xác nhận đơn đã hủy trên sàn?' : 'Xác nhận đơn vẫn chờ lấy hàng?',
-            content: action === 'cancel'
-                ? `Bạn xác nhận ${orderLabel} đã bị hủy trên Shopee/TikTok? Đơn sẽ không được pickup và không trừ tồn.`
-                : `Bạn xác nhận ${orderLabel} vẫn đang Chờ lấy hàng trên sàn? Hệ thống sẽ ghi nhận pickup và trừ tồn như bình thường.`,
-            okText: action === 'cancel' ? 'Xác nhận đã hủy' : 'Xác nhận pickup',
-            okType: action === 'cancel' ? 'danger' : 'primary',
-            cancelText: 'Để sau',
-            onOk: async () => {
-                const result = await window.electronAPI.ecommerceExports.resolveMismatch(record.id, {
-                    action,
-                    updatedAt: record.updatedAt,
-                    pickedBy: activePackerRef.current || currentUser || undefined,
-                });
-                if (!result?.success) {
-                    message.error(result?.error || 'Không thể xử lý đơn cần đối soát.');
-                    return;
-                }
-                if (result.skipped) {
-                    message.warning('Đơn này đã được xử lý ở máy khác. Danh sách sẽ được tải lại.');
-                } else {
-                    message.success(action === 'cancel' ? 'Đã xác nhận đơn hủy trên sàn.' : 'Đã xác nhận pickup thành công.');
-                }
-                await loadEcommerceExports(true);
-                void loadOperationalCounts();
-            },
-        });
+    const handleResolveMismatch = async (record: EcommerceExport, action: 'cancel' | 'pickup') => {
+        try {
+            const result = await window.electronAPI.ecommerceExports.resolveMismatch(record.id, {
+                action,
+                updatedAt: record.updatedAt,
+                pickedBy: activePackerRef.current || currentUser || undefined,
+            });
+            if (!result?.success) {
+                message.error(result?.error || 'Không thể xử lý đơn cần đối soát.');
+                return;
+            }
+            if (result.skipped) {
+                message.warning('Đơn này đã được xử lý ở máy khác. Danh sách sẽ được tải lại.');
+            } else {
+                message.success(action === 'cancel' ? 'Đã xác nhận đơn hủy trên sàn.' : 'Đã xác nhận pickup thành công.');
+            }
+            await loadEcommerceExports(true);
+            void loadOperationalCounts();
+        } catch (error) {
+            console.error('Resolve ecommerce mismatch error:', error);
+            message.error('Không thể xử lý đơn cần đối soát.');
+        }
     };
 
     // 📱 Gửi thông báo lên Telegram
@@ -1801,6 +1843,14 @@ Thời gian: ${currentTime}`;
                     return;
                 }
 
+                const isEmptyTikTokSnapshot = isTikTok && !hasTikTokBusinessRows(jsonData);
+                const detectedSnapshotKind = detectMarketplaceSnapshotKind(file.name, detectedSource!, jsonData);
+                const snapshotKind: MarketplaceSnapshotKind = isEmptyTikTokSnapshot ? 'pending' : detectedSnapshotKind;
+                if (snapshotKind === 'unknown') {
+                    message.error('Không xác định được loại báo cáo của file. Hãy xuất đúng báo cáo Chờ lấy hàng hoặc Đang giao rồi thử lại.');
+                    return;
+                }
+
                 // Group by Order ID to combine items from same order
                 const orderMap = new Map<string, any[]>();
                 const invalidOrders: string[] = [];
@@ -1955,7 +2005,7 @@ Thời gian: ${currentTime}`;
                         invalidOrders.push(`${orderId}: số lượng sản phẩm không hợp lệ`);
                     }
                 });
-                if (jsonData.length > 0 && orderMap.size === 0 && invalidOrders.length === 0) {
+                if (jsonData.length > 0 && orderMap.size === 0 && invalidOrders.length === 0 && !isEmptyTikTokSnapshot) {
                     throw new Error('File không có đơn hàng hợp lệ sau khi bỏ qua các dòng quà tặng/mô tả.');
                 }
 
@@ -2007,6 +2057,8 @@ Thời gian: ${currentTime}`;
                 let importedCount = 0;
                 let skippedCompletedCount = 0;
                 let skippedCancelledCount = 0;
+                let skippedUntrackedCount = 0;
+                let shippingConfirmedCount = 0;
                 let mismatchCount = 0;
                 if (detectedSource) {
                     try {
@@ -2024,7 +2076,8 @@ Thời gian: ${currentTime}`;
                             fileNames: [file.name],
                             records: newEcommerceExports,
                             allowEmptySnapshot,
-                            reconcileMissing: isAuthoritativePendingSnapshot(file.name, source),
+                            snapshotKind,
+                            reconcileMissing: isAuthoritativePendingSnapshot(file.name, source, jsonData),
                         }),
                             120000,
                             'Đồng bộ dữ liệu lên Supabase quá lâu. Vui lòng thử lại.',
@@ -2033,6 +2086,8 @@ Thời gian: ${currentTime}`;
                         importedCount = (importResult.data?.created || 0) + (importResult.data?.updated || 0);
                         skippedCompletedCount = importResult.data?.skippedCompleted || 0;
                         skippedCancelledCount = importResult.data?.skippedCancelled || 0;
+                        skippedUntrackedCount = importResult.data?.skippedUntracked || 0;
+                        shippingConfirmedCount = importResult.data?.shippingConfirmed || 0;
                         await loadEcommerceExports(true);
                         mismatchCount = importResult.data?.mismatch || 0;
                     } catch (dbError) {
@@ -2051,6 +2106,8 @@ Thời gian: ${currentTime}`;
                         message.warning(`Đã bỏ qua ${skippedCompletedCount} đơn đã gửi, không tạo trùng.`);
                     } else if (skippedCancelledCount > 0) {
                         message.warning(`Đã giữ nguyên ${skippedCancelledCount} đơn đã xác nhận hủy trên sàn.`);
+                    } else if (skippedUntrackedCount > 0) {
+                        message.warning(`Có ${skippedUntrackedCount} đơn đang giao chưa từng được nạp vào quy trình pickup; hệ thống không tự trừ tồn.`);
                     } else if (skippedCount > 0) {
                         message.warning(`Tất cả ${skippedCount} đơn hàng đều đã tồn tại trong hệ thống!`);
                     } else {
@@ -2062,6 +2119,8 @@ Thời gian: ${currentTime}`;
                     if (skippedCount > 0) parts.push(`bỏ qua ${skippedCount} đơn trùng`);
                     if (skippedCompletedCount > 0) parts.push(`bỏ qua ${skippedCompletedCount} đơn đã gửi`);
                     if (skippedCancelledCount > 0) parts.push(`giữ nguyên ${skippedCancelledCount} đơn đã hủy`);
+                    if (shippingConfirmedCount > 0) parts.push(`xác nhận ${shippingConfirmedCount} đơn đang giao`);
+                    if (skippedUntrackedCount > 0) parts.push(`${skippedUntrackedCount} đơn chưa có lịch sử pickup không tự trừ tồn`);
                     if (mismatchCount > 0) parts.push(`${mismatchCount} đơn đưa vào Cần kiểm tra`);
                     if (mismatchCount > 0) message.warning(parts.join(' | '));
                     else message.success(parts.join(' | '));
@@ -2109,12 +2168,15 @@ Thời gian: ${currentTime}`;
             let totalSkipped = 0;
             let totalSkippedCompleted = 0;
             let totalSkippedCancelled = 0;
+            let totalSkippedUntracked = 0;
+            let totalShippingConfirmed = 0;
             let totalMismatch = 0;
             let processedFiles = 0;
             const failedFiles: Array<{ name: string; error: string }> = [];
             const snapshotRecordsBySource = new Map<string, Map<string, EcommerceExport>>();
             const snapshotFilesBySource = new Map<string, string[]>();
             const reconcileMissingBySource = new Map<string, boolean>();
+            const snapshotKindBySource = new Map<string, MarketplaceSnapshotKind>();
             // Xử lý từng file
             for (const [fileIndex, fileData] of files.entries()) {
                 try {
@@ -2150,9 +2212,15 @@ Thời gian: ${currentTime}`;
                     if (!isTikTok && !isShopee) {
                         throw new Error('Không đúng định dạng TikTok hoặc Shopee.');
                     }
+                    const fileSource = isTikTok ? 'TikTok' : 'Shopee';
+                    const isEmptyTikTokSnapshot = isTikTok && !hasTikTokBusinessRows(jsonData);
+                    const detectedSnapshotKind = detectMarketplaceSnapshotKind(fileData.name, fileSource, jsonData);
+                    const snapshotKind: MarketplaceSnapshotKind = isEmptyTikTokSnapshot ? 'pending' : detectedSnapshotKind;
+                    if (snapshotKind === 'unknown') {
+                        throw new Error('Không xác định được loại báo cáo. Hãy xuất đúng báo cáo Chờ lấy hàng hoặc Đang giao.');
+                    }
 
                     // 🚫 Thu thập Order IDs cho đối soát (gom từ vòng lặp chính, không cần re-parse)
-                    const fileSource = isTikTok ? 'TikTok' : 'Shopee';
                     if ((snapshotFilesBySource.get(fileSource)?.length || 0) > 0) {
                         throw new Error(`Thư mục có nhiều file ${fileSource}. Chỉ giữ một file snapshot mới nhất cho mỗi sàn để đối soát chính xác.`);
                     }
@@ -2160,8 +2228,9 @@ Thời gian: ${currentTime}`;
                     snapshotFilesBySource.get(fileSource)!.push(fileData.name);
                     reconcileMissingBySource.set(
                         fileSource,
-                        isAuthoritativePendingSnapshot(fileData.name, fileSource as 'Shopee' | 'TikTok'),
+                        snapshotKind === 'pending',
                     );
+                    snapshotKindBySource.set(fileSource, snapshotKind);
                     // Process same as handleImportExcel
                     const orderMap = new Map<string, any[]>();
                     const invalidOrders: string[] = [];
@@ -2291,7 +2360,7 @@ Thời gian: ${currentTime}`;
                             invalidOrders.push(`${orderId}: số lượng sản phẩm không hợp lệ`);
                         }
                     });
-                    if (jsonData.length > 0 && orderMap.size === 0 && invalidOrders.length === 0) {
+                    if (jsonData.length > 0 && orderMap.size === 0 && invalidOrders.length === 0 && !isEmptyTikTokSnapshot) {
                         throw new Error('File không có đơn hàng hợp lệ sau khi bỏ qua các dòng quà tặng/mô tả.');
                     }
 
@@ -2376,6 +2445,7 @@ Thời gian: ${currentTime}`;
                             fileNames: snapshotFilesBySource.get(source) || [],
                             records,
                             allowEmptySnapshot,
+                            snapshotKind: snapshotKindBySource.get(source) || 'unknown',
                             reconcileMissing: reconcileMissingBySource.get(source) === true,
                         }),
                         120000,
@@ -2387,6 +2457,8 @@ Thời gian: ${currentTime}`;
                     totalImported += (importResult.data?.created || 0) + (importResult.data?.updated || 0);
                     totalSkippedCompleted += importResult.data?.skippedCompleted || 0;
                     totalSkippedCancelled += importResult.data?.skippedCancelled || 0;
+                    totalSkippedUntracked += importResult.data?.skippedUntracked || 0;
+                    totalShippingConfirmed += importResult.data?.shippingConfirmed || 0;
                     const mismatchCount = importResult.data?.mismatch || 0;
                     totalMismatch += mismatchCount;
                 }
@@ -2400,6 +2472,8 @@ Thời gian: ${currentTime}`;
             if (totalSkipped > 0) resultParts.push(`bỏ qua ${totalSkipped} đơn trùng`);
             if (totalSkippedCompleted > 0) resultParts.push(`bỏ qua ${totalSkippedCompleted} đơn đã gửi`);
             if (totalSkippedCancelled > 0) resultParts.push(`giữ nguyên ${totalSkippedCancelled} đơn đã hủy`);
+            if (totalShippingConfirmed > 0) resultParts.push(`xác nhận ${totalShippingConfirmed} đơn đang giao`);
+            if (totalSkippedUntracked > 0) resultParts.push(`${totalSkippedUntracked} đơn chưa có lịch sử pickup không tự trừ tồn`);
             if (totalMismatch > 0) resultParts.push(`${totalMismatch} đơn đưa vào Cần kiểm tra`);
 
             if (failedFiles.length > 0) {

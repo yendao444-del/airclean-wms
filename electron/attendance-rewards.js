@@ -5,6 +5,8 @@ const DEFAULT_ATTENDANCE_REWARD_CONFIG = Object.freeze({
   badgeStreakDays: 3,
   waiverStreakDays: 7,
   waiverLateMaxMinutes: 15,
+  waiverUpgradeStreakDays: 15,
+  waiverUpgradeLateMaxMinutes: 20,
   waiverMaxPerPeriod: 1,
   monthlyRequiredDays: 24,
   standardWorkDays: 26,
@@ -134,6 +136,14 @@ function normalizeConfig(config = {}) {
     badgeStreakDays: Math.max(1, Number(source.badgeStreakDays || DEFAULT_ATTENDANCE_REWARD_CONFIG.badgeStreakDays)),
     waiverStreakDays: Math.max(1, Number(source.waiverStreakDays || DEFAULT_ATTENDANCE_REWARD_CONFIG.waiverStreakDays)),
     waiverLateMaxMinutes: Math.max(1, Number(source.waiverLateMaxMinutes || DEFAULT_ATTENDANCE_REWARD_CONFIG.waiverLateMaxMinutes)),
+    waiverUpgradeStreakDays: Math.max(
+      Number(source.waiverStreakDays || DEFAULT_ATTENDANCE_REWARD_CONFIG.waiverStreakDays),
+      Number(source.waiverUpgradeStreakDays || DEFAULT_ATTENDANCE_REWARD_CONFIG.waiverUpgradeStreakDays),
+    ),
+    waiverUpgradeLateMaxMinutes: Math.max(
+      Number(source.waiverLateMaxMinutes || DEFAULT_ATTENDANCE_REWARD_CONFIG.waiverLateMaxMinutes),
+      Number(source.waiverUpgradeLateMaxMinutes || DEFAULT_ATTENDANCE_REWARD_CONFIG.waiverUpgradeLateMaxMinutes),
+    ),
     waiverMaxPerPeriod: Math.max(1, Number(source.waiverMaxPerPeriod || DEFAULT_ATTENDANCE_REWARD_CONFIG.waiverMaxPerPeriod)),
     monthlyRequiredDays: Math.max(1, Number(source.monthlyRequiredDays || DEFAULT_ATTENDANCE_REWARD_CONFIG.monthlyRequiredDays)),
     standardWorkDays: Math.max(1, Number(source.standardWorkDays || DEFAULT_ATTENDANCE_REWARD_CONFIG.standardWorkDays)),
@@ -267,6 +277,7 @@ function calculateWaiver(statuses, periodKey, config) {
   const ordered = Object.keys(statuses).sort(compareDateKeys);
   let running = 0;
   let earnedAt = null;
+  let upgradedAt = null;
 
   for (const dateKey of ordered) {
     const status = statuses[dateKey]?.status;
@@ -277,6 +288,10 @@ function calculateWaiver(statuses, periodKey, config) {
       if (!earnedAt && running === config.waiverStreakDays && dateKey.startsWith(`${periodKey}-`)) {
         earnedAt = dateKey;
       }
+      if (!upgradedAt && running === config.waiverUpgradeStreakDays && dateKey.startsWith(`${periodKey}-`)) {
+        upgradedAt = dateKey;
+        if (!earnedAt) earnedAt = dateKey;
+      }
     } else if (status === 'late' || status === 'absent') {
       running = 0;
     }
@@ -285,8 +300,13 @@ function calculateWaiver(statuses, periodKey, config) {
   return {
     eligible: Boolean(earnedAt),
     earnedAt,
+    upgraded: Boolean(upgradedAt),
+    upgradedAt,
     streakDays: config.waiverStreakDays,
-    lateMaxMinutes: config.waiverLateMaxMinutes,
+    lateMaxMinutes: upgradedAt ? config.waiverUpgradeLateMaxMinutes : config.waiverLateMaxMinutes,
+    baseLateMaxMinutes: config.waiverLateMaxMinutes,
+    upgradeStreakDays: config.waiverUpgradeStreakDays,
+    upgradeLateMaxMinutes: config.waiverUpgradeLateMaxMinutes,
     maxPerPeriod: config.waiverMaxPerPeriod,
   };
 }
@@ -331,7 +351,7 @@ function calculateMonthly(statuses, periodKey, config, employee) {
   };
 }
 
-function calculateAttendanceRewardSummary({ employee, logs = [], employees = [], faceProfiles = [], workSchedules = [], leaveRecords = [], config = {}, now = new Date(), periodKey } = {}) {
+function calculateAttendanceRewardSummary({ employee, logs = [], employees = [], faceProfiles = [], workSchedules = [], leaveRecords = [], fineWaivers = [], config = {}, now = new Date(), periodKey } = {}) {
   const normalizedConfig = normalizeConfig(config);
   const nowParts = bangkokParts(now);
   const nowKey = nowParts?.date || dateKeyFromTimestamp(now) || new Date().toISOString().slice(0, 10);
@@ -348,6 +368,11 @@ function calculateAttendanceRewardSummary({ employee, logs = [], employees = [],
   const statuses = buildEmployeeInputs(employee, employeeLogs, workSchedules, leaveRecords, normalizedConfig, nowKey, fromKey, toKey);
   const streak = calculateStreak(statuses);
   const waiver = calculateWaiver(statuses, currentPeriod, normalizedConfig);
+  const usedWaiver = (fineWaivers || []).find((item) => (
+    item?.autoAttendanceWaiver
+    && Number(item?.empId) === employeeId
+    && item?.periodKey === currentPeriod
+  ));
   const monthly = calculateMonthly(statuses, currentPeriod, normalizedConfig, employee);
   return {
     employeeId,
@@ -358,7 +383,12 @@ function calculateAttendanceRewardSummary({ employee, logs = [], employees = [],
     bestStreak: streak.bestStreak,
     badgeUnlocked: streak.currentStreak >= normalizedConfig.badgeStreakDays,
     badgeStreakDays: normalizedConfig.badgeStreakDays,
-    waiver,
+    waiver: {
+      ...waiver,
+      used: Boolean(usedWaiver),
+      usedAt: usedWaiver?.waivedAt || null,
+      available: waiver.eligible && !usedWaiver,
+    },
     monthly,
     statuses,
     evaluatedAt: new Date(now).toISOString(),
