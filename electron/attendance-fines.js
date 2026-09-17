@@ -10,6 +10,7 @@ const DEFAULT_ATTENDANCE_CONFIG = {
     afternoonStart: '13:30',
 };
 const { calculateAttendanceRewardSummary } = require('./attendance-rewards');
+const { validScheduleForSession } = require('./attendance-schedule-fines');
 
 let reconcileQueue = Promise.resolve();
 
@@ -163,6 +164,14 @@ async function reconcileLateAttendanceFinesNow(prisma, options = {}) {
                 continue;
             }
 
+            // Seasonal staff are fined for lateness only after declaring a shift.
+            // Missing declarations are reconciled separately by the schedule policy.
+            const declaredSession = log.checkType === 'morning_in' ? 'morning' : 'afternoon';
+            if (employee.type === 'Seasonal'
+                && !validScheduleForSession(attendanceData.workSchedules || [], employee.id, log.date, declaredSession)) {
+                continue;
+            }
+
             const isMorning = log.checkType === 'morning_in';
             const shiftKey = isMorning ? 'sang' : 'chieu';
             const shiftLabel = isMorning ? 'sáng' : 'chiều';
@@ -212,9 +221,9 @@ async function reconcileLateAttendanceFinesNow(prisma, options = {}) {
             )) || waived.some((waiver) => (
                 Number(waiver.empId) === Number(employee.id) && waiver.periodKey === periodKey
             ));
-            // The credit is deliberately narrow: it is used automatically for
-            // one 6–15 minute late arrival only, then expires with the month.
-            if (level.key === 'Level1' && !waiverAlreadyUsed) {
+            // The same monthly credit grows from 15 to 20 minutes after a
+            // 15-day streak. It remains a single use even when upgraded.
+            if (!waiverAlreadyUsed) {
                 const logsThroughThisCheckIn = logs.filter((candidate) => (
                     new Date(candidate.timestamp).getTime() <= new Date(log.timestamp).getTime()
                 ));
@@ -224,6 +233,7 @@ async function reconcileLateAttendanceFinesNow(prisma, options = {}) {
                     logs: logsThroughThisCheckIn,
                     workSchedules: attendanceData.workSchedules || [],
                     leaveRecords: attendanceData.leaveRecords || [],
+                    fineWaivers,
                     config,
                     now: log.timestamp,
                     periodKey,
@@ -237,7 +247,7 @@ async function reconcileLateAttendanceFinesNow(prisma, options = {}) {
                         autoAttendanceWaiver: true,
                         fine: nextFine,
                         waivedAt: new Date(log.timestamp).toISOString(),
-                        reason: `Đã dùng 1 lượt miễn phạt mức Nhẹ (${Number(config.graceMinutes || 0) + 1}–${waiver.lateMaxMinutes} phút) sau chuỗi đúng giờ ${waiver.streakDays} ngày.`,
+                        reason: `Đã dùng 1 lượt miễn phạt chuyên cần (${Number(config.graceMinutes || 0) + 1}–${waiver.lateMaxMinutes} phút) sau chuỗi đúng giờ ${waiver.upgraded ? waiver.upgradeStreakDays : waiver.streakDays} ngày.`,
                     };
                     waived.push(waiverRecord);
                     continue;
@@ -286,7 +296,7 @@ async function reconcileLateAttendanceFinesNow(prisma, options = {}) {
                         changedBy: actor,
                         changedByName: actor === 'system' ? 'Hệ thống chấm công' : actor,
                         after: item.fine,
-                        note: `Tự động miễn phạt nhẹ từ lượt chuyên cần 7 ngày cho log #${item.fine.attendanceLogId}`,
+                        note: `Tự động dùng lượt miễn phạt chuyên cần cho log #${item.fine.attendanceLogId}: ${item.reason}`,
                     })),
                 ],
             };
@@ -307,4 +317,4 @@ function reconcileLateAttendanceFines(prisma, options = {}) {
     return result;
 }
 
-module.exports = { reconcileLateAttendanceFines };
+module.exports = { getEmployeeForLog, normalizeIdentity, reconcileLateAttendanceFines };

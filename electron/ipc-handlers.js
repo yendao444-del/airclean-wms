@@ -121,6 +121,8 @@ const DATA_SAFETY_ALLOWED_CHANNELS = new Set([
   // Pre-packed lots use isolated rows, optimistic state checks and a single
   // transaction for every stock-affecting transition.
   "prepack:create",
+  "prepack:updateTarget",
+  "prepack:deleteTarget",
   "prepack:submitEvidence",
   "prepack:accept",
   "prepack:issue",
@@ -243,6 +245,12 @@ for (const key of runtimeConfigKeys) {
 }
 const { reconcileLateAttendanceFines } = require("./attendance-fines");
 const {
+  CUTOFF_HOUR: ATTENDANCE_SCHEDULE_CUTOFF_HOUR,
+  deadlineFor: attendanceScheduleDeadlineFor,
+  normalizeIdentity: normalizeAttendanceScheduleIdentity,
+  reconcileMissingSeasonalScheduleFines,
+} = require("./attendance-schedule-fines");
+const {
   calculateAllAttendanceRewardSummaries,
   calculateAttendanceRewardSummary,
   DEFAULT_ATTENDANCE_REWARD_CONFIG,
@@ -283,6 +291,7 @@ const {
   getBangkokDateParts,
 } = require("./ecommerce-sla");
 const {
+  detectMarketplaceSnapshotKind,
   isAuthoritativePendingSnapshot,
   isPickupEligibleStatus,
 } = require("./ecommerce-import-policy");
@@ -23873,7 +23882,12 @@ async function assertTmdtItemsSkusExist(tx, items, refCode) {
   assertTmdtItemsSkusExistInSet(items, refCode, existingSkus);
 }
 
-async function ensureMarketplaceOrderInTx(tx, record, actorName) {
+async function ensureMarketplaceOrderInTx(
+  tx,
+  record,
+  actorName,
+  { reconcileExisting = false } = {},
+) {
   const orderNumber = (
     record.orderNumber ||
     record.ecommerceExportCode ||
@@ -23883,14 +23897,36 @@ async function ensureMarketplaceOrderInTx(tx, record, actorName) {
 
   const existing = await tx.order.findUnique({
     where: { orderNumber },
-    select: { id: true, note: true },
+    select: {
+      id: true,
+      note: true,
+      status: true,
+      trackingNumber: true,
+    },
   });
   const orderPlacedAt = getMarketplaceOrderPlacedAt(record);
   if (existing) {
-    if (orderPlacedAt) {
+    if (reconcileExisting && existing.status === "cancelled") {
+      throw new Error(
+        `Đơn ${orderNumber} đang ở trạng thái đã hủy trong mục Đơn hàng. Vui lòng kiểm tra thủ công.`,
+      );
+    }
+    if (orderPlacedAt || (reconcileExisting && existing.status !== "completed")) {
+      const trackingNumber =
+        normalizeTrackingNumber(record.trackingNumber) ||
+        extractTrackingFromNotes(record.notes || null);
       await tx.order.update({
         where: { id: existing.id },
-        data: { note: withMarketplaceOrderPlacedAtNote(existing.note, record) },
+        data: {
+          note: orderPlacedAt
+            ? withMarketplaceOrderPlacedAtNote(existing.note, record)
+            : undefined,
+          status: reconcileExisting ? "completed" : undefined,
+          trackingNumber:
+            reconcileExisting && !existing.trackingNumber && trackingNumber
+              ? trackingNumber
+              : undefined,
+        },
       });
     }
     return;
@@ -24620,10 +24656,20 @@ ipcMain.handle("ecommerceExports:importSnapshot", async (event, payload = {}) =>
     const fileNames = Array.isArray(payload.fileNames)
       ? payload.fileNames.map((name) => String(name).slice(0, 260))
       : [];
+    const snapshotKind = detectMarketplaceSnapshotKind(
+      platform.key,
+      fileNames,
+      payload.snapshotKind,
+    );
+    if (snapshotKind === "unknown") {
+      throw new Error(
+        "Không xác định được loại báo cáo. Hãy xuất đúng báo cáo Chờ lấy hàng hoặc Đang giao.",
+      );
+    }
     const reconcileMissing = payload.reconcileMissing === true
-      && isAuthoritativePendingSnapshot(platform.key, fileNames);
+      && isAuthoritativePendingSnapshot(platform.key, fileNames, snapshotKind);
 
-    const result = await getPrismaDirectTx().$transaction(
+    const runSnapshotImport = () => getPrismaDirectTx().$transaction(
       async (tx) => {
         await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`ecommerce-snapshot:${platform.key}`}))`;
         const batch = await tx.ecommerceImportBatch.create({
@@ -24666,9 +24712,13 @@ ipcMain.handle("ecommerceExports:importSnapshot", async (event, payload = {}) =>
         const createData = [];
         const updateRecords = [];
         const completedReconciliations = [];
+        const shippingReconciliations = [];
         let updatedCount = 0;
         let skippedCompleted = 0;
         let skippedCancelled = 0;
+        let skippedUntracked = 0;
+        let shippingConfirmed = 0;
+        const stockChangedSkus = new Set();
         for (const record of normalizedRecords) {
           const existing = existingByOrder.get(record.orderNumber);
           const notes = withMarketplaceOrderPlacedAtNote(record.notes, record);
@@ -24678,6 +24728,10 @@ ipcMain.handle("ecommerceExports:importSnapshot", async (event, payload = {}) =>
               completedReconciliations.push({ existing, completedOrder });
             }
             skippedCompleted += 1;
+          } else if (!existing && snapshotKind === "shipping") {
+            // A shipping report may contain old orders that were never loaded into
+            // this pickup workflow. Do not retroactively deduct their inventory.
+            skippedUntracked += 1;
           } else if (!existing) {
             createData.push({
               customerName: platform.label,
@@ -24705,6 +24759,8 @@ ipcMain.handle("ecommerceExports:importSnapshot", async (event, payload = {}) =>
             // A human-confirmed cancellation must not be reopened by a later
             // snapshot unless a separate recovery workflow is added.
             skippedCancelled += 1;
+          } else if (snapshotKind === "shipping") {
+            shippingReconciliations.push({ existing, record, notes });
           } else {
             updateRecords.push({ existing, record, notes });
           }
@@ -24723,6 +24779,88 @@ ipcMain.handle("ecommerceExports:importSnapshot", async (event, payload = {}) =>
               mismatchReason: null,
             },
           });
+        }
+        for (const { existing, record, notes } of shippingReconciliations) {
+          await tx.$queryRaw`SELECT id FROM "EcommerceExport" WHERE id = ${existing.id} FOR UPDATE`;
+          const current = await tx.ecommerceExport.findUnique({ where: { id: existing.id } });
+          if (!current) continue;
+          if (current.status === "completed") {
+            skippedCompleted += 1;
+            continue;
+          }
+          if (current.status === "cancelled") {
+            skippedCancelled += 1;
+            continue;
+          }
+          if (!["pending", "processing", "mismatch"].includes(current.status)) {
+            skippedUntracked += 1;
+            continue;
+          }
+
+          const inventoryEvidence = await tx.inventoryLog.findFirst({
+            where: {
+              type: "ecom_sale",
+              reference: record.orderNumber,
+            },
+            select: { id: true },
+          });
+          const completedRecord = await tx.ecommerceExport.update({
+            where: { id: current.id },
+            data: {
+              ecommerceExportCode: record.orderNumber,
+              orderNumber: record.orderNumber,
+              ecommerceExportReason: record.ecommerceExportReason || null,
+              items: record.items,
+              totalAmount: Number(record.totalAmount || 0),
+              notes,
+              trackingNumber:
+                record.trackingNumber ||
+                normalizeTrackingNumber(current.trackingNumber) ||
+                extractTrackingFromNotes(current.notes) ||
+                null,
+              orderPlacedAt: record.orderPlacedAt,
+              slaDeadlineAt: record.slaDeadlineAt,
+              lastSeenImportBatchId: batch.id,
+              status: "completed",
+              completedAt: current.completedAt || importedAt,
+              pickedBy:
+                current.pickedBy ||
+                currentSession?.username ||
+                currentSession?.fullName ||
+                "Đối soát sàn",
+              mismatchAt: null,
+              mismatchReason: null,
+            },
+          });
+
+          if (!inventoryEvidence) {
+            const items = JSON.parse(record.items || "[]");
+            await batchStockUpdate(
+              tx,
+              items
+                .filter((item) => item.variantSku)
+                .map((item) => ({ sku: item.variantSku, quantity: -item.quantity })),
+              {
+                type: "ecom_sale",
+                referenceType: "TMDT_SHIPPING_RECONCILE",
+                reference: record.orderNumber,
+                note: `Đối soát ${platform.label}: sàn xác nhận đơn đang giao`,
+                createdBy: currentSession?.username || currentSession?.fullName || "System",
+              },
+              { allowNegative: true },
+            );
+            for (const item of items) {
+              if (item.variantSku) stockChangedSkus.add(item.variantSku);
+            }
+          }
+          await ensureMarketplaceOrderInTx(
+            tx,
+            completedRecord,
+            completedRecord.pickedBy || completedRecord.createdBy || null,
+            { reconcileExisting: true },
+          );
+          updatedCount += 1;
+          shippingConfirmed += 1;
         }
         for (let offset = 0; offset < updateRecords.length; offset += 100) {
           const chunk = updateRecords.slice(offset, offset + 100);
@@ -24774,7 +24912,7 @@ ipcMain.handle("ecommerceExports:importSnapshot", async (event, payload = {}) =>
           ? await tx.ecommerceExport.updateMany({
               where: {
                 customerName: platform.label,
-                status: "pending",
+                status: { in: ["pending", "processing"] },
                 OR: [
                   { orderNumber: { notIn: orderNumbers } },
                   {
@@ -24806,16 +24944,32 @@ ipcMain.handle("ecommerceExports:importSnapshot", async (event, payload = {}) =>
           updated: updatedCount,
           skippedCompleted,
           skippedCancelled,
+          skippedUntracked,
           mismatch: missing.count,
+          shippingConfirmed,
+          stockChangedSkus: Array.from(stockChangedSkus),
         };
       },
       { maxWait: 15000, timeout: 120000 },
     );
+    const result = snapshotKind === "shipping"
+      ? await withStockLock(runSnapshotImport)
+      : await runSnapshotImport();
+
+    if (result.stockChangedSkus.length > 0) {
+      emitStockChangedForSkus(result.stockChangedSkus, {
+        referenceType: "TMDT_SHIPPING_RECONCILE",
+        reference: `BATCH-${result.batchId}`,
+      });
+    }
+    delete result.stockChangedSkus;
 
     void logActivity({
       module: "export",
       action: "IMPORT",
-      description: `Đối soát ${platform.label}: ${result.imported} đơn, ${result.mismatch} đơn cần kiểm tra`,
+      description: snapshotKind === "shipping"
+        ? `Đối soát ${platform.label}: xác nhận ${result.shippingConfirmed} đơn đang giao`
+        : `Đối soát ${platform.label}: ${result.imported} đơn, ${result.mismatch} đơn cần kiểm tra`,
     });
     return { success: true, data: result };
   } catch (error) {
@@ -26942,31 +27096,35 @@ ipcMain.handle("prepack:create", async (_event, payload = {}) => {
     const actor = await getCurrentActor();
     const requestedQty = parsePositivePrepackQuantity(payload.requestedQty, "Số lượng yêu cầu");
     const product = await resolvePrepackProduct(payload);
-    const packerId = Number(payload.packerId);
-    if (!Number.isInteger(packerId) || packerId <= 0) throw new Error("Hãy chọn nhân viên đóng gói.");
-    const packer = await prisma.user.findUnique({
-      where: { id: packerId },
-      select: { id: true, username: true, fullName: true, status: true },
+    const requestedPackerIds = Array.isArray(payload.packerIds) ? payload.packerIds : [payload.packerId];
+    const packerIds = [...new Set(requestedPackerIds.map(Number).filter((id) => Number.isInteger(id) && id > 0))];
+    if (!packerIds.length) throw new Error("Hãy chọn ít nhất một nhân viên đóng gói.");
+    const packers = await prisma.user.findMany({
+      where: { id: { in: packerIds }, status: "active", role: { not: "admin" } },
+      select: { id: true, username: true, fullName: true, status: true, role: true },
     });
-    if (!packer || packer.status !== "active") throw new Error("Nhân viên đóng gói không còn hoạt động.");
-    const existingTarget = await prisma.prepackBatch.findFirst({
+    if (packers.length !== packerIds.length) throw new Error("Không thể giao chỉ tiêu cho Admin hoặc tài khoản không còn hoạt động.");
+    const existingTargets = await prisma.prepackBatch.findMany({
       where: {
         productSku: product.sku,
-        packerUsername: packer.username,
+        packerUsername: { in: packers.map((packer) => packer.username) },
         status: { in: ["active", "pending"] },
       },
-      select: { id: true },
+      select: { packerUsername: true, packerName: true },
     });
-    if (existingTarget) throw new Error("Nhân viên này đã có chỉ tiêu cho sản phẩm này.");
+    if (existingTargets.length) {
+      throw new Error(`${existingTargets.map((target) => target.packerName || target.packerUsername).join(", ")} đã có chỉ tiêu cho sản phẩm này.`);
+    }
     const stamp = new Date().toISOString().replace(/\D/g, "").slice(2, 14);
-    const code = `DG-${stamp}-${crypto.randomBytes(2).toString("hex").toUpperCase()}`;
-    const created = await prisma.prepackBatch.create({
+    const unit = String(payload.unit || product.unit || "gói").trim().slice(0, 40) || "gói";
+    const note = String(payload.note || "").trim().slice(0, 1000) || null;
+    const created = await prisma.$transaction(packers.map((packer, index) => prisma.prepackBatch.create({
       data: {
-        code,
+        code: `DG-${stamp}-${index + 1}-${crypto.randomBytes(2).toString("hex").toUpperCase()}`,
         productId: product.id,
         productSku: product.sku,
         productName: product.name,
-        unit: String(payload.unit || product.unit || "gói").trim().slice(0, 40) || "gói",
+        unit,
         requestedQty,
         packerId: packer.id,
         packerUsername: packer.username,
@@ -26974,13 +27132,93 @@ ipcMain.handle("prepack:create", async (_event, payload = {}) => {
         status: "active",
         createdById: actor.id,
         createdByName: actor.fullName,
-        note: String(payload.note || "").trim().slice(0, 1000) || null,
+        note,
       },
       include: { evidences: true, movements: true },
-    });
-    return { success: true, data: mapPrepackBatch(created) };
+    })));
+    return {
+      success: true,
+      data: created.map(mapPrepackBatch),
+      createdCount: created.length,
+    };
   } catch (error) {
     console.error("Prepack create error:", error);
+    return { success: false, error: getPrepackErrorMessage(error) };
+  }
+});
+
+ipcMain.handle("prepack:updateTarget", async (_event, payload = {}) => {
+  try {
+    requireRole("admin", "manager");
+    if (!prisma.prepackBatch) throw new Error("Cần cập nhật Prisma Client cho Đóng gói sẵn.");
+    const batchId = Number(payload.batchId);
+    if (!Number.isInteger(batchId) || batchId <= 0) throw new Error("Chỉ tiêu không hợp lệ.");
+    const requestedQty = parsePositivePrepackQuantity(payload.requestedQty, "Số lượng yêu cầu");
+    const batch = await prisma.prepackBatch.findUnique({
+      where: { id: batchId },
+      include: { _count: { select: { evidences: true } } },
+    });
+    if (!batch || !["active", "pending"].includes(batch.status)) throw new Error("Chỉ tiêu không còn hoạt động.");
+
+    const packerId = Number(payload.packerId || batch.packerId);
+    if (!Number.isInteger(packerId) || packerId <= 0) throw new Error("Hãy chọn nhân viên đóng gói.");
+    const packer = await prisma.user.findUnique({
+      where: { id: packerId },
+      select: { id: true, username: true, fullName: true, status: true, role: true },
+    });
+    if (!packer || packer.status !== "active") throw new Error("Nhân viên đóng gói không còn hoạt động.");
+    if (packer.role === "admin") throw new Error("Không thể giao chỉ tiêu đóng gói cho Admin.");
+    const changingPacker = packer.id !== batch.packerId || packer.username !== batch.packerUsername;
+    if (changingPacker && batch._count.evidences > 0) {
+      throw new Error("Chỉ tiêu đã có lịch sử ảnh nên không thể đổi nhân viên. Hãy xóa chỉ tiêu này và tạo chỉ tiêu mới.");
+    }
+    const duplicate = await prisma.prepackBatch.findFirst({
+      where: {
+        id: { not: batch.id },
+        productSku: batch.productSku,
+        packerUsername: packer.username,
+        status: { in: ["active", "pending"] },
+      },
+      select: { id: true },
+    });
+    if (duplicate) throw new Error("Nhân viên này đã có chỉ tiêu cho sản phẩm này.");
+
+    const unit = String(payload.unit || batch.unit || "gói").trim().slice(0, 40) || "gói";
+    const materialChange = requestedQty !== batch.requestedQty || unit !== batch.unit || changingPacker;
+    const updated = await prisma.prepackBatch.update({
+      where: { id: batch.id },
+      data: {
+        requestedQty,
+        unit,
+        packerId: packer.id,
+        packerUsername: packer.username,
+        packerName: packer.fullName || packer.username,
+        note: String(payload.note || "").trim().slice(0, 1000) || null,
+        ...(materialChange ? { reportedQty: 0, acceptedQty: 0, reportedAt: null } : {}),
+      },
+      include: { evidences: { orderBy: { createdAt: "desc" }, take: 1 }, movements: true },
+    });
+    return { success: true, data: mapPrepackBatch(updated) };
+  } catch (error) {
+    console.error("Prepack update target error:", error);
+    return { success: false, error: getPrepackErrorMessage(error) };
+  }
+});
+
+ipcMain.handle("prepack:deleteTarget", async (_event, batchIdValue) => {
+  try {
+    requireRole("admin", "manager");
+    if (!prisma.prepackBatch) throw new Error("Cần cập nhật Prisma Client cho Đóng gói sẵn.");
+    const batchId = Number(batchIdValue);
+    if (!Number.isInteger(batchId) || batchId <= 0) throw new Error("Chỉ tiêu không hợp lệ.");
+    const result = await prisma.prepackBatch.updateMany({
+      where: { id: batchId, status: { in: ["active", "pending"] } },
+      data: { status: "cancelled" },
+    });
+    if (result.count !== 1) throw new Error("Chỉ tiêu không còn hoạt động hoặc đã được xóa.");
+    return { success: true };
+  } catch (error) {
+    console.error("Prepack delete target error:", error);
     return { success: false, error: getPrepackErrorMessage(error) };
   }
 });
@@ -28506,6 +28744,8 @@ ipcMain.handle("policies:getCurrent", async () => {
             badgeStreakDays: attendanceReward.badgeStreakDays,
             waiverStreakDays: attendanceReward.waiverStreakDays,
             waiverLateMaxMinutes: attendanceReward.waiverLateMaxMinutes,
+            waiverUpgradeStreakDays: attendanceReward.waiverUpgradeStreakDays,
+            waiverUpgradeLateMaxMinutes: attendanceReward.waiverUpgradeLateMaxMinutes,
             waiverMaxPerPeriod: attendanceReward.waiverMaxPerPeriod,
             monthlyRequiredDays: attendanceReward.monthlyRequiredDays,
             standardWorkDays: attendanceReward.standardWorkDays,
@@ -28568,6 +28808,8 @@ ipcMain.handle("attendance:getInitialData", async () => {
   try {
     requireRole("admin", "manager", "staff");
     if (!prisma) throw new Error("Prisma not available");
+    await reconcileMissingSeasonalScheduleFines(prisma, { now: new Date() })
+      .catch((error) => console.warn("[Attendance Schedule] Không đối soát được phạt thiếu khai báo:", error.message));
     const snapshot = await getAttendanceCoreSnapshot();
     return {
       success: true,
@@ -28604,6 +28846,82 @@ ipcMain.handle("attendance:getLockedPeriodSnapshot", async (_event, payload = {}
     return { success: true, data: period };
   } catch (error) {
     console.error("❌ attendance:getLockedPeriodSnapshot error:", error);
+    return { success: false, error: error.message };
+  }
+});
+
+// Seasonal staff may declare one shift for themselves before 19:00. Managers
+// can help schedule seasonal staff; only admins may edit a locked declaration.
+ipcMain.handle("attendance:updateWorkSchedule", async (_event, payload = {}) => {
+  try {
+    requireRole("admin", "manager", "staff");
+    if (!prisma) throw new Error("Prisma not available");
+    const empId = Number(payload.empId);
+    const date = String(payload.date || "").trim();
+    const action = String(payload.action || "save").trim();
+    const session = String(payload.session || "").trim();
+    const note = String(payload.note || "").trim().slice(0, 500);
+    if (!Number.isInteger(empId) || empId <= 0) throw new Error("Nhân viên không hợp lệ.");
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new Error("Ngày làm việc không hợp lệ.");
+    if (!["save", "clear"].includes(action)) throw new Error("Thao tác lịch làm không hợp lệ.");
+    if (action === "save" && !["morning", "afternoon", "off"].includes(session)) throw new Error("Nhân viên thời vụ chỉ đăng ký một ca hoặc báo nghỉ.");
+
+    const actor = await getCurrentActor();
+    const result = await enqueueAttendanceDataWrite(async () => getPrismaDirectTx().$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('attendanceData'))`;
+      const row = await tx.appConfig.findUnique({ where: { key: "attendanceData" } });
+      let attendanceData = {};
+      try { attendanceData = JSON.parse(row?.value || "{}"); } catch {}
+      const employees = Array.isArray(attendanceData.employees) ? attendanceData.employees : [];
+      const employee = employees.find((item) => Number(item?.id) === empId);
+      if (!employee || employee.type !== "Seasonal") throw new Error("Chỉ nhân viên thời vụ mới được đăng ký ca.");
+      const actorIsAdmin = actor.role === "admin";
+      const actorIsManager = actor.role === "manager";
+      const actorIdentity = normalizeAttendanceScheduleIdentity(actor.username);
+      const actorName = normalizeAttendanceScheduleIdentity(actor.fullName);
+      const employeeIdentity = normalizeAttendanceScheduleIdentity(employee.username);
+      const employeeName = normalizeAttendanceScheduleIdentity(employee.name);
+      const isSelf = (actorIdentity && employeeIdentity && actorIdentity === employeeIdentity)
+        || (actorName && employeeName && actorName === employeeName);
+      if (!actorIsAdmin && !actorIsManager && !isSelf) throw new Error("Bạn chỉ được đăng ký ca của chính mình.");
+      const today = new Date().toLocaleDateString("sv-SE", { timeZone: "Asia/Bangkok" });
+      const tomorrow = new Date(`${today}T12:00:00+07:00`);
+      tomorrow.setUTCDate(tomorrow.getUTCDate() + 1);
+      const tomorrowKey = tomorrow.toLocaleDateString("sv-SE", { timeZone: "Asia/Bangkok" });
+      if (!actorIsAdmin && date !== tomorrowKey) throw new Error("Nhân viên và quản lý chỉ được đăng ký lịch cho ngày mai.");
+      if (!actorIsAdmin && new Date() >= attendanceScheduleDeadlineFor(date)) {
+        throw new Error(`Lịch ngày ${date} đã khóa sau ${ATTENDANCE_SCHEDULE_CUTOFF_HOUR}:00. Chỉ admin được sửa.`);
+      }
+      const current = Array.isArray(attendanceData.workSchedules) ? attendanceData.workSchedules : [];
+      const currentForDate = current.filter((item) => Number(item?.empId) === empId && item?.date === date);
+      if (!actorIsAdmin && currentForDate.length > 0) {
+        throw new Error("Lịch đã đăng ký. Chỉ admin được phép sửa hoặc xóa.");
+      }
+      const withoutDate = current.filter((item) => !(Number(item?.empId) === empId && item?.date === date));
+      const nextSchedules = action === "clear" ? withoutDate : [
+        ...withoutDate,
+        { id: `${empId}-${date}-${session}`, empId, date, session, note, createdAt: new Date().toISOString(), createdBy: actor.username },
+      ];
+      const nextData = { ...attendanceData, workSchedules: nextSchedules };
+      await tx.appConfig.upsert({
+        where: { key: "attendanceData" },
+        update: { value: JSON.stringify(nextData) },
+        create: { key: "attendanceData", value: JSON.stringify(nextData) },
+      });
+      return { workSchedules: nextSchedules };
+    }, { isolationLevel: "Serializable", timeout: 10000, maxWait: 10000 }));
+    await reconcileMissingSeasonalScheduleFines(prisma, { dateKey: date, now: new Date() });
+    void logActivity({
+      module: "attendance",
+      action: "UPDATE_WORK_SCHEDULE",
+      description: `${action === "clear" ? "Xóa" : "Đăng ký"} lịch ${date} ca ${session || ""} cho NV #${empId}`,
+      recordName: `${empId}-${date}`,
+      userName: actor.username,
+      severity: "INFO",
+    }).catch((error) => console.warn("Không thể ghi audit lịch làm:", error.message));
+    return { success: true, data: result };
+  } catch (error) {
+    console.error("❌ attendance:updateWorkSchedule error:", error);
     return { success: false, error: error.message };
   }
 });
@@ -28701,6 +29019,11 @@ ipcMain.handle("appConfig:set", async (event, key, value, expectedUpdatedAt) => 
                       // API below; never accept a stale whole-page copy here.
                       leaveRecords: Array.isArray(currentValue?.leaveRecords)
                         ? currentValue.leaveRecords
+                        : [],
+                      // Work schedules are mutated through the atomic API.
+                      // Never let an older page snapshot undo a declaration.
+                      workSchedules: Array.isArray(currentValue?.workSchedules)
+                        ? currentValue.workSchedules
                         : [],
                       // Locks/snapshots and payroll overrides have dedicated
                       // atomic APIs. A stale whole-page autosave must never
@@ -33567,8 +33890,8 @@ const FALLBACK_ANNOUNCEMENTS = [
   {
     id: 900002,
     title: "Chính sách thưởng chuyên cần",
-    summary: "Duy trì đúng giờ để mở huy hiệu, nhận lượt miễn phạt nhẹ và thưởng chuyên cần 200.000đ.",
-    content: "Công ty áp dụng cơ chế chuyên cần theo kết quả chấm công thực tế.\n\n• Đúng giờ 3 ngày liên tiếp: mở huy hiệu Đúng giờ.\n• Đúng giờ 7 ngày liên tiếp: nhận 1 lượt miễn phạt mức Nhẹ (đi muộn 6–15 phút), tự dùng tối đa 1 lần trong kỳ. Lượt này vẫn làm đứt chuỗi đúng giờ và ảnh hưởng tỷ lệ chuyên cần.\n• Nhân viên chính thức hoàn tất kỳ làm việc và đạt tối thiểu 24/26 ngày đúng giờ (92,3%): thưởng 200.000đ vào kỳ lương tương ứng. Nhân viên thời vụ không áp dụng khoản thưởng tháng này.\n• 5 phút đầu mỗi ca vẫn được tính đúng giờ; nghỉ phép được duyệt không làm đứt chuỗi; ngày nghỉ, ngày lễ và ngày không có lịch làm không tính vào chuỗi.",
+    summary: "Duy trì đúng giờ để mở huy hiệu, nhận lượt đi muộn miễn phạt và thưởng chuyên cần 200.000đ.",
+    content: "Công ty áp dụng cơ chế chuyên cần theo kết quả chấm công thực tế.\n\n• Đúng giờ 3 ngày liên tiếp: mở huy hiệu Đúng giờ.\n• Đúng giờ 7 ngày liên tiếp: nhận 1 lượt đi muộn miễn phạt tối đa 15 phút, tự dùng tối đa 1 lần trong kỳ.\n• Đúng giờ 15 ngày liên tiếp: nâng lượt hiện có lên tối đa 20 phút, không cộng thêm lượt mới.\n• Khi dùng lượt miễn phạt, chuỗi đúng giờ vẫn bị đứt và tỷ lệ chuyên cần vẫn bị ảnh hưởng.\n• Nhân viên chính thức hoàn tất kỳ làm việc và đạt tối thiểu 24/26 ngày đúng giờ (92,3%): thưởng 200.000đ vào kỳ lương tương ứng. Nhân viên thời vụ không áp dụng khoản thưởng tháng này.\n• 5 phút đầu mỗi ca vẫn được tính đúng giờ; nghỉ phép được duyệt không làm đứt chuỗi; ngày nghỉ, ngày lễ và ngày không có lịch làm không tính vào chuỗi.",
     category: "policy",
     severity: "reward",
     status: "published",
@@ -34310,6 +34633,7 @@ async function reconcileAttendanceRewardNotifications(options = {}) {
     faceProfiles: context.faceProfiles,
     workSchedules: context.attendanceData.workSchedules || [],
     leaveRecords: context.attendanceData.leaveRecords || [],
+    fineWaivers: context.attendanceData.fineWaivers || [],
     config: { ...context.config, graceMinutes: context.config.graceMinutes },
     now: context.now,
     periodKey: context.periodKey,
@@ -34337,9 +34661,9 @@ async function reconcileAttendanceRewardNotifications(options = {}) {
       const wasCreated = await createAttendanceUserNotification({
         userId: user.id,
         eventKey: `attendance:waiver-earned:${summary.employeeId}:${summary.periodKey}:${summary.waiver.earnedAt}`,
-        title: "Bạn có 1 lượt miễn phạt nhẹ",
+        title: "Bạn có 1 lượt đi muộn miễn phạt",
         summary: `Đã duy trì đúng giờ ${summary.waiver.streakDays} ngày liên tiếp.`,
-        content: `Bạn đã nhận 1 lượt miễn phạt cho lần đi muộn mức Nhẹ (${context.config.graceMinutes + 1}–${summary.waiver.lateMaxMinutes} phút). Lượt này tự áp dụng tối đa ${summary.waiver.maxPerPeriod} lần trong tháng ${summary.periodKey}; đi muộn vẫn làm đứt chuỗi và ảnh hưởng tỷ lệ chuyên cần tháng.`,
+        content: `Bạn đã nhận 1 lượt miễn phạt khi đi muộn tối đa ${summary.waiver.baseLateMaxMinutes} phút. Nếu duy trì đúng giờ ${summary.waiver.upgradeStreakDays} ngày liên tiếp, giới hạn sẽ tăng lên ${summary.waiver.upgradeLateMaxMinutes} phút. Lượt này tự áp dụng tối đa ${summary.waiver.maxPerPeriod} lần trong tháng ${summary.periodKey}; đi muộn vẫn làm đứt chuỗi và ảnh hưởng tỷ lệ chuyên cần tháng.`,
         severity: "reward",
         metadata: {
           event: "late_fine_waiver_earned",
@@ -34347,6 +34671,30 @@ async function reconcileAttendanceRewardNotifications(options = {}) {
           earnedAt: summary.waiver.earnedAt,
           streakDays: summary.waiver.streakDays,
           lateMaxMinutes: summary.waiver.lateMaxMinutes,
+        },
+      });
+      if (wasCreated) created += 1;
+    }
+    if (summary.waiver?.upgraded && summary.waiver.upgradedAt) {
+      const wasCreated = await createAttendanceUserNotification({
+        userId: user.id,
+        eventKey: `attendance:waiver-upgraded:${summary.employeeId}:${summary.periodKey}:${summary.waiver.upgradedAt}`,
+        title: summary.waiver.used
+          ? `Bạn đã đạt chuỗi đúng giờ ${summary.waiver.upgradeStreakDays} ngày`
+          : "Lượt miễn phạt đã được nâng cấp",
+        summary: summary.waiver.used
+          ? "Lượt miễn phạt tháng này đã được sử dụng nên không phát sinh thêm lượt mới."
+          : `Được đi muộn tối đa ${summary.waiver.upgradeLateMaxMinutes} phút mà không bị phạt.`,
+        content: summary.waiver.used
+          ? `Bạn đã duy trì đúng giờ ${summary.waiver.upgradeStreakDays} ngày liên tiếp. Tuy nhiên lượt miễn phạt của tháng ${summary.periodKey} đã được sử dụng trước đó, nên mốc này không tạo thêm lượt mới.`
+          : `Bạn đã duy trì đúng giờ ${summary.waiver.upgradeStreakDays} ngày liên tiếp. Lượt miễn phạt trong tháng ${summary.periodKey} được nâng giới hạn lên ${summary.waiver.upgradeLateMaxMinutes} phút; vẫn chỉ dùng tối đa ${summary.waiver.maxPerPeriod} lần và lần đi muộn sẽ làm đứt chuỗi đúng giờ.`,
+        severity: "reward",
+        metadata: {
+          event: "late_fine_waiver_upgraded",
+          periodKey: summary.periodKey,
+          upgradedAt: summary.waiver.upgradedAt,
+          streakDays: summary.waiver.upgradeStreakDays,
+          lateMaxMinutes: summary.waiver.upgradeLateMaxMinutes,
         },
       });
       if (wasCreated) created += 1;
@@ -34395,6 +34743,7 @@ async function createAttendanceLateNotification(log, lateFine, waivedLate) {
     faceProfiles: context.faceProfiles,
     workSchedules: context.attendanceData.workSchedules || [],
     leaveRecords: context.attendanceData.leaveRecords || [],
+    fineWaivers: context.attendanceData.fineWaivers || [],
     config: context.config,
     now: context.now,
     periodKey: context.periodKey,
@@ -34406,9 +34755,9 @@ async function createAttendanceLateNotification(log, lateFine, waivedLate) {
     return createAttendanceUserNotification({
       userId: user.id,
       eventKey: `attendance:waiver-used:${employee.id}:${dateKey}:${log.checkType}`,
-      title: "Đã dùng lượt miễn phạt nhẹ",
+      title: "Đã dùng lượt đi muộn miễn phạt",
       summary: `Ca ${log.checkType === "morning_in" ? "sáng" : "chiều"} ngày ${dateKey}${lateMinutes ? `: muộn ${lateMinutes} phút` : ""} không bị khấu trừ.`,
-      content: `${waivedLate.reason} Lượt miễn phạt chỉ áp dụng cho mức Nhẹ và đã được dùng cho tháng ${waivedLate.periodKey}. Lần đi muộn này vẫn làm đứt chuỗi đúng giờ; tỷ lệ chuyên cần tháng hiện là ${(summary.monthly.onTimeRate * 100).toFixed(1)}%.`,
+      content: `${waivedLate.reason} Lượt miễn phạt của tháng ${waivedLate.periodKey} đã được sử dụng và không phát sinh thêm lượt mới. Lần đi muộn này vẫn làm đứt chuỗi đúng giờ; tỷ lệ chuyên cần tháng hiện là ${(summary.monthly.onTimeRate * 100).toFixed(1)}%.`,
       severity: "info",
       metadata: { event: "late_fine_waiver_used", dateKey, checkType: log.checkType, lateMinutes: Number(lateMinutes || 0), periodKey: waivedLate.periodKey },
     });
@@ -37926,6 +38275,8 @@ ipcMain.handle("attendance:recognize", async (event, { image }) => {
       logIds: [log.id],
       actor: "system",
     });
+    void reconcileMissingSeasonalScheduleFines(prisma, { dateKey: today, now: new Date() })
+      .catch((error) => console.warn("[Attendance Schedule] Không đối soát được phạt thiếu khai báo:", error.message));
     const lateFine = fineResult.created[0] || null;
     const waivedLate = fineResult.waived?.[0] || null;
     void createAttendanceLateNotification(log, lateFine, waivedLate)
@@ -37961,6 +38312,7 @@ ipcMain.handle("attendance:getRewardSummary", async (_event, periodKey) => {
       faceProfiles: context.faceProfiles,
       workSchedules: context.attendanceData.workSchedules || [],
       leaveRecords: context.attendanceData.leaveRecords || [],
+      fineWaivers: context.attendanceData.fineWaivers || [],
       config: context.config,
       now: context.now,
       periodKey: context.periodKey,
@@ -37986,6 +38338,8 @@ ipcMain.handle("attendance:getRewardSummary", async (_event, periodKey) => {
           badgeStreakDays: context.config.badgeStreakDays,
           waiverStreakDays: context.config.waiverStreakDays,
           waiverLateMaxMinutes: context.config.waiverLateMaxMinutes,
+          waiverUpgradeStreakDays: context.config.waiverUpgradeStreakDays,
+          waiverUpgradeLateMaxMinutes: context.config.waiverUpgradeLateMaxMinutes,
           waiverMaxPerPeriod: context.config.waiverMaxPerPeriod,
           monthlyRequiredDays: context.config.monthlyRequiredDays,
           standardWorkDays: context.config.standardWorkDays,

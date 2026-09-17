@@ -17,6 +17,7 @@ echo ============================================
 echo.
 echo [RULE] Chi dung khi ca Prisma va Python face service can cap nhat.
 echo [RULE] Neu khong doi Python, dung updates\RELEASE-PRISMA-PATCH.bat de goi nhe hon.
+echo [INFO] Neu preflight bao loi, hay chay dung file release duoc goi y trong thong bao.
 echo.
 
 call node scripts\release-preflight.cjs prisma-python

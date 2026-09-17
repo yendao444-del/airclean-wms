@@ -133,10 +133,30 @@ if (relevant.length > 0) {
 }
 
 if (blockers.length > 0) {
+  const hasPythonImpact = relevant.some(isPythonImpact);
+  const hasRuntimeDependencyImpact = packageJsonRuntimeImpact || packageLockRuntimeImpact;
+  const hasPrismaSchemaImpact = relevant.some((file) =>
+    file === 'prisma/schema.prisma' || file.startsWith('prisma/migrations/'),
+  );
+  const hasBackendImpact = relevant.some(isBackendImpact);
+  const hasReleaseToolingImpact = relevant.some(isReleaseTooling);
+  let recommendedRelease = 'updates\\RELEASE.bat';
+  if (hasRuntimeDependencyImpact || hasReleaseToolingImpact) {
+    recommendedRelease = 'updates\\BUILD-INSTALLER.bat hoặc updates\\RELEASE.bat';
+  } else if (hasPythonImpact) {
+    recommendedRelease = 'updates\\RELEASE-ver2.bat';
+  } else if (hasPrismaSchemaImpact) {
+    recommendedRelease = 'updates\\RELEASE-PRISMA-PATCH.bat';
+  } else if (hasBackendImpact) {
+    recommendedRelease = 'updates\\RELEASE-ver3.bat';
+  }
   console.error('');
   console.error('RELEASE_PREFLIGHT_FAILED This release tier is too small for the current changes:');
   [...new Set(blockers)].forEach((file) => console.error(`  - ${file}`));
-  console.error('Read updates/QUY_TAC_PHAT_HANH.md and select a higher release tier.');
+  console.error('');
+  console.error(`Với các thay đổi này, bạn cần chạy: ${recommendedRelease}`);
+  console.error('Không chạy file release nhỏ hơn vì có thể thiếu code backend, Prisma hoặc runtime cần thiết.');
+  console.error('Đọc thêm: updates/QUY_TAC_PHAT_HANH.md');
   process.exit(1);
 }
 

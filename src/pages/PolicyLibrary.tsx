@@ -78,6 +78,8 @@ interface PolicyMechanisms {
         badgeStreakDays: number;
         waiverStreakDays: number;
         waiverLateMaxMinutes: number;
+        waiverUpgradeStreakDays: number;
+        waiverUpgradeLateMaxMinutes: number;
         waiverMaxPerPeriod: number;
         monthlyRequiredDays: number;
         standardWorkDays: number;
@@ -146,6 +148,8 @@ const defaultMechanisms: PolicyMechanisms = {
         badgeStreakDays: 3,
         waiverStreakDays: 7,
         waiverLateMaxMinutes: 15,
+        waiverUpgradeStreakDays: 15,
+        waiverUpgradeLateMaxMinutes: 20,
         waiverMaxPerPeriod: 1,
         monthlyRequiredDays: 24,
         standardWorkDays: 26,
@@ -597,13 +601,13 @@ export default function PolicyLibrary() {
                 { label: 'Mốc nhận thưởng', value: `${attendanceReward.monthlyRequiredDays}/${attendanceReward.standardWorkDays}`, note: 'tối thiểu 92,3% ngày đúng giờ', icon: <CalendarOutlined />, tone: 'mint' },
                 { label: 'Mức thưởng tháng', value: money(attendanceReward.monthlyRewardAmount), note: 'chỉ áp dụng nhân viên chính thức', icon: <GiftOutlined />, tone: 'amber' },
                 { label: 'Mốc huy hiệu', value: `${attendanceReward.badgeStreakDays} ngày`, note: 'liên tiếp đúng giờ', icon: <TrophyOutlined />, tone: 'blue' },
-                { label: 'Lượt miễn phạt nhẹ', value: `${attendanceReward.waiverStreakDays} ngày`, note: `1 lượt ${attendanceReward.graceMinutes + 1}–${attendanceReward.waiverLateMaxMinutes} phút/kỳ`, icon: <ClockCircleOutlined />, tone: 'soft' },
+                { label: 'Lượt miễn phạt', value: `${attendanceReward.waiverStreakDays} ngày`, note: `Tối đa ${attendanceReward.waiverLateMaxMinutes} phút; nâng lên ${attendanceReward.waiverUpgradeLateMaxMinutes} phút ở mốc ${attendanceReward.waiverUpgradeStreakDays} ngày`, icon: <ClockCircleOutlined />, tone: 'soft' },
             ]}
             sectionEyebrow="CƠ CHẾ THƯỞNG HÀNH VI"
             sectionTitle="Duy trì đều đặn, nhận quyền lợi rõ ràng"
             formulaTitle="Cách xét thưởng"
             formula={`Nhân viên chính thức đạt tối thiểu ${attendanceReward.monthlyRequiredDays}/${attendanceReward.standardWorkDays} ngày (92,3%) đúng giờ và kỳ đã hoàn tất => ${money(attendanceReward.monthlyRewardAmount)}`}
-            formulaNote="Sau chuỗi 7 ngày đúng giờ, hệ thống tự dùng tối đa 1 lượt miễn phạt mức Nhẹ trong kỳ. Đi muộn vẫn làm đứt chuỗi và ảnh hưởng tỷ lệ chuyên cần."
+            formulaNote={`Sau ${attendanceReward.waiverStreakDays} ngày đúng giờ, nhận 1 lượt miễn phạt tối đa ${attendanceReward.waiverLateMaxMinutes} phút. Đạt ${attendanceReward.waiverUpgradeStreakDays} ngày thì nâng lên ${attendanceReward.waiverUpgradeLateMaxMinutes} phút, không cộng thêm lượt. Đi muộn vẫn làm đứt chuỗi.`}
         />;
         if (activePolicy === 'attendanceLateFine') {
             const thresholds = [

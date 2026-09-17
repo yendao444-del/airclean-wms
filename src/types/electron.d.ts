@@ -222,8 +222,16 @@ export interface AttendanceRewardSummary {
   waiver: {
     eligible: boolean;
     earnedAt?: string | null;
+    upgraded: boolean;
+    upgradedAt?: string | null;
+    used: boolean;
+    usedAt?: string | null;
+    available: boolean;
     streakDays: number;
     lateMaxMinutes: number;
+    baseLateMaxMinutes: number;
+    upgradeStreakDays: number;
+    upgradeLateMaxMinutes: number;
     maxPerPeriod: number;
   };
   monthly: AttendanceRewardMonthlySummary;
@@ -318,6 +326,8 @@ export interface ElectronAPI {
   prepack: {
     list: (filters?: { status?: string }) => Promise<{ success: boolean; data?: any[]; error?: string }>;
     create: (data: any) => Promise<{ success: boolean; data?: any; error?: string }>;
+    updateTarget: (data: any) => Promise<{ success: boolean; data?: any; error?: string }>;
+    deleteTarget: (batchId: number) => Promise<{ success: boolean; error?: string }>;
     submitEvidence: (data: any) => Promise<{ success: boolean; data?: any; error?: string }>;
     accept: (data: any) => Promise<{ success: boolean; data?: any; error?: string }>;
     issue: (data: any) => Promise<{ success: boolean; data?: any; error?: string }>;
@@ -1091,6 +1101,7 @@ export interface ElectronAPI {
       records: any[];
       allowEmptySnapshot?: boolean;
       reconcileMissing?: boolean;
+      snapshotKind?: "pending" | "shipping" | "unknown";
     }) => Promise<{
       success: boolean;
       data?: {
@@ -1100,6 +1111,8 @@ export interface ElectronAPI {
         updated: number;
         skippedCompleted: number;
         skippedCancelled?: number;
+        skippedUntracked?: number;
+        shippingConfirmed?: number;
         mismatch: number;
       };
       error?: string;
@@ -1401,6 +1414,8 @@ export interface ElectronAPI {
           badgeStreakDays: number;
           waiverStreakDays: number;
           waiverLateMaxMinutes: number;
+          waiverUpgradeStreakDays: number;
+          waiverUpgradeLateMaxMinutes: number;
           waiverMaxPerPeriod: number;
           monthlyRequiredDays: number;
           standardWorkDays: number;
@@ -1421,6 +1436,17 @@ export interface ElectronAPI {
     }) => Promise<{
       success: boolean;
       data?: { leaveRecords?: any[] };
+      error?: string;
+    }>;
+    updateWorkSchedule: (data: {
+      empId: number;
+      date: string;
+      action: "save" | "clear";
+      session?: "morning" | "afternoon" | "off";
+      note?: string;
+    }) => Promise<{
+      success: boolean;
+      data?: { workSchedules?: any[] };
       error?: string;
     }>;
     updatePayrollOverride: (data: {

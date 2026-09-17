@@ -45,3 +45,16 @@ Every release must pass the checks appropriate to its tier before ZIP creation o
 - Treat a successful local build as necessary but not sufficient. The staged runtime and final archive must also pass validation.
 
 The human-readable release guide is `updates/QUY_TAC_PHAT_HANH.md`. Security and credential packaging checks are in `updates/SECURITY-DEPLOYMENT.md`.
+
+## Product Design Demo Images
+
+When creating any UI/UX demo image, mockup, visual concept, or design exploration:
+
+- Always use the Product Design workflow, routed through the relevant Product Design skill.
+- Query the configured gateway's image-model catalog before generation.
+- Use the highest-quality dedicated image-generation model currently available. At present, prefer `cx/gpt-image-2.5`.
+- Use variants such as `cx/gpt-image-2.5-flare` or `cx/gpt-image-2.5-sunburst` only when their visual characteristics suit the requested design direction.
+- A higher version number in a general-purpose model name does not by itself make it preferable to the newest dedicated `gpt-image` model family.
+- If a newer dedicated `gpt-image` model becomes available, prefer it over `cx/gpt-image-2.5`.
+- Do not use an older or lower-tier image model when the preferred dedicated model is available.
+- Do not silently substitute an HTML/CSS screenshot, placeholder, or fallback image generator. If the highest-quality image model is unavailable, report that limitation before proceeding.

@@ -13,6 +13,7 @@ echo.
 echo [!] Chi dung cho thay doi giao dien, CSS, cong thuc frontend.
 echo [!] Electron dung updates\RELEASE-ver3.bat; Prisma dung updates\RELEASE-PRISMA-PATCH.bat.
 echo [!] Python dung updates\RELEASE-ver2.bat; runtime/dependency dung updates\BUILD-INSTALLER.bat.
+echo [!] Neu preflight bao loi, hay chay dung file duoc goi y trong dong "Voi cac thay doi nay...".
 echo.
 
 call node scripts\release-preflight.cjs renderer

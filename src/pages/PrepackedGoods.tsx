@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
+    Avatar,
     Button,
     Empty,
     Form,
@@ -7,15 +8,20 @@ import {
     Input,
     InputNumber,
     Modal,
+    Popconfirm,
     Select,
     Spin,
-    Table,
     Upload,
     message,
 } from 'antd';
 import {
     CameraOutlined,
-    EyeOutlined,
+    CheckCircleFilled,
+    ClockCircleOutlined,
+    DeleteOutlined,
+    DownOutlined,
+    EditOutlined,
+    SearchOutlined,
     CalendarOutlined,
     HomeOutlined,
     MobileOutlined,
@@ -26,6 +32,11 @@ import type { UploadFile } from 'antd/es/upload/interface';
 import { QRCodeSVG } from 'qrcode.react';
 import { useAuth } from '../contexts/AuthContext';
 import mockEvidenceImage from '../assets/unbranded-mask-pouch.webp';
+import plainCartonImage from '../assets/plain-kraft-carton.webp';
+import maskBoxBlue from '../assets/pos-catalog/mask-box-blue.webp';
+import maskBoxPink from '../assets/pos-catalog/mask-box-pink.webp';
+import maskBoxMint from '../assets/pos-catalog/mask-box-mint.webp';
+import maskBoxLocPhat from '../assets/pos-catalog/mask-box-loc-phat.webp';
 import './PrepackedGoods.css';
 
 type PrepackStatus = 'active' | 'pending' | 'waiting_acceptance' | 'ready' | 'depleted' | 'rejected';
@@ -53,6 +64,7 @@ interface PrepackBatch {
     packerName: string;
     acceptorName?: string;
     discrepancyReason?: string;
+    note?: string;
     evidences: PrepackEvidence[];
     reportedAt?: string;
     updatedAt: string;
@@ -62,6 +74,10 @@ interface CatalogItem {
     productId?: number;
     sku: string;
     name: string;
+    productName: string;
+    variantName?: string;
+    unit?: string;
+    image: string;
 }
 
 interface EmployeeItem {
@@ -69,26 +85,53 @@ interface EmployeeItem {
     username: string;
     fullName: string;
     isActive: boolean;
+    role?: string;
     operationalAssignee?: boolean;
 }
 
 const mockRows: PrepackBatch[] = [
-    { id: 1, code: 'DG-1609-001', productSku: 'KT-5D-WHT', productName: 'Khẩu trang y tế 5D UNICARE', unit: 'gói', requestedQty: 50, reportedQty: 50, acceptedQty: 50, issuedQty: 0, readyQty: 50, status: 'active', packerId: 12, packerUsername: 'van.khanh', packerName: 'Văn Khánh', evidences: [{ id: 1, fileName: 'bang-chung.jpg', mimeType: 'image/jpeg' }], reportedAt: new Date().toISOString(), updatedAt: new Date().toISOString() },
-    { id: 5, code: 'DG-1609-005', productSku: 'BYT-STERILE', productName: 'Bông y tế tiệt trùng', unit: 'gói', requestedQty: 80, reportedQty: 0, acceptedQty: 0, issuedQty: 0, readyQty: 0, status: 'pending', packerId: 900001, packerUsername: 'thuy.le', packerName: 'Thúy Lê', evidences: [], updatedAt: new Date().toISOString() },
+    { id: 1, code: 'DG-1709-001', productSku: 'AMI-WHITE', productName: 'Khẩu trang AMI', unit: 'hộp', requestedQty: 50, reportedQty: 50, acceptedQty: 50, issuedQty: 0, readyQty: 50, status: 'active', packerId: 12, packerUsername: 'nguyen.a', packerName: 'Nguyễn Văn A', evidences: [{ id: 1, fileName: 'ami-a.jpg', mimeType: 'image/jpeg' }], reportedAt: new Date().toISOString(), updatedAt: new Date().toISOString() },
+    { id: 2, code: 'DG-1709-002', productSku: 'AMI-WHITE', productName: 'Khẩu trang AMI', unit: 'hộp', requestedQty: 50, reportedQty: 0, acceptedQty: 0, issuedQty: 0, readyQty: 0, status: 'active', packerId: 13, packerUsername: 'nguyen.b', packerName: 'Nguyễn Văn B', evidences: [], updatedAt: new Date().toISOString() },
+    { id: 3, code: 'DG-1709-003', productSku: 'AMI-WHITE', productName: 'Khẩu trang AMI', unit: 'hộp', requestedQty: 50, reportedQty: 50, acceptedQty: 50, issuedQty: 0, readyQty: 50, status: 'active', packerId: 14, packerUsername: 'nguyen.c', packerName: 'Nguyễn Văn C', evidences: [{ id: 3, fileName: 'ami-c.jpg', mimeType: 'image/jpeg' }], reportedAt: new Date(Date.now() - 86400000).toISOString(), updatedAt: new Date().toISOString() },
 ];
+
+const normalizeProductName = (value: string) => value.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/đ/g, 'd');
+const getCatalogImage = (product: any) => {
+    const name = normalizeProductName(String(product.name || ''));
+    if (name.includes('5d loc phat')) return maskBoxLocPhat;
+    if (product.images) {
+        try {
+            const parsed = JSON.parse(product.images);
+            if (Array.isArray(parsed) && typeof parsed[0] === 'string') return parsed[0];
+            if (typeof parsed === 'string') return parsed;
+        } catch {
+            if (String(product.images).trim()) return String(product.images);
+        }
+    }
+    const isMask = ['khau trang', 'kf94', 'n95', 'upf', '5d', '6d', '9a'].some(keyword => name.includes(keyword));
+    if (!isMask) return plainCartonImage;
+    if (name.includes('kf94') || name.includes('ami')) return maskBoxPink;
+    if (name.includes('3d') || name.includes('seiko') || name.includes('nami')) return maskBoxMint;
+    return maskBoxBlue;
+};
 
 const flattenCatalog = (products: any[]): CatalogItem[] => products.flatMap(product => {
     let variants: any[] = [];
     try { variants = JSON.parse(product.variants || '[]'); } catch { variants = []; }
-    const base = [{ productId: product.id, sku: product.sku, name: product.name }];
+    const image = getCatalogImage(product);
+    const base = [{ productId: product.id, sku: product.sku, name: product.name, productName: product.name, unit: product.unit, image }];
     const variantRows = Array.isArray(variants) ? variants
         .filter(variant => variant?.sku)
         .map(variant => ({
             productId: product.id,
             sku: String(variant.sku),
             name: `${product.name}${variant.color || variant.name ? ` - ${variant.color || variant.name}` : ''}`,
+            productName: product.name,
+            variantName: String(variant.color || variant.name || variant.label || variant.sku),
+            unit: product.unit,
+            image,
         })) : [];
-    return [...base, ...variantRows];
+    return variantRows.length ? variantRows : base;
 });
 
 const fileToDataUrl = (file: File) => new Promise<string>((resolve, reject) => {
@@ -130,12 +173,22 @@ export default function PrepackedGoods() {
     const isManager = user?.role === 'admin' || user?.role === 'manager';
     const [rows, setRows] = useState<PrepackBatch[]>(isUiTest ? mockRows : []);
     const [loading, setLoading] = useState(!isUiTest);
-    const [catalog, setCatalog] = useState<CatalogItem[]>(isUiTest ? [{ productId: 1, sku: 'KT-5D-WHT', name: 'Khẩu trang y tế 5D UNICARE' }] : []);
+    const [catalog, setCatalog] = useState<CatalogItem[]>(isUiTest ? [
+        { productId: 1, sku: 'AMI-WHITE', name: 'Khẩu trang AMI - Trắng', productName: 'Khẩu trang AMI', variantName: 'Trắng', unit: 'hộp', image: maskBoxPink },
+        { productId: 1, sku: 'AMI-BLACK', name: 'Khẩu trang AMI - Đen', productName: 'Khẩu trang AMI', variantName: 'Đen', unit: 'hộp', image: maskBoxPink },
+        { productId: 2, sku: '5D-UNI', name: 'Khẩu trang 5D UNI', productName: 'Khẩu trang 5D UNI', unit: 'gói', image: maskBoxBlue },
+        { productId: 3, sku: 'UPF-UV', name: 'Khẩu trang UPF UV', productName: 'Khẩu trang UPF UV', unit: 'gói', image: maskBoxMint },
+    ] : []);
     const [employees, setEmployees] = useState<EmployeeItem[]>(isUiTest ? [
-        { id: 900001, username: 'thuy.le', fullName: 'Thúy Lê', isActive: true },
-        { id: 12, username: 'van.khanh', fullName: 'Văn Khánh', isActive: true },
+        { id: 12, username: 'nguyen.a', fullName: 'Nguyễn Văn A', isActive: true },
+        { id: 13, username: 'nguyen.b', fullName: 'Nguyễn Văn B', isActive: true },
+        { id: 14, username: 'nguyen.c', fullName: 'Nguyễn Văn C', isActive: true },
+        { id: 15, username: 'nguyen.d', fullName: 'Nguyễn Văn D', isActive: true },
     ] : []);
     const [createOpen, setCreateOpen] = useState(false);
+    const [createProductKey, setCreateProductKey] = useState<string | null>(null);
+    const [createSearch, setCreateSearch] = useState('');
+    const [editBatch, setEditBatch] = useState<PrepackBatch | null>(null);
     const [reportBatch, setReportBatch] = useState<PrepackBatch | null>(null);
     // Legacy state is retained for backwards-compatible IPC handlers; the daily target UI does not render these flows.
     const [acceptBatch, setAcceptBatch] = useState<PrepackBatch | null>(null);
@@ -149,10 +202,67 @@ export default function PrepackedGoods() {
     const [mobileEvidenceStarting, setMobileEvidenceStarting] = useState(false);
     const [mobileEvidenceSession, setMobileEvidenceSession] = useState<{ url: string; secure: boolean; connecting: boolean; employee?: string; productName?: string } | null>(null);
     const [listFilter, setListFilter] = useState<'all' | 'missing'>('all');
+    const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(() => new Set());
+    const [photoPreviewUrls, setPhotoPreviewUrls] = useState<Record<number, string>>({});
     const [createForm] = Form.useForm();
+    const [editForm] = Form.useForm();
     const [reportForm] = Form.useForm();
     const [acceptForm] = Form.useForm();
     const [issueForm] = Form.useForm();
+
+    const allCatalogGroups = useMemo(() => {
+        const groups = new Map<string, { key: string; productId?: number; name: string; image: string; options: CatalogItem[] }>();
+        catalog.forEach(item => {
+            const key = String(item.productId || item.productName);
+            const group = groups.get(key) || { key, productId: item.productId, name: item.productName, image: item.image, options: [] };
+            group.options.push(item);
+            groups.set(key, group);
+        });
+        return Array.from(groups.values());
+    }, [catalog]);
+    const catalogGroups = useMemo(() => {
+        const query = normalizeProductName(createSearch.trim());
+        return allCatalogGroups.filter(group => !query || normalizeProductName(`${group.name} ${group.options.map(item => item.sku).join(' ')}`).includes(query));
+    }, [allCatalogGroups, createSearch]);
+    const selectedCreateProduct = allCatalogGroups.find(group => group.key === createProductKey);
+
+    const openCreate = () => {
+        setCreateOpen(true);
+        setCreateProductKey(null);
+        setCreateSearch('');
+        createForm.resetFields();
+        createForm.setFieldsValue({ requestedQty: 50 });
+    };
+
+    const openCreateForGroup = (group: { productSku: string; unit: string; rows: PrepackBatch[] }) => {
+        const selected = catalog.find(item => item.sku === group.productSku);
+        const catalogGroup = selected
+            ? allCatalogGroups.find(item => item.options.some(option => option.sku === selected.sku))
+            : undefined;
+        if (!selected || !catalogGroup) {
+            message.error('Không tìm thấy sản phẩm này trong danh mục đang hoạt động.');
+            return;
+        }
+        setCreateOpen(true);
+        setCreateSearch('');
+        setCreateProductKey(catalogGroup.key);
+        createForm.resetFields();
+        createForm.setFieldsValue({
+            productSku: selected.sku,
+            requestedQty: group.rows[0]?.requestedQty || 50,
+            unit: group.unit || selected.unit || 'gói',
+            packerIds: [],
+        });
+    };
+
+    const selectCreateProduct = (group: { key: string; options: CatalogItem[] }) => {
+        setCreateProductKey(group.key);
+        const first = group.options[0];
+        createForm.setFieldsValue({
+            productSku: group.options.length === 1 ? first.sku : undefined,
+            unit: first.unit || 'gói',
+        });
+    };
 
     const loadRows = async () => {
         if (isUiTest) return;
@@ -192,7 +302,7 @@ export default function PrepackedGoods() {
             window.electronAPI.users.getAll(),
         ]).then(([productResult, userResult]) => {
             if (productResult.success) setCatalog(flattenCatalog(productResult.data || []));
-            if (userResult.success) setEmployees((userResult.data || []).filter((item: EmployeeItem) => item.isActive && item.operationalAssignee !== false));
+            if (userResult.success) setEmployees((userResult.data || []).filter((item: EmployeeItem) => item.isActive && item.role !== 'admin' && item.operationalAssignee !== false));
         });
     }, [isManager, isUiTest]);
 
@@ -208,10 +318,65 @@ export default function PrepackedGoods() {
             && photo.getDate() === now.getDate();
     };
     const targetRows = useMemo(() => rows.filter(row => row.status === 'active' || row.status === 'pending'), [rows]);
-    const visibleRows = useMemo(
-        () => listFilter === 'missing' ? targetRows.filter(row => !isPhotoFromToday(row.reportedAt)) : targetRows,
-        [listFilter, targetRows],
-    );
+    const targetGroups = useMemo(() => {
+        const groups = new Map<string, { key: string; productName: string; productSku: string; unit: string; rows: PrepackBatch[] }>();
+        targetRows.forEach(row => {
+            const key = `${row.productSku}::${row.productName}`;
+            const group = groups.get(key) || { key, productName: row.productName, productSku: row.productSku, unit: row.unit, rows: [] };
+            group.rows.push(row);
+            groups.set(key, group);
+        });
+        return Array.from(groups.values());
+    }, [targetRows]);
+    const visibleGroups = useMemo(() => targetGroups
+        .filter(group => listFilter === 'all' || group.rows.some(row => !isPhotoFromToday(row.reportedAt)))
+        .map(group => ({
+            ...group,
+            visibleRows: listFilter === 'missing'
+                ? group.rows.filter(row => !isPhotoFromToday(row.reportedAt))
+                : group.rows,
+        })), [listFilter, targetGroups]);
+
+    useEffect(() => {
+        const rowsWithEvidence = targetRows.filter(row => row.evidences[0] && !photoPreviewUrls[row.id]);
+        if (!rowsWithEvidence.length) return;
+        if (isUiTest) {
+            setPhotoPreviewUrls(current => ({
+                ...current,
+                ...Object.fromEntries(rowsWithEvidence.map(row => [row.id, mockEvidenceImage])),
+            }));
+            return;
+        }
+        let active = true;
+        void Promise.all(rowsWithEvidence.map(async row => {
+            const result = await window.electronAPI.prepack.getEvidenceUrl(row.id, row.evidences[0].id);
+            return [row.id, result.success ? result.data?.url || '' : ''] as const;
+        })).then(entries => {
+            if (active) setPhotoPreviewUrls(current => ({ ...current, ...Object.fromEntries(entries.filter(([, url]) => url)) }));
+        });
+        return () => { active = false; };
+    }, [isUiTest, targetRows]);
+
+    const getEmployeeInitial = (name: string) => name.trim().split(/\s+/).pop()?.charAt(0).toUpperCase() || '?';
+    const formatPhotoStatus = (value?: string) => {
+        if (!value) return { label: 'Chưa có ảnh', detail: 'Chưa chụp hôm nay', kind: 'missing' as const };
+        const date = new Date(value);
+        if (isPhotoFromToday(value)) return {
+            label: 'Đã chụp hôm nay',
+            detail: date.toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' }),
+            kind: 'today' as const,
+        };
+        const yesterday = new Date();
+        yesterday.setDate(yesterday.getDate() - 1);
+        const isYesterday = date.getFullYear() === yesterday.getFullYear()
+            && date.getMonth() === yesterday.getMonth()
+            && date.getDate() === yesterday.getDate();
+        return {
+            label: isYesterday ? 'Ảnh hôm qua' : `Ảnh ${date.toLocaleDateString('vi-VN')}`,
+            detail: formatPhotoDate(value),
+            kind: 'stale' as const,
+        };
+    };
 
     const openReport = (batch: PrepackBatch) => {
         setReportBatch(batch);
@@ -284,18 +449,20 @@ export default function PrepackedGoods() {
     const submitCreate = async (values: any) => {
         const selected = catalog.find(item => item.sku === values.productSku);
         if (!selected) return;
+        const selectedPackerIds = Array.isArray(values.packerIds) ? values.packerIds : [values.packerId];
+        const selectedPackers = employees.filter(item => selectedPackerIds.includes(item.id));
+        if (!selectedPackers.length) return void message.warning('Hãy chọn ít nhất một nhân viên.');
         if (isUiTest) {
-            const packer = employees.find(item => item.id === values.packerId) || employees[0];
-            setRows(current => [{
-                id: Date.now(), code: `DG-DEMO-${current.length + 1}`, productSku: selected.sku,
-                productName: selected.name, unit: values.unit || 'gói', requestedQty: values.requestedQty,
-                reportedQty: 0, acceptedQty: 0, issuedQty: 0, readyQty: 0, status: 'active',
+            setRows(current => [...selectedPackers.map((packer, index) => ({
+                id: Date.now() + index, code: `DG-DEMO-${current.length + index + 1}`, productSku: selected.sku,
+                productName: selected.productName, unit: values.unit || selected.unit || 'gói', requestedQty: values.requestedQty,
+                reportedQty: 0, acceptedQty: 0, issuedQty: 0, readyQty: 0, status: 'active' as const,
                 packerId: packer.id, packerUsername: packer.username, packerName: packer.fullName,
                 evidences: [], updatedAt: new Date().toISOString(),
-            }, ...current]);
+            })), ...current]);
             setCreateOpen(false);
             createForm.resetFields();
-            return void message.success('Đã giao lệnh đóng gói.');
+            return void message.success(`Đã giao chỉ tiêu cho ${selectedPackers.length} nhân viên.`);
         }
         setSubmitting(true);
         const result = await window.electronAPI.prepack.create({ ...values, productId: selected.productId });
@@ -303,8 +470,70 @@ export default function PrepackedGoods() {
         if (!result.success) return void message.error(result.error || 'Không thể tạo lệnh.');
         setCreateOpen(false);
         createForm.resetFields();
-        message.success('Đã lưu chỉ tiêu đóng gói sẵn.');
+        message.success(`Đã giao chỉ tiêu cho ${selectedPackers.length} nhân viên.`);
         await loadRows();
+    };
+
+    const openEdit = (batch: PrepackBatch) => {
+        setEditBatch(batch);
+        editForm.setFieldsValue({
+            requestedQty: batch.requestedQty,
+            unit: batch.unit,
+            packerId: batch.packerId,
+            note: batch.note || '',
+        });
+    };
+
+    const submitEdit = async (values: any) => {
+        if (!editBatch) return;
+        if (isUiTest) {
+            const packer = employees.find(item => item.id === values.packerId);
+            const materialChange = values.requestedQty !== editBatch.requestedQty
+                || values.unit !== editBatch.unit
+                || values.packerId !== editBatch.packerId;
+            setRows(current => current.map(row => row.id === editBatch.id ? {
+                ...row,
+                requestedQty: values.requestedQty,
+                unit: values.unit,
+                packerId: packer?.id ?? row.packerId,
+                packerUsername: packer?.username ?? row.packerUsername,
+                packerName: packer?.fullName ?? row.packerName,
+                note: values.note || undefined,
+                ...(materialChange ? { reportedQty: 0, acceptedQty: 0, reportedAt: undefined } : {}),
+            } : row));
+            setEditBatch(null);
+            return void message.success('Đã cập nhật chỉ tiêu.');
+        }
+        setSubmitting(true);
+        try {
+            const result = await window.electronAPI.prepack.updateTarget({ batchId: editBatch.id, ...values });
+            if (!result.success) throw new Error(result.error);
+            setEditBatch(null);
+            message.success('Đã cập nhật chỉ tiêu.');
+            await loadRows();
+        } catch (error: any) {
+            message.error(error?.message || 'Không thể cập nhật chỉ tiêu.');
+        } finally {
+            setSubmitting(false);
+        }
+    };
+
+    const deleteTarget = async (batch: PrepackBatch) => {
+        if (isUiTest) {
+            setRows(current => current.filter(row => row.id !== batch.id));
+            return void message.success('Đã xóa chỉ tiêu. Lịch sử cũ vẫn được giữ.');
+        }
+        setSubmitting(true);
+        try {
+            const result = await window.electronAPI.prepack.deleteTarget(batch.id);
+            if (!result.success) throw new Error(result.error);
+            message.success('Đã xóa chỉ tiêu. Lịch sử cũ vẫn được giữ.');
+            await loadRows();
+        } catch (error: any) {
+            message.error(error?.message || 'Không thể xóa chỉ tiêu.');
+        } finally {
+            setSubmitting(false);
+        }
     };
 
     const submitReport = async (values: any) => {
@@ -377,35 +606,26 @@ export default function PrepackedGoods() {
         await loadRows();
     };
 
-    const columns = [
-        {
-            title: 'Sản phẩm', key: 'product', width: 220,
-            render: (_: unknown, row: PrepackBatch) => <div className="prepack-product"><strong>{row.productName}</strong><span>{row.productSku}</span></div>,
-        },
-        { title: 'Chỉ tiêu', dataIndex: 'requestedQty', align: 'center' as const, width: 95, render: (value: number, row: PrepackBatch) => <b className="prepack-target-value">{value} {row.unit}</b> },
-        {
-            title: 'Ảnh gần nhất', key: 'photo', width: 215,
-            render: (_: unknown, row: PrepackBatch) => (
-                <div className={`prepack-photo-state ${isPhotoFromToday(row.reportedAt) ? 'is-today' : 'is-missing'}`}>
-                    <CameraOutlined />
-                    <div>
-                        <strong>{formatPhotoDate(row.reportedAt)}</strong>
-                        {!isPhotoFromToday(row.reportedAt) && <span>{row.reportedAt ? 'Cần chụp lại hôm nay' : 'Chưa chụp hôm nay'}</span>}
-                    </div>
-                </div>
-            ),
-        },
-        { title: 'Nhân viên', dataIndex: 'packerName', width: 145, ellipsis: true, render: (value: string) => <span className="prepack-employee">{value}</span> },
-        {
-            title: 'Thao tác', key: 'action', width: 160,
-            render: (_: unknown, row: PrepackBatch) => {
-                const owns = user?.id === row.packerId || user?.username === row.packerUsername;
-                if (owns || isManager) return <Button className="prepack-action-button" type="primary" icon={<MobileOutlined />} onClick={() => void startMobileEvidence(row)}>{isPhotoFromToday(row.reportedAt) ? 'Chụp lại bằng điện thoại' : 'Chụp bằng điện thoại'}</Button>;
-                if (isManager && row.evidences.length) return <Button className="prepack-action-button prepack-view-button" icon={<EyeOutlined />} onClick={() => void openEvidence(row)}>Xem ảnh</Button>;
-                return <Button className="prepack-action-button prepack-pending-button" disabled icon={<CameraOutlined />}>Chờ nhân viên</Button>;
-            },
-        },
-    ];
+    const renderAssignmentAction = (row: PrepackBatch) => {
+        const owns = user?.id === row.packerId || user?.username === row.packerUsername;
+        if (owns || isManager) return <div className="prepack-row-actions">
+            {isManager && <>
+                <Button className="prepack-manage-button" icon={<EditOutlined />} title="Sửa chỉ tiêu" aria-label={`Sửa chỉ tiêu của ${row.packerName}`} onClick={() => openEdit(row)} />
+                <Popconfirm
+                    title="Xóa chỉ tiêu này?"
+                    description="Chỉ tiêu sẽ ngừng hiển thị, lịch sử ảnh vẫn được giữ."
+                    okText="Xóa chỉ tiêu"
+                    cancelText="Hủy"
+                    okButtonProps={{ danger: true, loading: submitting }}
+                    onConfirm={() => void deleteTarget(row)}
+                >
+                    <Button danger className="prepack-manage-button" icon={<DeleteOutlined />} title="Xóa chỉ tiêu" aria-label={`Xóa chỉ tiêu của ${row.packerName}`} />
+                </Popconfirm>
+            </>}
+            <Button className="prepack-action-button" type="primary" icon={<MobileOutlined />} onClick={() => void startMobileEvidence(row)}>Chụp</Button>
+        </div>;
+        return <Button className="prepack-action-button prepack-pending-button" disabled icon={<CameraOutlined />}>Chờ nhân viên</Button>;
+    };
 
     return (
         <div className="prepack-page">
@@ -417,18 +637,67 @@ export default function PrepackedGoods() {
                 </div>
                 <div className="prepack-toolbar-actions">
                     <span className="prepack-date-pill"><CalendarOutlined /> {new Date().toLocaleDateString('vi-VN', { weekday: 'long', day: '2-digit', month: '2-digit', year: 'numeric' })}</span>
-                    {isManager && <Button type="primary" icon={<PlusOutlined />} onClick={() => setCreateOpen(true)}>Thiết lập chỉ tiêu</Button>}
+                    {isManager && <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>Thiết lập chỉ tiêu</Button>}
                 </div>
             </div>
 
             <div className="prepack-filter-bar">
-                <button className={listFilter === 'all' ? 'active' : ''} onClick={() => setListFilter('all')}>Tất cả chỉ tiêu ({targetRows.length})</button>
-                <button className={listFilter === 'missing' ? 'active' : ''} onClick={() => setListFilter('missing')}>Chưa chụp hôm nay ({targetRows.filter(row => !isPhotoFromToday(row.reportedAt)).length})</button>
+                <button className={listFilter === 'all' ? 'active' : ''} onClick={() => setListFilter('all')}>Tất cả chỉ tiêu ({targetGroups.length})</button>
+                <button className={listFilter === 'missing' ? 'active' : ''} onClick={() => setListFilter('missing')}>Chưa chụp hôm nay ({targetGroups.filter(group => group.rows.some(row => !isPhotoFromToday(row.reportedAt))).length})</button>
             </div>
 
             <div className="prepack-table-shell">
-                {loading ? <div className="prepack-loading"><Spin /></div> : visibleRows.length ? (
-                    <Table rowKey="id" columns={columns} dataSource={visibleRows} pagination={false} tableLayout="fixed" size="middle" rowClassName={row => isPhotoFromToday(row.reportedAt) ? 'prepack-row-done' : 'prepack-row-missing'} />
+                {loading ? <div className="prepack-loading"><Spin /></div> : visibleGroups.length ? (
+                    <div className="prepack-grouped-table">
+                        <div className="prepack-grouped-head">
+                            <span>Sản phẩm / Nhân viên</span><span>Chỉ tiêu</span><span>Ảnh gần nhất</span><span>Thao tác</span>
+                        </div>
+                        {visibleGroups.map(group => {
+                            const isCollapsed = collapsedGroups.has(group.key);
+                            const totalQty = group.rows.reduce((sum, row) => sum + row.requestedQty, 0);
+                            const completedToday = group.rows.filter(row => isPhotoFromToday(row.reportedAt)).length;
+                            return <section className="prepack-product-group" key={group.key}>
+                                <button
+                                    type="button"
+                                    className="prepack-group-summary"
+                                    aria-expanded={!isCollapsed}
+                                    onClick={() => setCollapsedGroups(current => {
+                                        const next = new Set(current);
+                                        if (next.has(group.key)) next.delete(group.key); else next.add(group.key);
+                                        return next;
+                                    })}
+                                >
+                                    <span className="prepack-summary-product"><DownOutlined className={isCollapsed ? 'is-collapsed' : ''} /><span><strong>{group.productName}</strong><small>{group.productSku}</small></span></span>
+                                    <strong className="prepack-summary-total">{totalQty} {group.unit}</strong>
+                                    <span className="prepack-summary-progress"><b>{completedToday}/{group.rows.length}</b> đã chụp hôm nay</span>
+                                    <span />
+                                </button>
+                                {isManager && <Button className="prepack-add-assignee-button" icon={<PlusOutlined />} onClick={() => openCreateForGroup(group)}>Thêm nhân viên</Button>}
+                                {!isCollapsed && <div className="prepack-assignment-list">
+                                    {group.visibleRows.map((row, index) => {
+                                        const photo = formatPhotoStatus(row.reportedAt);
+                                        const previewUrl = row.reportedAt ? photoPreviewUrls[row.id] : undefined;
+                                        return <div className="prepack-assignment-row" key={row.id}>
+                                            <div className="prepack-assignee">
+                                                <span className="prepack-branch" aria-hidden="true" />
+                                                <Avatar className={`prepack-avatar avatar-${index % 4}`}>{getEmployeeInitial(row.packerName)}</Avatar>
+                                                <strong>{row.packerName}</strong>
+                                            </div>
+                                            <b className="prepack-target-value">{row.requestedQty} {row.unit}</b>
+                                            <div className={`prepack-latest-photo is-${photo.kind}`}>
+                                                {previewUrl ? <button type="button" className="prepack-photo-thumb" onClick={() => void openEvidence(row)} aria-label={`Xem ảnh của ${row.packerName}`}><img src={previewUrl} alt="" /></button> : <span className="prepack-photo-empty"><CameraOutlined /></span>}
+                                                <span className="prepack-photo-copy">
+                                                    <strong>{photo.kind === 'today' ? <CheckCircleFilled /> : photo.kind === 'stale' ? <ClockCircleOutlined /> : null}{photo.label}</strong>
+                                                    <small>{photo.detail}</small>
+                                                </span>
+                                            </div>
+                                            <div className="prepack-assignment-action">{renderAssignmentAction(row)}</div>
+                                        </div>;
+                                    })}
+                                </div>}
+                            </section>;
+                        })}
+                    </div>
                 ) : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="Chưa có chỉ tiêu" />}
             </div>
 
@@ -450,21 +719,77 @@ export default function PrepackedGoods() {
                 )}
             </Modal>
 
-            <Modal title="Thiết lập chỉ tiêu" open={createOpen} onCancel={() => setCreateOpen(false)} footer={null} destroyOnHidden>
-                <Form form={createForm} layout="vertical" onFinish={submitCreate}>
-                    <Form.Item name="productSku" label="Sản phẩm" rules={[{ required: true, message: 'Hãy chọn sản phẩm' }]}>
-                        <Select showSearch optionFilterProp="label" options={catalog.map(item => ({ value: item.sku, label: `${item.name} · ${item.sku}` }))} />
-                    </Form.Item>
-                    <div className="prepack-form-grid">
-                        <Form.Item name="requestedQty" label="Số lượng" rules={[{ required: true }]}><InputNumber min={1} max={100000} /></Form.Item>
-                        <Form.Item name="unit" label="Đơn vị" initialValue="gói"><Input maxLength={40} /></Form.Item>
+            <Modal title="Thiết lập chỉ tiêu đóng gói" open={createOpen} onCancel={() => setCreateOpen(false)} footer={null} width={920} destroyOnHidden>
+                <div className="prepack-create-flow">
+                    <div className="prepack-catalog-pane">
+                        <Input className="prepack-catalog-search" prefix={<SearchOutlined />} placeholder="Tìm sản phẩm hoặc SKU" value={createSearch} onChange={event => setCreateSearch(event.target.value)} allowClear />
+                        <div className="prepack-catalog-grid">
+                            {catalogGroups.map(group => <button
+                                type="button"
+                                key={group.key}
+                                className={`prepack-catalog-card ${createProductKey === group.key ? 'selected' : ''}`}
+                                onClick={() => selectCreateProduct(group)}
+                            >
+                                <span className="prepack-catalog-image"><img src={group.image} alt="" /></span>
+                                <strong>{group.name}</strong>
+                                <small>{group.options.length > 1 ? `${group.options.length} phân loại` : group.options[0].sku}</small>
+                                <span className="prepack-card-plus"><PlusOutlined /></span>
+                            </button>)}
+                            {!catalogGroups.length && <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="Không tìm thấy sản phẩm" />}
+                        </div>
                     </div>
-                    <Form.Item name="packerId" label="Nhân viên đóng" rules={[{ required: true, message: 'Hãy chọn nhân viên' }]}>
-                        <Select options={employees.map(item => ({ value: item.id, label: item.fullName || item.username }))} />
+                    <div className="prepack-target-pane">
+                        {!selectedCreateProduct ? <div className="prepack-target-empty"><PlusOutlined /><strong>Chọn một sản phẩm</strong><span>Sau đó chọn phân loại, số lượng và nhân viên.</span></div> : <Form form={createForm} layout="vertical" onFinish={submitCreate}>
+                            <div className="prepack-selected-product"><img src={selectedCreateProduct.image} alt="" /><div><strong>{selectedCreateProduct.name}</strong><span>{selectedCreateProduct.options.length > 1 ? 'Chọn phân loại bên dưới' : selectedCreateProduct.options[0].sku}</span></div></div>
+                            <Form.Item name="productSku" hidden rules={[{ required: true, message: 'Hãy chọn phân loại' }]}><Input /></Form.Item>
+                            <div className="prepack-field-label">Phân loại</div>
+                            <div className="prepack-variant-choice">
+                                    {selectedCreateProduct.options.map(option => <Form.Item noStyle shouldUpdate key={option.sku}>{({ getFieldValue, setFieldValue }) => <button
+                                        type="button"
+                                        className={getFieldValue('productSku') === option.sku ? 'selected' : ''}
+                                        onClick={() => { setFieldValue('productSku', option.sku); setFieldValue('unit', option.unit || 'gói'); }}
+                                    ><strong>{option.variantName || option.productName}</strong><small>{option.sku}</small></button>}</Form.Item>)}
+                            </div>
+                            <div className="prepack-quick-fields">
+                                <Form.Item name="requestedQty" label="Số lượng" rules={[{ required: true }]}><InputNumber min={1} max={100000} /></Form.Item>
+                                <Form.Item name="unit" label="Đơn vị" rules={[{ required: true }]}><Input maxLength={40} /></Form.Item>
+                            </div>
+                            <Form.Item noStyle shouldUpdate={(previous, current) => previous.productSku !== current.productSku}>
+                                {({ getFieldValue, setFieldValue }) => {
+                                    const selectedSku = getFieldValue('productSku');
+                                    const availableEmployeeIds = employees
+                                        .filter(item => !targetRows.some(row => row.productSku === selectedSku && row.packerId === item.id))
+                                        .map(item => item.id);
+                                    return <>
+                                        <div className="prepack-employee-select-head"><span>Gán cho nhân viên <b>*</b></span><button type="button" onClick={() => setFieldValue('packerIds', availableEmployeeIds)}>Chọn tất cả chưa giao</button></div>
+                                        <Form.Item name="packerIds" rules={[{ required: true, message: 'Hãy chọn ít nhất một nhân viên' }]}>
+                                            <Select mode="multiple" size="large" maxTagCount="responsive" maxTagPlaceholder={omitted => omitted.length ? `+${omitted.length} người` : null} placeholder="Chọn một hoặc nhiều nhân viên" options={employees.map(item => {
+                                                const assigned = targetRows.some(row => row.productSku === selectedSku && row.packerId === item.id);
+                                                return { value: item.id, label: assigned ? `${item.fullName || item.username} · Đã giao` : item.fullName || item.username, disabled: assigned };
+                                            })} />
+                                        </Form.Item>
+                                    </>;
+                                }}
+                            </Form.Item>
+                            <Button block size="large" type="primary" htmlType="submit" loading={submitting}>Giao chỉ tiêu</Button>
+                        </Form>}
+                    </div>
+                </div>
+            </Modal>
+
+            <Modal title={editBatch ? `Sửa chỉ tiêu · ${editBatch.productName}` : 'Sửa chỉ tiêu'} open={!!editBatch} onCancel={() => setEditBatch(null)} footer={null} destroyOnHidden>
+                {editBatch && <Form form={editForm} layout="vertical" onFinish={submitEdit}>
+                    <div className="prepack-edit-product"><strong>{editBatch.productName}</strong><span>{editBatch.productSku}</span></div>
+                    <div className="prepack-form-grid">
+                        <Form.Item name="requestedQty" label="Số lượng mỗi ngày" rules={[{ required: true }]}><InputNumber min={1} max={100000} /></Form.Item>
+                        <Form.Item name="unit" label="Đơn vị" rules={[{ required: true }]}><Input maxLength={40} /></Form.Item>
+                    </div>
+                    <Form.Item name="packerId" label="Nhân viên đóng" extra={editBatch.evidences.length ? 'Đã có lịch sử ảnh nên không thể đổi nhân viên.' : undefined}>
+                        <Select disabled={editBatch.evidences.length > 0} options={employees.map(item => ({ value: item.id, label: item.fullName || item.username }))} />
                     </Form.Item>
                     <Form.Item name="note" label="Ghi chú"><Input maxLength={1000} /></Form.Item>
-                    <Button block type="primary" htmlType="submit" loading={submitting}>Lưu chỉ tiêu</Button>
-                </Form>
+                    <Button block type="primary" htmlType="submit" loading={submitting}>Lưu thay đổi</Button>
+                </Form>}
             </Modal>
 
             <Modal title={reportBatch ? `${reportBatch.productName} · chỉ tiêu ${reportBatch.requestedQty} ${reportBatch.unit}` : 'Cập nhật ảnh'} open={!!reportBatch} onCancel={() => setReportBatch(null)} footer={null} destroyOnHidden>

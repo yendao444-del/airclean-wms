@@ -632,11 +632,17 @@ export default function NotificationCenter({ inbox, isAdmin = false, initialSele
                                                 <tr className="tr-data-row">
                                                     <td className="td-center td-stt">2</td>
                                                     <td className="td-level"><b>Đi làm đúng giờ liên tiếp 7 ngày</b></td>
-                                                    <td>Nhận 1 lượt miễn phạt mức Nhẹ nếu đi muộn 6–15 phút, tối đa 1 lần trong kỳ.</td>
+                                                    <td>Nhận 1 lượt đi muộn miễn phạt tối đa 15 phút, tối đa 1 lần trong kỳ.</td>
                                                     <td>Tất cả nhân viên</td>
                                                 </tr>
                                                 <tr className="tr-data-row">
                                                     <td className="td-center td-stt">3</td>
+                                                    <td className="td-level"><b>Đi làm đúng giờ liên tiếp 15 ngày</b></td>
+                                                    <td>Nâng lượt miễn phạt hiện có lên tối đa 20 phút, không cộng thêm lượt mới.</td>
+                                                    <td>Tất cả nhân viên</td>
+                                                </tr>
+                                                <tr className="tr-data-row">
+                                                    <td className="td-center td-stt">4</td>
                                                     <td className="td-level"><b>Đạt tối thiểu 24/26 ngày đúng giờ (92,3%) khi kỳ kết thúc</b></td>
                                                     <td><b>Nhận 200.000đ thưởng chuyên cần</b> trong kỳ lương tương ứng.</td>
                                                     <td>Chỉ nhân viên chính thức</td>

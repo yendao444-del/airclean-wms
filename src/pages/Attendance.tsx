@@ -125,7 +125,7 @@ interface WorkScheduleRecord {
     id: string;
     empId: number;
     date: string; // YYYY-MM-DD
-    session: 'morning' | 'afternoon';
+    session: 'morning' | 'afternoon' | 'off';
     note?: string;
     createdAt?: string;
     createdBy?: string;
@@ -1636,9 +1636,10 @@ function calculatePayroll(
             );
             let paidScheduledAbsences = 0;
             let unpaidScheduledAbsences = 0;
+            let legacyUnpaidScheduledAbsences = 0;
             if (attendanceDeductionsReady) {
                 workSchedules
-                    .filter((schedule) => schedule.empId === emp.id)
+                    .filter((schedule) => schedule.empId === emp.id && schedule.session !== 'off')
                     .forEach((schedule) => {
                         const date = dayjs(schedule.date);
                         if (date.month() + 1 !== monthNum || date.year() !== yearNum || !isWithinEmployment(date)) return;
@@ -1647,11 +1648,16 @@ function calculatePayroll(
                         if (workedSessions.has(key)) return;
                         if (exemptSessions.has(key)) return;
                         if (requestedSessions.has(key)) paidScheduledAbsences++;
-                        else unpaidScheduledAbsences++;
+                        else {
+                            unpaidScheduledAbsences++;
+                            // From 19/09/2026, no-shows are recorded as a fixed
+                            // 100,000đ fine instead of a second salary deduction.
+                            if (schedule.date < '2026-09-19') legacyUnpaidScheduledAbsences++;
+                        }
                     });
             }
             absentDays = (paidScheduledAbsences + unpaidScheduledAbsences) / 2;
-            leaveDeduction = Math.round(unpaidScheduledAbsences * salaryPerShift);
+            leaveDeduction = Math.round(legacyUnpaidScheduledAbsences * salaryPerShift);
         } else {
             // ========== NV CHÍNH THỨC: Lương cố định ==========
             shifts = TOTAL_SHIFTS;
@@ -1869,18 +1875,21 @@ const WorkSchedulePill = ({
     isDue: boolean;
     onClick?: () => void;
 }) => {
+    const isOffDeclaration = schedule?.session === 'off';
     const status = request?.exempt
         ? 'exempt'
         : request?.unpaid
             ? 'unpaid'
         : request
             ? (isDue ? 'paid' : 'planned')
-            : (!schedule ? 'empty' : (!isDue ? 'planned' : 'unpaid'));
+            : (!schedule ? 'empty' : (isOffDeclaration ? 'exempt' : (!isDue ? 'planned' : 'unpaid')));
     const unscheduledRequestLabel = !schedule && request
         ? (request.exempt ? 'Mien tru' : request.unpaid ? 'Khong phep' : (isDue ? 'Co phep' : 'Da xin'))
         : '';
     const tooltip = !schedule
         ? `${label}: Chưa có lịch làm`
+        : isOffDeclaration
+            ? `${label}: Đã khai báo không đi làm${schedule.note ? ` - ${schedule.note}` : ''}`
         : request
             ? `${label}: ${request.exempt ? 'Đã xếp lịch, miễn trừ' : request.unpaid ? 'Đã xếp lịch, nghỉ không phép' : 'Đã xếp lịch, nghỉ có phép'}${request.note ? ` - ${request.note}` : ''}`
             : `${label}: ${isDue ? 'Đã xếp lịch nhưng không đi làm - không phép' : 'Đã xếp lịch làm'}`;
@@ -1895,7 +1904,7 @@ const WorkSchedulePill = ({
             >
                 <span>{label}</span>
                 {unscheduledRequestLabel && <span>{unscheduledRequestLabel}</span>}
-                {schedule && <span>{request?.exempt ? 'Miễn trừ' : request?.unpaid ? 'Không phép' : (!isDue ? 'Đã xếp' : (request ? 'Có phép' : 'Không phép'))}</span>}
+                {schedule && <span>{isOffDeclaration ? 'Đã báo nghỉ' : request?.exempt ? 'Miễn trừ' : request?.unpaid ? 'Không phép' : (!isDue ? 'Đã xếp' : (request ? 'Có phép' : 'Không phép'))}</span>}
             </button>
         </Tooltip>
     );
@@ -1917,7 +1926,7 @@ const InlineSchedulePopover = ({
     schedule?: WorkScheduleRecord;
     request?: LeaveRequest;
     isDue: boolean;
-    onSave: (action: 'save' | 'clear' | 'leave' | 'unpaid' | 'exempt', scope: LeaveSession | 'full_day', note: string) => void;
+    onSave: (action: 'save' | 'clear' | 'off', scope: LeaveSession | 'full_day', note: string) => void;
     children: React.ReactNode;
 }) => {
     const [open, setOpen] = useState(false);
@@ -1929,7 +1938,7 @@ const InlineSchedulePopover = ({
         }
     }, [open, schedule]);
 
-    const handleAction = (action: 'save' | 'clear' | 'leave' | 'unpaid' | 'exempt', scope: LeaveSession | 'full_day') => {
+    const handleAction = (action: 'save' | 'clear' | 'off', scope: LeaveSession | 'full_day') => {
         onSave(action, scope, note);
         setOpen(false);
     };
@@ -1954,31 +1963,10 @@ const InlineSchedulePopover = ({
                 </Button>
                 <Button
                     size="small"
-                    style={{ background: '#f5f3ff', color: '#722ed1', border: '1px solid #d8b4fe', height: 26, fontSize: 11, fontWeight: 700, borderRadius: 4, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 4 }}
-                    onClick={() => handleAction('save', 'full_day')}
+                    style={{ background: '#f8fafc', color: '#475569', border: '1px solid #cbd5e1', height: 26, fontSize: 11, fontWeight: 700, borderRadius: 4, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 4 }}
+                    onClick={() => handleAction('off', session)}
                 >
-                    📅 Xếp cả ngày (Sáng + Chiều)
-                </Button>
-                <Button
-                    size="small"
-                    style={{ background: '#fff1f0', color: '#cf1322', border: '1px solid #ffa39e', height: 26, fontSize: 11, fontWeight: 700, borderRadius: 4, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 4 }}
-                    onClick={() => handleAction('leave', session)}
-                >
-                    Nghỉ có phép {sessionLabel}
-                </Button>
-                <Button
-                    size="small"
-                    style={{ background: '#fff1f0', color: '#a8071a', border: '1px solid #ff7875', height: 26, fontSize: 11, fontWeight: 700, borderRadius: 4, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 4 }}
-                    onClick={() => handleAction('unpaid', session)}
-                >
-                    Nghỉ không phép {sessionLabel}
-                </Button>
-                <Button
-                    size="small"
-                    style={{ background: '#ecfeff', color: '#0891b2', border: '1px solid #67e8f9', height: 26, fontSize: 11, fontWeight: 700, borderRadius: 4, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 4 }}
-                    onClick={() => handleAction('exempt', session)}
-                >
-                    Miễn trừ {sessionLabel}
+                    Khai báo không đi làm
                 </Button>
 
                 {schedule && (
@@ -3132,19 +3120,8 @@ const FaceAttendanceTab = forwardRef<FaceAttendanceTabHandle, {
     ];
 
     const rewardSummary = reward?.summary;
-    const rewardTargetDays = rewardSummary?.monthly.targetDays || reward?.requiredDays || 24;
-    const rewardOnTimeDays = rewardSummary?.monthly.onTimeDays || 0;
     const rewardStreak = rewardSummary?.currentStreak || 0;
-    const rewardValue = reward?.rewardAmount || 200000;
-    const monthlyRewardEligible = rewardSummary?.monthly.eligibleEmployee ?? reward?.employeeType === 'Official';
     const waiverTargetDays = rewardSummary?.waiver.streakDays || 7;
-    const waiverMarkerPercent = Math.min(82, Math.max(18, (waiverTargetDays / Math.max(1, rewardTargetDays)) * 100));
-    const rewardRoadmapPercent = rewardStreak < waiverTargetDays
-        ? (rewardStreak / Math.max(1, waiverTargetDays)) * waiverMarkerPercent
-        : waiverMarkerPercent + (
-            Math.max(0, rewardOnTimeDays - waiverTargetDays)
-            / Math.max(1, rewardTargetDays - waiverTargetDays)
-        ) * (100 - waiverMarkerPercent);
     const resolvedToolbarActions = useMemo(() => {
         if (!toolbarActions || !isValidElement(toolbarActions)) return toolbarActions;
         const action = toolbarActions as React.ReactElement<any>;
@@ -3375,8 +3352,10 @@ const FaceAttendanceTab = forwardRef<FaceAttendanceTabHandle, {
                     {rewardSummary?.badgeUnlocked ? `Đúng giờ +${rewardStreak} ngày` : `Mục tiêu huy hiệu: ${rewardSummary?.badgeStreakDays || 3} ngày`}
                 </Tag>
                 <div className="att-attendance-achievement__hint">
-                    {rewardSummary?.waiver?.eligible
-                        ? 'Đã đạt mốc miễn 1 phạt nhẹ'
+                    {rewardSummary?.waiver?.upgraded
+                        ? `Đã nâng lượt miễn phạt lên ${rewardSummary.waiver.upgradeLateMaxMinutes} phút`
+                        : rewardSummary?.waiver?.eligible
+                        ? `Đã đạt lượt miễn phạt ${rewardSummary.waiver.lateMaxMinutes} phút`
                         : `Còn ${Math.max(0, waiverTargetDays - rewardStreak)} ngày để đạt mốc miễn 1 phạt nhẹ`}
                 </div>
             </section>
@@ -3657,6 +3636,8 @@ export default function Attendance() {
         badgeStreakDays: number;
         waiverStreakDays: number;
         waiverLateMaxMinutes: number;
+        waiverUpgradeStreakDays: number;
+        waiverUpgradeLateMaxMinutes: number;
         waiverMaxPerPeriod: number;
         monthlyRequiredDays: number;
         standardWorkDays: number;
@@ -4076,6 +4057,15 @@ export default function Attendance() {
     const [packingSaleDatesInput, setPackingSaleDatesInput] = useState('');
 
     const [employees, setEmployees] = useState<Employee[]>([]);
+    const canSelfScheduleSeasonal = useMemo(() => {
+        const loginUsername = normalizeAttendanceText(user?.username || currentUser || '');
+        const loginFullName = normalizeAttendanceText(user?.fullName || '');
+        return employees.some(emp => emp.type === 'Seasonal' && (
+            (loginUsername && normalizeAttendanceText(emp.username) === loginUsername)
+            || (loginFullName && normalizeAttendanceText(emp.name) === loginFullName)
+        ));
+    }, [currentUser, employees, user?.fullName, user?.username]);
+    const canManageWorkSchedules = isAdmin || isManager || canSelfScheduleSeasonal;
     const [salesBonusSummary, setSalesBonusSummary] = useState<SalesBonusSummary>(EMPTY_SALES_BONUS_SUMMARY);
     const [salesBonusReadyKey, setSalesBonusReadyKey] = useState('');
     const [salesBonusLoading, setSalesBonusLoading] = useState(false);
@@ -5265,12 +5255,12 @@ export default function Attendance() {
                         bestStreak: employeeId === 1 ? 6 : 0,
                         badgeUnlocked: employeeId === 1,
                         badgeStreakDays: 3,
-                        waiver: { eligible: false, earnedAt: null, streakDays: 7, lateMaxMinutes: 15, maxPerPeriod: 1 },
+                        waiver: { eligible: false, earnedAt: null, upgraded: false, upgradedAt: null, used: false, usedAt: null, available: false, streakDays: 7, lateMaxMinutes: 15, baseLateMaxMinutes: 15, upgradeStreakDays: 15, upgradeLateMaxMinutes: 20, maxPerPeriod: 1 },
                         monthly: previewMonthly(employeeId),
                         statuses: {},
                         evaluatedAt: new Date().toISOString(),
                     })));
-                    setAttendanceRewardConfig({ enabled: true, badgeStreakDays: 3, waiverStreakDays: 7, waiverLateMaxMinutes: 15, waiverMaxPerPeriod: 1, monthlyRequiredDays: 24, standardWorkDays: 26, monthlyRewardAmount: 200000, graceMinutes: 5 });
+                    setAttendanceRewardConfig({ enabled: true, badgeStreakDays: 3, waiverStreakDays: 7, waiverLateMaxMinutes: 15, waiverUpgradeStreakDays: 15, waiverUpgradeLateMaxMinutes: 20, waiverMaxPerPeriod: 1, monthlyRequiredDays: 24, standardWorkDays: 26, monthlyRewardAmount: 200000, graceMinutes: 5 });
                 }
                 if (!cancelled) setAttendanceRewardReadyKey(attendanceRewardPeriodKey);
                 return;
@@ -6363,6 +6353,9 @@ export default function Attendance() {
             `${schedule.empId}|${schedule.date}|${schedule.session}`,
             schedule,
         ]));
+        const offScheduleByDate = new Map(workSchedules
+            .filter(schedule => schedule.session === 'off')
+            .map(schedule => [`${schedule.empId}|${schedule.date}`, schedule]));
         const leaveBySlot = new Map(leaveRecords.map(leave => [
             `${leave.empId}|${leave.date}|${leave.session}`,
             leave,
@@ -6392,8 +6385,8 @@ export default function Attendance() {
                     pmOutTime: '',
                     amLeave: leaveBySlot.get(`${emp.id}|${dateStr}|morning`),
                     pmLeave: leaveBySlot.get(`${emp.id}|${dateStr}|afternoon`),
-                    amSchedule: scheduleBySlot.get(`${emp.id}|${dateStr}|morning`),
-                    pmSchedule: scheduleBySlot.get(`${emp.id}|${dateStr}|afternoon`),
+                    amSchedule: scheduleBySlot.get(`${emp.id}|${dateStr}|morning`) || offScheduleByDate.get(`${emp.id}|${dateStr}`),
+                    pmSchedule: scheduleBySlot.get(`${emp.id}|${dateStr}|afternoon`) || offScheduleByDate.get(`${emp.id}|${dateStr}`),
                 };
             });
 
@@ -6686,9 +6679,24 @@ const openConfigModal = () => {
         return isAdmin || date.isAfter(dayjs(), 'day');
     }, [isAdmin]);
 
+    const canEditWorkScheduleDate = useCallback((date: dayjs.Dayjs) => {
+        if (isAdmin) return true;
+        const today = dayjs();
+        if (!date.isSame(today.add(1, 'day'), 'day')) return false;
+        if (today.hour() >= 19) {
+            return false;
+        }
+        return true;
+    }, [isAdmin]);
+
     const canManageAttendanceEmployee = useCallback((emp: Employee | any) => {
-        return isAdmin || (isManager && emp?.type === 'Seasonal');
-    }, [isAdmin, isManager]);
+        if (isAdmin || (isManager && emp?.type === 'Seasonal')) return true;
+        if (!canSelfScheduleSeasonal || emp?.type !== 'Seasonal') return false;
+        const loginUsername = normalizeAttendanceText(user?.username || currentUser || '');
+        const loginFullName = normalizeAttendanceText(user?.fullName || '');
+        return (loginUsername && normalizeAttendanceText(emp.username) === loginUsername)
+            || (loginFullName && normalizeAttendanceText(emp.name) === loginFullName);
+    }, [canSelfScheduleSeasonal, currentUser, isAdmin, isManager, user?.fullName, user?.username]);
 
     const handleAddBonus = useCallback(() => {
         if (!canManageBonuses) {
@@ -7384,9 +7392,39 @@ const openConfigModal = () => {
                     Math.max(0, attendanceOnTimeDays - attendanceWaiverTarget)
                     / Math.max(1, attendanceMonthlyTarget - attendanceWaiverTarget)
                 ) * (100 - attendanceWaiverMarkerPercent);
-            const attendanceRewardNotice = attendanceReward?.waiver?.eligible
-                ? 'Bạn có 1 lượt miễn phạt nhẹ. Nếu đi muộn, chuỗi đúng giờ sẽ bắt đầu lại.'
-                : `Tiếp tục đi làm đúng giờ ${Math.max(1, attendanceWaiverTarget - attendanceStreak)} ngày nữa để nhận 1 lượt miễn phạt nhẹ. Nếu đi muộn, chuỗi sẽ bị mất.`;
+            const waiverUpgradeTarget = attendanceReward?.waiver?.upgradeStreakDays || attendanceRewardConfig?.waiverUpgradeStreakDays || 15;
+            const waiverUpgradeMinutes = attendanceReward?.waiver?.upgradeLateMaxMinutes || attendanceRewardConfig?.waiverUpgradeLateMaxMinutes || 20;
+            const attendanceRewardNotice = attendanceReward?.waiver?.used
+                ? {
+                    tone: 'is-used',
+                    eyebrow: 'QUYỀN LỢI TRONG KỲ',
+                    title: 'Lượt miễn phạt đã sử dụng',
+                    detail: 'Không phát sinh thêm lượt mới trong cùng kỳ.',
+                    minutes: attendanceReward.waiver.lateMaxMinutes,
+                }
+                : attendanceReward?.waiver?.upgraded
+                    ? {
+                        tone: 'is-premium',
+                        eyebrow: 'ĐẶC QUYỀN ĐÃ NÂNG CẤP',
+                        title: '1 lượt đi muộn miễn phạt',
+                        detail: 'Nếu sử dụng, chuỗi đúng giờ sẽ bắt đầu lại.',
+                        minutes: waiverUpgradeMinutes,
+                    }
+                    : attendanceReward?.waiver?.eligible
+                        ? {
+                            tone: 'is-earned',
+                            eyebrow: 'QUYỀN LỢI ĐÃ MỞ KHÓA',
+                            title: '1 lượt đi muộn miễn phạt',
+                            detail: `Còn ${Math.max(1, waiverUpgradeTarget - attendanceStreak)} ngày đúng giờ để nâng lên ${waiverUpgradeMinutes} phút.`,
+                            minutes: attendanceReward.waiver.lateMaxMinutes,
+                        }
+                        : {
+                            tone: 'is-progress',
+                            eyebrow: 'MỤC TIÊU TIẾP THEO',
+                            title: `Còn ${Math.max(1, attendanceWaiverTarget - attendanceStreak)} ngày đúng giờ`,
+                            detail: `Mở khóa 1 lượt miễn phạt tối đa ${attendanceRewardConfig?.waiverLateMaxMinutes || 15} phút.`,
+                            minutes: null,
+                        };
             const periodLabel = overviewDateRange[0].isSame(overviewDateRange[1], 'month')
                 ? `Tháng ${overviewDateRange[0].format('MM/YYYY')}`
                 : `${overviewDateRange[0].format('DD/MM/YYYY')} — ${overviewDateRange[1].format('DD/MM/YYYY')}`;
@@ -7492,8 +7530,17 @@ const openConfigModal = () => {
                                     : `${attendanceReward?.monthly.onTimeDays || 0}/${attendanceReward?.monthly.targetDays || 24} ngày đúng giờ · ${attendanceReward?.monthly.qualified ? `Đủ điều kiện +${fmt(attendanceReward.monthly.rewardAmount)}` : `Mục tiêu +${fmt(attendanceRewardConfig?.monthlyRewardAmount || 200000)}`}`}</small>
                             </div>
 
-                            <div className="att-staff-attendance-notice" role="status">
-                                <InfoCircleOutlined /> <span>{attendanceRewardNotice}</span>
+                            <div className={`att-staff-attendance-notice ${attendanceRewardNotice.tone}`} role="status">
+                                <span className="att-staff-attendance-notice__medal" aria-hidden="true"><CrownOutlined /></span>
+                                <span className="att-staff-attendance-notice__copy">
+                                    <small>{attendanceRewardNotice.eyebrow}</small>
+                                    <strong>{attendanceRewardNotice.title}</strong>
+                                    <span>{attendanceRewardNotice.detail}</span>
+                                </span>
+                                {attendanceRewardNotice.minutes && <span className="att-staff-attendance-notice__limit">
+                                    <strong>{attendanceRewardNotice.minutes}</strong>
+                                    <small>PHÚT</small>
+                                </span>}
                             </div>
 
                             <span className="att-staff-updated">Dữ liệu theo kỳ đang chọn</span>
@@ -9298,61 +9345,38 @@ const openConfigModal = () => {
         );
     };
 
-    const saveWorkScheduleInline = useCallback((
+    const saveWorkScheduleInline = useCallback(async (
         emp: any,
         date: dayjs.Dayjs,
-        action: 'save' | 'clear' | 'leave' | 'unpaid' | 'exempt',
+        action: 'save' | 'clear' | 'off' | 'leave' | 'unpaid' | 'exempt',
         scope: LeaveSession | 'full_day',
         note: string = ''
     ) => {
-        if (!canManageAttendance || !canManageAttendanceEmployee(emp)) return;
+        if (!canManageWorkSchedules || !canManageAttendanceEmployee(emp)) return;
         if (checkLocked()) return;
-        if (!canEditAttendanceDate(date)) {
-            message.warning('Quản lý chỉ được lên lịch cho ngày tương lai. Hôm nay hoặc ngày đã qua chỉ admin được sửa.');
+        if (!canEditWorkScheduleDate(date)) {
+            message.warning('Lịch ngày mai đã khóa lúc 19:00. Chỉ admin được sửa.');
             return;
         }
 
-        const dateStr = date.format('YYYY-MM-DD');
-        const sessions: LeaveSession[] = scope === 'full_day' ? ['morning', 'afternoon'] : [scope];
-
-        if (action === 'leave' || action === 'unpaid' || action === 'exempt') {
-            setLeaveRecords(prev => {
-                const withoutCurrent = prev.filter(leave => !(leave.empId === emp.id && leave.date === dateStr && sessions.includes(leave.session)));
-                const now = new Date().toISOString();
-                const nextRecords = sessions.map(session => ({
-                    id: `${emp.id}-${dateStr}-${session}`,
-                    empId: emp.id,
-                    date: dateStr,
-                    session,
-                    exempt: action === 'exempt',
-                    unpaid: action === 'unpaid',
-                    note,
-                    createdAt: now,
-                    createdBy: currentUser || user?.username || 'System',
-                }));
-                return [...withoutCurrent, ...nextRecords];
-            });
-            message.success(action === 'exempt' ? 'Đã ghi nhận miễn trừ ca.' : action === 'unpaid' ? 'Đã ghi nhận nghỉ không phép.' : 'Đã ghi nhận nghỉ có phép.');
+        if (scope === 'full_day') {
+            message.warning('Nhân viên thời vụ chỉ được đăng ký một ca mỗi ngày.');
             return;
         }
-
-        setWorkSchedules(prev => {
-            const withoutCurrent = prev.filter(schedule => !(schedule.empId === emp.id && schedule.date === dateStr));
-            if (action === 'clear') return withoutCurrent;
-            const now = new Date().toISOString();
-            const nextRecords = sessions.map(session => ({
-                id: `${emp.id}-${dateStr}-${session}`,
-                empId: emp.id,
-                date: dateStr,
-                session,
-                note,
-                createdAt: now,
-                createdBy: currentUser || user?.username || 'System',
-            }));
-            return [...withoutCurrent, ...nextRecords];
+        const result = await window.electronAPI.attendance.updateWorkSchedule({
+            empId: emp.id,
+            date: date.format('YYYY-MM-DD'),
+            action: action === 'clear' ? 'clear' : 'save',
+            session: action === 'off' || action === 'leave' || action === 'unpaid' || action === 'exempt' ? 'off' : scope,
+            note,
         });
-        message.success(action === 'clear' ? 'Đã xóa lịch làm.' : 'Đã xếp lịch làm việc.');
-    }, [canManageAttendance, canManageAttendanceEmployee, canEditAttendanceDate, checkLocked, currentUser, user?.username]);
+        if (!result.success) {
+            message.error(result.error || 'Không lưu được lịch làm việc.');
+            return;
+        }
+        setWorkSchedules(Array.isArray(result.data?.workSchedules) ? result.data.workSchedules : []);
+        message.success(action === 'clear' ? 'Đã xóa lịch làm.' : action === 'off' ? 'Đã khai báo nghỉ ngày mai.' : 'Đã đăng ký ca làm việc.');
+    }, [canManageAttendanceEmployee, canManageWorkSchedules, canEditWorkScheduleDate, checkLocked]);
 
     const saveLeaveRequestInline = useCallback((
         emp: any,
@@ -9471,7 +9495,7 @@ const openConfigModal = () => {
     }, [canManageAttendance, canManageAttendanceEmployee, canEditAttendanceDate, checkLocked, currentUser, user?.username]);
 
     const openWorkScheduleModal = useCallback((emp: Employee, date: dayjs.Dayjs, defaultSession: LeaveSession, existingSchedule?: WorkScheduleRecord) => {
-        if (!canManageAttendance || !canManageAttendanceEmployee(emp)) return;
+        if (!canManageWorkSchedules || !canManageAttendanceEmployee(emp)) return;
         if (checkLocked()) return;
         if (!canEditAttendanceDate(date)) {
             message.warning('Quản lý chỉ được lên lịch cho ngày tương lai. Hôm nay hoặc ngày đã qua chỉ admin được sửa.');
@@ -9570,7 +9594,7 @@ const openConfigModal = () => {
                 message.success(selectedAction === 'clear' ? 'Đã xóa lịch làm.' : 'Đã lưu lịch làm.');
             },
         });
-    }, [canManageAttendance, canManageAttendanceEmployee, canEditAttendanceDate, checkLocked, currentUser, user?.username]);
+    }, [canManageAttendanceEmployee, canManageWorkSchedules, canEditAttendanceDate, checkLocked, currentUser, user?.username]);
 
     // ============================================
     // TAB 5: ĐIỂM DANH & LỊCH SỬ
@@ -9665,6 +9689,12 @@ const openConfigModal = () => {
                     if (!emp) return null;
 
                     const canEdit = canManageAttendance && canManageAttendanceEmployee(emp) && canEditAttendanceDate(currentDay) && !isCurrentPeriodLocked;
+                    const hasSeasonalDeclaration = Boolean(d.amSchedule || d.pmSchedule);
+                    const canEditSchedule = canManageWorkSchedules
+                        && canManageAttendanceEmployee(emp)
+                        && canEditWorkScheduleDate(currentDay)
+                        && (isAdmin || !hasSeasonalDeclaration)
+                        && !isCurrentPeriodLocked;
 
                     const renderSessionCell = (
                         session: LeaveSession,
@@ -9682,7 +9712,7 @@ const openConfigModal = () => {
                                 return <ShiftPill label={label} status={status} time={time} outTime={outTime} />;
                             }
 
-                            if (canEdit) {
+                            if (canEditSchedule) {
                                 return (
                                     <InlineSchedulePopover
                                         emp={emp}
@@ -9784,7 +9814,7 @@ const openConfigModal = () => {
             },
         });
         return columns;
-    }, [activeTab, employeeStats, liveAttendanceMatrix, daysInMonth, selectedMonth, selectedYear, saveWorkScheduleInline, saveLeaveRequestInline, canManageAttendance, canManageAttendanceEmployee, canEditAttendanceDate, isCurrentPeriodLocked, employees, isAttendanceSessionDue, config.morningStart, config.afternoonStart, showShiftDetails, attendanceRewardSummaries, attendanceRewardPeriodKey]);
+    }, [activeTab, employeeStats, liveAttendanceMatrix, daysInMonth, selectedMonth, selectedYear, saveWorkScheduleInline, saveLeaveRequestInline, canManageAttendance, canManageWorkSchedules, canManageAttendanceEmployee, canEditAttendanceDate, canEditWorkScheduleDate, isAdmin, isCurrentPeriodLocked, employees, isAttendanceSessionDue, config.morningStart, config.afternoonStart, showShiftDetails, attendanceRewardSummaries, attendanceRewardPeriodKey]);
 
     useEffect(() => {
         const isCurrentMonth = selectedMonth === dayjs().month() + 1 && selectedYear === dayjs().year();
@@ -9938,6 +9968,13 @@ const openConfigModal = () => {
                                 <span>Nhận 1 lượt miễn phạt mức Nhẹ nếu đi muộn 6–{attendanceRewardConfig?.waiverLateMaxMinutes || 15} phút, tối đa {attendanceRewardConfig?.waiverMaxPerPeriod || 1} lần trong kỳ.</span>
                             </div>
                         </div>
+                        <div className="att-attendance-policy__item">
+                            <span className="att-attendance-policy__icon is-waiver"><ClockCircleOutlined /></span>
+                            <div>
+                                <strong>Đi làm đúng giờ liên tiếp {attendanceRewardConfig?.waiverUpgradeStreakDays || 15} ngày</strong>
+                                <span>Nâng lượt miễn phạt hiện có lên tối đa {attendanceRewardConfig?.waiverUpgradeLateMaxMinutes || 20} phút; không cộng thêm lượt mới.</span>
+                            </div>
+                        </div>
                         <div className="att-attendance-policy__rule">
                             <span className="att-attendance-policy__icon is-reward"><TrophyOutlined /></span>
                             <div>
@@ -9946,6 +9983,9 @@ const openConfigModal = () => {
                             </div>
                         </div>
                     </div>
+                    <p className="att-attendance-policy__note">
+                        Nhân viên thời vụ phải đăng ký một ca hoặc báo nghỉ trước 19:00 ngày hôm trước. Bỏ ca đã đăng ký mặc định phạt 100.000đ; không đăng ký nhưng vẫn đi làm phạt 50.000đ; không đăng ký và không đi làm phạt 100.000đ.
+                    </p>
                     <p className="att-attendance-policy__note">
                         Có {attendanceRewardConfig?.graceMinutes ?? 5} phút linh động đầu ca. Nghỉ phép được duyệt không làm đứt chuỗi; ngày nghỉ, ngày lễ và ngày không có lịch làm không tính vào chuỗi chuyên cần.
                     </p>

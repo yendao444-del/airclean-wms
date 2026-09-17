@@ -121,6 +121,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     prepack: {
         list: (filters) => ipcRenderer.invoke('prepack:list', filters),
         create: (data) => ipcRenderer.invoke('prepack:create', data),
+        updateTarget: (data) => ipcRenderer.invoke('prepack:updateTarget', data),
+        deleteTarget: (batchId) => ipcRenderer.invoke('prepack:deleteTarget', batchId),
         submitEvidence: (data) => ipcRenderer.invoke('prepack:submitEvidence', data),
         accept: (data) => ipcRenderer.invoke('prepack:accept', data),
         issue: (data) => ipcRenderer.invoke('prepack:issue', data),
@@ -581,6 +583,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
         getRewardSummary: (periodKey) => ipcRenderer.invoke('attendance:getRewardSummary', periodKey),
         getSalesBonusSummary: (filters) => ipcRenderer.invoke('attendance:getSalesBonusSummary', filters),
         updateLeaveStatus: (data) => ipcRenderer.invoke('attendance:updateLeaveStatus', data),
+        updateWorkSchedule: (data) => ipcRenderer.invoke('attendance:updateWorkSchedule', data),
         updatePayrollOverride: (data) => ipcRenderer.invoke('attendance:updatePayrollOverride', data),
         updatePayrollLock: (data) => ipcRenderer.invoke('attendance:updatePayrollLock', data),
         updatePackingCommission: (data) => ipcRenderer.invoke('attendance:updatePackingCommission', data),
