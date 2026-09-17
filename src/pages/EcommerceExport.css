@@ -52,6 +52,8 @@
 .ecommerce-status-group {
     flex-wrap: nowrap;
     white-space: nowrap;
+    overflow-x: auto;
+    scrollbar-width: thin;
 }
 
 .ecommerce-status-chip.ant-tag {
@@ -228,6 +230,11 @@
     box-shadow: 0 4px 10px rgba(0, 185, 107, 0.18);
 }
 
+.ecommerce-review-bar > span:first-child {
+    background: linear-gradient(135deg, #d46b08 0%, #fa8c16 100%);
+    box-shadow: 0 4px 10px rgba(212, 107, 8, 0.18);
+}
+
 .ecommerce-priority-bar .ant-typography {
     min-width: 0;
     overflow: hidden;
@@ -397,6 +404,40 @@
     padding-inline: 7px;
     font-size: 10px;
     line-height: 22px;
+    white-space: nowrap;
+}
+
+.ecommerce-review-trigger {
+    display: inline-flex;
+}
+
+.ecommerce-review-button.ant-btn {
+    height: 27px;
+    padding-inline: 9px;
+    border: 1px solid #d46b08;
+    border-radius: 7px;
+    background: linear-gradient(135deg, #fa8c16 0%, #d46b08 100%);
+    box-shadow: 0 3px 8px rgba(212, 107, 8, 0.22);
+    color: #fff;
+    font-size: 10px;
+    font-weight: 700;
+    white-space: nowrap;
+}
+
+.ecommerce-review-button.ant-btn:hover,
+.ecommerce-review-button.ant-btn:focus-visible {
+    border-color: #ad4e00 !important;
+    background: linear-gradient(135deg, #ff9c2b 0%, #ad4e00 100%) !important;
+    color: #fff !important;
+}
+
+.ecommerce-review-dropdown .ant-dropdown-menu {
+    min-width: 250px;
+    padding: 6px;
+}
+
+.ecommerce-review-dropdown .ant-dropdown-menu-item {
+    min-height: 38px;
     white-space: nowrap;
 }
 

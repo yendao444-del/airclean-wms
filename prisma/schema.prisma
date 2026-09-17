@@ -705,7 +705,7 @@ model PrepackBatch {
   reportedQty       Int       @default(0)
   acceptedQty       Int       @default(0)
   issuedQty         Int       @default(0)
-  status            String    @default("pending") // pending, waiting_acceptance, ready, depleted, rejected
+  status            String    @default("pending") // active = chỉ tiêu duy trì; legacy: pending, waiting_acceptance, ready, depleted, rejected
   packerId          Int?
   packerUsername    String
   packerName        String

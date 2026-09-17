@@ -21,7 +21,7 @@ import {
     Col,
     Statistic,
 } from 'antd';
-import { EditOutlined, DeleteOutlined, SendOutlined, FormOutlined, FileExcelOutlined, ScanOutlined, MoreOutlined, DownloadOutlined, BarcodeOutlined, FolderOpenOutlined, SettingOutlined, SearchOutlined, UserOutlined, ClockCircleOutlined, ThunderboltOutlined } from '@ant-design/icons';
+import { EditOutlined, DeleteOutlined, SendOutlined, FormOutlined, FileExcelOutlined, ScanOutlined, MoreOutlined, DownloadOutlined, BarcodeOutlined, FolderOpenOutlined, SettingOutlined, SearchOutlined, UserOutlined, ClockCircleOutlined, ThunderboltOutlined, CheckCircleOutlined, CloseCircleOutlined, DownOutlined } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
 import dayjs from 'dayjs';
 import './EcommerceExport.css';
@@ -238,7 +238,7 @@ function isAuthoritativePendingSnapshot(fileName: string, source: 'Shopee' | 'Ti
 }
 
 function isPickupEligibleStatus(status: string): boolean {
-    return ['pending', 'processing', 'mismatch'].includes(String(status || '').trim().toLowerCase());
+    return ['pending', 'processing'].includes(String(status || '').trim().toLowerCase());
 }
 
 const TIKTOK_ORDER_TIME_HEADERS = [
@@ -667,15 +667,19 @@ export default function EcommerceExportPage() {
             base.statusIn = ['cancelled'];
             base.limit = base.limit || 200;
             delete base.until;
+        } else if (currentStatus === 'mismatch') {
+            base.statusIn = ['mismatch'];
+            base.limit = base.limit || 200;
+            delete base.until;
         } else if (currentStatus === 'overdue') {
-            base.statusIn = ['pending', 'mismatch'];
+            base.statusIn = ['pending'];
             base.operationalState = 'overdue';
             base.limit = base.limit || 200;
             delete base.until;
         } else if (currentStatus === 'all') {
             base.limit = base.limit || 200;
         } else {
-            base.statusIn = ['pending', 'mismatch'];
+            base.statusIn = ['pending'];
             // Lọc ngay ở database thay vì tải cả đơn pending quá hạn rồi bỏ ở renderer.
             base.operationalState = 'active';
             base.limit = base.limit || 200;
@@ -693,11 +697,11 @@ export default function EcommerceExportPage() {
             else if (record.status === 'cancelled') counts.cancelled += 1;
             else if (record.status === 'mismatch') counts.mismatch += 1;
             if (
-                ['pending', 'mismatch'].includes(record.status)
+                record.status === 'pending'
                 && record.slaDeadlineAt
                 && dayjs(record.slaDeadlineAt).isBefore(dayjs())
             ) counts.overdue += 1;
-            else if (['pending', 'mismatch'].includes(record.status)) counts.pending += 1;
+            else if (record.status === 'pending') counts.pending += 1;
             return counts;
         }, { total: 0, pending: 0, completed: 0, mismatch: 0, overdue: 0, cancelled: 0 });
         try {
@@ -723,7 +727,7 @@ export default function EcommerceExportPage() {
         new Promise(resolve => {
             Modal.confirm({
                 title: `File ${source} không có đơn chờ lấy hàng`,
-                content: 'Nếu tiếp tục, mọi đơn đang chờ lấy hàng của sàn này nhưng không có trong file sẽ được đánh dấu Đơn trễ. Đơn trễ vẫn có thể pickup; chỉ tiếp tục khi đây là snapshot rỗng chính xác.',
+                content: 'Nếu tiếp tục, mọi đơn đang chờ lấy hàng của sàn này nhưng không có trong file sẽ được đưa vào Cần kiểm tra. Chúng sẽ bị chặn pickup cho đến khi nhân viên xác minh trên sàn.',
                 okText: 'Xác nhận snapshot rỗng',
                 okType: 'danger',
                 cancelText: 'Hủy',
@@ -979,6 +983,37 @@ export default function EcommerceExportPage() {
         });
     };
 
+    const handleResolveMismatch = (record: EcommerceExport, action: 'cancel' | 'pickup') => {
+        const orderLabel = record.orderNumber || record.ecommerceExportCode || `#${record.id}`;
+        Modal.confirm({
+            title: action === 'cancel' ? 'Xác nhận đơn đã hủy trên sàn?' : 'Xác nhận đơn vẫn chờ lấy hàng?',
+            content: action === 'cancel'
+                ? `Bạn xác nhận ${orderLabel} đã bị hủy trên Shopee/TikTok? Đơn sẽ không được pickup và không trừ tồn.`
+                : `Bạn xác nhận ${orderLabel} vẫn đang Chờ lấy hàng trên sàn? Hệ thống sẽ ghi nhận pickup và trừ tồn như bình thường.`,
+            okText: action === 'cancel' ? 'Xác nhận đã hủy' : 'Xác nhận pickup',
+            okType: action === 'cancel' ? 'danger' : 'primary',
+            cancelText: 'Để sau',
+            onOk: async () => {
+                const result = await window.electronAPI.ecommerceExports.resolveMismatch(record.id, {
+                    action,
+                    updatedAt: record.updatedAt,
+                    pickedBy: activePackerRef.current || currentUser || undefined,
+                });
+                if (!result?.success) {
+                    message.error(result?.error || 'Không thể xử lý đơn cần đối soát.');
+                    return;
+                }
+                if (result.skipped) {
+                    message.warning('Đơn này đã được xử lý ở máy khác. Danh sách sẽ được tải lại.');
+                } else {
+                    message.success(action === 'cancel' ? 'Đã xác nhận đơn hủy trên sàn.' : 'Đã xác nhận pickup thành công.');
+                }
+                await loadEcommerceExports(true);
+                void loadOperationalCounts();
+            },
+        });
+    };
+
     // 📱 Gửi thông báo lên Telegram
     const sendTelegramNotification = async (ecommerceExport: EcommerceExport) => {
         const { chatId, apiToken } = telegramSettings;
@@ -1128,8 +1163,8 @@ Thời gian: ${currentTime}`;
 
         if (foundEcommerceExport) {
             console.info(`[PickupPerf] lookup-done code=${trimmed} ms=${Math.round(performance.now() - scanStartedAt)}`);
-            // A cancelled order is never handed over. An overdue/mismatch order
-            // is still eligible for pickup; lateness is only an SLA signal.
+            // A cancelled order is never handed over. A mismatch is a review
+            // item; it must not interrupt the scan lane or silently become a pickup.
             if (foundEcommerceExport.status === 'cancelled') {
                 playAlert();
                 setScanStatus({
@@ -1137,6 +1172,14 @@ Thời gian: ${currentTime}`;
                 message: `FAIL - ĐƠN HỦY - ${foundEcommerceExport.orderNumber || foundEcommerceExport.ecommerceExportCode}`,
                 });
                 message.error(`ĐƠN HỦY - phải giữ lại để kiểm tra: ${foundEcommerceExport.orderNumber || foundEcommerceExport.ecommerceExportCode}`);
+            } else if (foundEcommerceExport.status === 'mismatch') {
+                playAlert();
+                setScanStatus({
+                    type: 'error',
+                    message: `FAIL - CẦN KIỂM TRA - ${foundEcommerceExport.orderNumber || foundEcommerceExport.ecommerceExportCode}`,
+                });
+                message.warning(`Đã đưa đơn ${foundEcommerceExport.orderNumber || foundEcommerceExport.ecommerceExportCode} vào tab Cần kiểm tra. Có thể tiếp tục quét đơn khác.`);
+                scheduleBgSync();
             } else if (foundEcommerceExport.status === 'completed') {
                 // ⚠️ Đơn hàng đã được bàn giao DVVC rồi
                 playAlert();
@@ -1189,12 +1232,22 @@ Thời gian: ${currentTime}`;
                 playSuccess();
                 console.info(`[PickupPerf] success-sound code=${trimmed} validatedMs=${Math.round(performance.now() - scanStartedAt)}`);
 
-                // 🚀 Cập nhật ref ngay lập tức để scan tiếp không bị stale
+                // Update the visible row before waiting on stock/database work.
+                // The backend remains authoritative; failures below trigger a
+                // reload so an optimistic completion cannot remain on screen.
+                const optimisticCompleted = {
+                    ...completedPayload,
+                    completedAt: dayjs().toISOString(),
+                };
+                const optimisticRecords = exportsRef.current.filter(r => r.id !== targetId);
+                if (statusFilterRef.current === 'completed' || statusFilterRef.current === 'all') {
+                    optimisticRecords.push(optimisticCompleted);
+                }
+                exportsRef.current = optimisticRecords;
+                rebuildTrackingMap(optimisticRecords);
+                setEcommerceExports(optimisticRecords);
 
-                // ⚡ SURGICAL STATE UPDATE — chỉ thay đổi 1 row, không reload toàn bộ
-                // React sẽ chỉ re-render đúng row thay đổi (shallow compare từng item)
-
-                // Sau đó mới chạy async operations (không block UI)
+                // Persist asynchronously without delaying the scan lane or UI.
                 await (async () => {
                     try {
                         let savedRecord: any = null;
@@ -1241,6 +1294,7 @@ Thời gian: ${currentTime}`;
                                 message: `LỖI DATABASE: ${updateRes.error}`
                             });
                             message.error(`Lỗi cập nhật: ${updateRes.error}`);
+                            void loadEcommerceExports(true);
                             return;
                         }
 
@@ -1271,6 +1325,7 @@ Thời gian: ${currentTime}`;
                         console.error('Error updating stock/status:', error);
                         message.error('Lỗi khi cập nhật!');
                         playAlert();
+                        void loadEcommerceExports(true);
                     } finally {
                         for (const key of requestKeys) {
                             inFlightScanKeysRef.current.delete(key);
@@ -1431,7 +1486,7 @@ Thời gian: ${currentTime}`;
                     'Trạng thái': ecommerceExport.status === 'completed'
                         ? 'Đã gửi'
                         : ecommerceExport.status === 'mismatch'
-                            ? 'Đơn trễ'
+                            ? 'Cần kiểm tra'
                             : 'Chờ lấy hàng',
                     'Ghi chú': ecommerceExport.notes,
                 };
@@ -1951,6 +2006,7 @@ Thời gian: ${currentTime}`;
 
                 let importedCount = 0;
                 let skippedCompletedCount = 0;
+                let skippedCancelledCount = 0;
                 let mismatchCount = 0;
                 if (detectedSource) {
                     try {
@@ -1976,6 +2032,7 @@ Thời gian: ${currentTime}`;
                         if (!importResult.success) throw new Error(importResult.error || 'Không lưu được dữ liệu lên Supabase.');
                         importedCount = (importResult.data?.created || 0) + (importResult.data?.updated || 0);
                         skippedCompletedCount = importResult.data?.skippedCompleted || 0;
+                        skippedCancelledCount = importResult.data?.skippedCancelled || 0;
                         await loadEcommerceExports(true);
                         mismatchCount = importResult.data?.mismatch || 0;
                     } catch (dbError) {
@@ -1989,9 +2046,11 @@ Thời gian: ${currentTime}`;
 
                 if (importedCount === 0) {
                     if (mismatchCount > 0) {
-                        message.warning(`Snapshot mới không còn đơn chờ lấy hàng; ${mismatchCount} đơn đã chuyển sang Đơn trễ.`);
+                        message.warning(`Snapshot mới không còn các đơn này; ${mismatchCount} đơn đã được đưa vào Cần kiểm tra.`);
                     } else if (skippedCompletedCount > 0) {
                         message.warning(`Đã bỏ qua ${skippedCompletedCount} đơn đã gửi, không tạo trùng.`);
+                    } else if (skippedCancelledCount > 0) {
+                        message.warning(`Đã giữ nguyên ${skippedCancelledCount} đơn đã xác nhận hủy trên sàn.`);
                     } else if (skippedCount > 0) {
                         message.warning(`Tất cả ${skippedCount} đơn hàng đều đã tồn tại trong hệ thống!`);
                     } else {
@@ -2002,7 +2061,8 @@ Thời gian: ${currentTime}`;
                     parts.push(`Đã đồng bộ ${importedCount} đơn từ ${source}`);
                     if (skippedCount > 0) parts.push(`bỏ qua ${skippedCount} đơn trùng`);
                     if (skippedCompletedCount > 0) parts.push(`bỏ qua ${skippedCompletedCount} đơn đã gửi`);
-                    if (mismatchCount > 0) parts.push(`${mismatchCount} đơn chuyển sang Đơn trễ`);
+                    if (skippedCancelledCount > 0) parts.push(`giữ nguyên ${skippedCancelledCount} đơn đã hủy`);
+                    if (mismatchCount > 0) parts.push(`${mismatchCount} đơn đưa vào Cần kiểm tra`);
                     if (mismatchCount > 0) message.warning(parts.join(' | '));
                     else message.success(parts.join(' | '));
                 }
@@ -2048,6 +2108,7 @@ Thời gian: ${currentTime}`;
             let totalImported = 0;
             let totalSkipped = 0;
             let totalSkippedCompleted = 0;
+            let totalSkippedCancelled = 0;
             let totalMismatch = 0;
             let processedFiles = 0;
             const failedFiles: Array<{ name: string; error: string }> = [];
@@ -2325,6 +2386,7 @@ Thời gian: ${currentTime}`;
                     }
                     totalImported += (importResult.data?.created || 0) + (importResult.data?.updated || 0);
                     totalSkippedCompleted += importResult.data?.skippedCompleted || 0;
+                    totalSkippedCancelled += importResult.data?.skippedCancelled || 0;
                     const mismatchCount = importResult.data?.mismatch || 0;
                     totalMismatch += mismatchCount;
                 }
@@ -2337,7 +2399,8 @@ Thời gian: ${currentTime}`;
             if (totalImported > 0) resultParts.push(`Đã import ${totalImported} đơn từ ${processedFiles} file`);
             if (totalSkipped > 0) resultParts.push(`bỏ qua ${totalSkipped} đơn trùng`);
             if (totalSkippedCompleted > 0) resultParts.push(`bỏ qua ${totalSkippedCompleted} đơn đã gửi`);
-            if (totalMismatch > 0) resultParts.push(`${totalMismatch} đơn chuyển sang Đơn trễ`);
+            if (totalSkippedCancelled > 0) resultParts.push(`giữ nguyên ${totalSkippedCancelled} đơn đã hủy`);
+            if (totalMismatch > 0) resultParts.push(`${totalMismatch} đơn đưa vào Cần kiểm tra`);
 
             if (failedFiles.length > 0) {
                 const failedNames = failedFiles.slice(0, 3).map(file => file.name).join(', ');
@@ -2622,14 +2685,48 @@ Thời gian: ${currentTime}`;
             title: 'Trạng thái',
             dataIndex: 'status',
             key: 'status',
-            width: 90,
+            width: 126,
             className: 'ecommerce-cell ecommerce-cell--status',
             render: (value, record) => {
                 if (value === 'mismatch') {
-                    const isOverdue = record.slaDeadlineAt && dayjs(record.slaDeadlineAt).valueOf() < slaNow;
-                    return isOverdue
-                        ? <Tag color="error">ĐƠN TRỄ</Tag>
-                        : <Tag color="warning">CẦN ĐỐI SOÁT</Tag>;
+                    const reviewItems = [
+                        {
+                            key: 'confirm-pickup',
+                            icon: <CheckCircleOutlined />,
+                            label: 'Vẫn chờ lấy hàng - xác nhận pickup',
+                            onClick: () => handleResolveMismatch(record, 'pickup'),
+                        },
+                        {
+                            key: 'confirm-cancelled',
+                            icon: <CloseCircleOutlined />,
+                            label: 'Đã hủy trên sàn',
+                            danger: true,
+                            onClick: () => handleResolveMismatch(record, 'cancel'),
+                        },
+                    ];
+                    return (
+                        <span
+                            className="ecommerce-review-trigger"
+                            onClick={(event) => event.stopPropagation()}
+                            onMouseDown={(event) => event.stopPropagation()}
+                        >
+                            <Dropdown
+                                getPopupContainer={getEcommercePopupContainer}
+                                menu={{ items: reviewItems }}
+                                trigger={['click']}
+                                placement="bottomRight"
+                                overlayClassName="ecommerce-review-dropdown"
+                            >
+                                <Button
+                                    size="small"
+                                    className="ecommerce-review-button"
+                                    aria-label={`Xử lý đơn cần kiểm tra ${record.orderNumber || record.ecommerceExportCode || record.id}`}
+                                >
+                                    Cần kiểm tra <DownOutlined />
+                                </Button>
+                            </Dropdown>
+                        </span>
+                    );
                 }
                 if (value === 'cancelled') {
                     return <Tag style={{ background: '#262626', borderColor: '#262626', color: '#fff' }}>Hủy</Tag>;
@@ -2657,7 +2754,7 @@ Thời gian: ${currentTime}`;
                         onClick: () => handleEdit(record),
                     });
                 }
-                if (isAdmin && record.status !== 'completed') {
+                if (isAdmin && record.status !== 'completed' && record.status !== 'mismatch') {
                     menuItems.push({
                         key: 'delete',
                         icon: <DeleteOutlined />,
@@ -2667,7 +2764,11 @@ Thời gian: ${currentTime}`;
                     });
                 }
 
-                if (menuItems.length === 0) return <MoreOutlined className="ecommerce-action-placeholder" />;
+                if (menuItems.length === 0) {
+                    return record.status === 'mismatch'
+                        ? null
+                        : <MoreOutlined className="ecommerce-action-placeholder" />;
+                }
 
                 return (
                     <Dropdown getPopupContainer={getEcommercePopupContainer} menu={{ items: menuItems }} trigger={['click']}>
@@ -2754,12 +2855,12 @@ Thời gian: ${currentTime}`;
     // ⚡ useMemo — tránh re-filter + re-parse mỗi lần render
     const filteredEcommerceExports = useMemo(() => {
         const filtered = ecommerceExports.filter(ecommerceExport => {
-            const isLate = ['pending', 'mismatch'].includes(ecommerceExport.status)
+            const isLate = ecommerceExport.status === 'pending'
                 && !!ecommerceExport.slaDeadlineAt
                 && dayjs(ecommerceExport.slaDeadlineAt).valueOf() < slaNow;
             // Lọc theo trạng thái
             let statusMatch = true;
-            if (statusFilter === 'pending') statusMatch = ['pending', 'mismatch'].includes(ecommerceExport.status) && !isLate;
+            if (statusFilter === 'pending') statusMatch = ecommerceExport.status === 'pending' && !isLate;
             else if (statusFilter === 'completed') statusMatch = ecommerceExport.status === 'completed';
             else if (statusFilter === 'cancelled') statusMatch = ecommerceExport.status === 'cancelled';
             else if (statusFilter === 'mismatch') statusMatch = ecommerceExport.status === 'mismatch';
@@ -2873,6 +2974,21 @@ Thời gian: ${currentTime}`;
                     }}
                 >
                     Đơn trễ: {operationalCounts.overdue}
+                    </Tag>
+                    <Tag
+                    className="ecommerce-status-chip"
+                    onClick={() => setStatusFilter('mismatch')}
+                    style={{
+                        cursor: 'pointer', flexShrink: 0,
+                        padding: '4px 10px', fontSize: 12, fontWeight: 600,
+                        borderRadius: 8, border: 'none',
+                        background: statusFilter === 'mismatch'
+                            ? 'linear-gradient(135deg, #d46b08 0%, #fa8c16 100%)'
+                            : 'linear-gradient(135deg, #ffe7ba 0%, #fff7e6 100%)',
+                        color: statusFilter === 'mismatch' ? '#fff' : '#ad4e00',
+                    }}
+                >
+                    Cần kiểm tra: {operationalCounts.mismatch}
                     </Tag>
                     <Tag
                     className="ecommerce-status-chip"
@@ -3065,6 +3181,15 @@ Thời gian: ${currentTime}`;
                     }}
                 >
                     {scanStatus.message}
+                </div>
+            )}
+
+            {statusFilter === 'mismatch' && (
+                <div className="ecommerce-priority-bar ecommerce-review-bar">
+                    <span><SearchOutlined /> Cần kiểm tra</span>
+                    <Text type="secondary">
+                        Xử lý sau khi quét xong: ấn nút “Cần kiểm tra” trên từng đơn, rồi chọn “Đã hủy trên sàn” hoặc “Vẫn chờ lấy hàng”.
+                    </Text>
                 </div>
             )}
 

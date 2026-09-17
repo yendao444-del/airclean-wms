@@ -383,6 +383,12 @@
     vertical-align: -2px;
 }
 
+.att-attendance-achievement__hint {
+    color: #64746d;
+    font-size: 12px;
+    font-weight: 700;
+}
+
 .att-attendance-achievement__roadmap {
     min-width: 0;
     padding: 5px 4px 0;
@@ -1998,6 +2004,27 @@
     padding-top: clamp(14px, 2.2vh, 28px);
     color: #818884;
     font-size: 11px;
+}
+
+.att-staff-attendance-notice {
+    display: flex;
+    align-items: flex-start;
+    gap: 7px;
+    margin-top: 12px;
+    padding: 10px 11px;
+    color: #176044;
+    background: #effcf5;
+    border: 1px solid #b7e8cf;
+    border-radius: 9px;
+    font-size: 11px;
+    font-weight: 650;
+    line-height: 1.45;
+}
+
+.att-staff-attendance-notice > .anticon {
+    flex: 0 0 auto;
+    margin-top: 1px;
+    color: #0b9b62;
 }
 
 .att-staff-main {

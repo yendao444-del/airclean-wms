@@ -125,6 +125,18 @@ contextBridge.exposeInMainWorld('electronAPI', {
         accept: (data) => ipcRenderer.invoke('prepack:accept', data),
         issue: (data) => ipcRenderer.invoke('prepack:issue', data),
         getEvidenceUrl: (batchId, evidenceId) => ipcRenderer.invoke('prepack:getEvidenceUrl', batchId, evidenceId),
+        startMobileEvidence: (batchId) => ipcRenderer.invoke('prepack:startMobileEvidence', batchId),
+        stopMobileEvidence: () => ipcRenderer.invoke('prepack:stopMobileEvidence'),
+        onMobileEvidenceUpdated: (callback) => {
+            const handler = (_event, data) => callback(data);
+            ipcRenderer.on('prepack:mobileEvidenceUpdated', handler);
+            return () => ipcRenderer.removeListener('prepack:mobileEvidenceUpdated', handler);
+        },
+        onMobileEvidenceUrlUpdated: (callback) => {
+            const handler = (_event, data) => callback(data);
+            ipcRenderer.on('prepack:mobileEvidenceUrlUpdated', handler);
+            return () => ipcRenderer.removeListener('prepack:mobileEvidenceUrlUpdated', handler);
+        },
     },
 
     // Categories
@@ -318,6 +330,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
         create: (data) => ipcRenderer.invoke('ecommerceExports:create', data),
         update: (id, data) => ipcRenderer.invoke('ecommerceExports:update', id, data),
         completePickup: (id, data) => ipcRenderer.invoke('ecommerceExports:completePickup', id, data),
+        resolveMismatch: (id, data) => ipcRenderer.invoke('ecommerceExports:resolveMismatch', id, data),
         saveTelegramSettings: (data) => ipcRenderer.invoke('ecommerceExports:saveTelegramSettings', data),
         nextTelegramOrderCounter: () => ipcRenderer.invoke('ecommerceExports:nextTelegramOrderCounter'),
         delete: (id) => ipcRenderer.invoke('ecommerceExports:delete', id),

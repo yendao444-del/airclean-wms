@@ -7,7 +7,7 @@ function isAuthoritativePendingSnapshot(platform, fileNames) {
 }
 
 function isPickupEligibleStatus(status) {
-  return ["pending", "processing", "mismatch"].includes(
+  return ["pending", "processing"].includes(
     String(status || "").trim().toLowerCase(),
   );
 }
