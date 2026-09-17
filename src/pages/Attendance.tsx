@@ -3374,28 +3374,10 @@ const FaceAttendanceTab = forwardRef<FaceAttendanceTabHandle, {
                 <Tag className="att-attendance-achievement__badge" icon={<Medal weight="fill" />}>
                     {rewardSummary?.badgeUnlocked ? `Đúng giờ +${rewardStreak} ngày` : `Mục tiêu huy hiệu: ${rewardSummary?.badgeStreakDays || 3} ngày`}
                 </Tag>
-                <div className="att-attendance-achievement__roadmap" aria-label="Lộ trình thưởng chuyên cần">
-                    <div className="att-attendance-roadmap__track">
-                        <i style={{ width: `${Math.min(100, Math.max(0, rewardRoadmapPercent))}%` }} />
-                        <span
-                            className={`att-attendance-roadmap__marker is-waiver ${rewardSummary?.waiver.eligible ? 'is-achieved' : ''}`}
-                            style={{ left: `${waiverMarkerPercent}%` }}
-                            aria-hidden="true"
-                        ><ClockCircleOutlined /></span>
-                        <span className={`att-attendance-roadmap__marker is-reward ${rewardSummary?.monthly.qualified ? 'is-achieved' : ''}`} aria-hidden="true"><TrophyOutlined /></span>
-                    </div>
-                    <div className="att-attendance-roadmap__labels" style={{ '--att-waiver-marker': `${waiverMarkerPercent}%` } as React.CSSProperties}>
-                        <div className={`att-attendance-roadmap__label is-waiver ${rewardSummary?.waiver.eligible ? 'is-achieved' : ''}`}>
-                            <strong>{waiverTargetDays} ngày liên tiếp</strong>
-                            <span>Nhận 1 lượt miễn phạt nhẹ</span>
-                            <b>{rewardSummary?.waiver.eligible ? 'Đã đạt' : `${Math.min(rewardStreak, waiverTargetDays)}/${waiverTargetDays}`}</b>
-                        </div>
-                        <div className={`att-attendance-roadmap__label is-reward ${rewardSummary?.monthly.qualified ? 'is-achieved' : ''} ${!monthlyRewardEligible ? 'is-disabled' : ''}`}>
-                            <strong>{rewardTargetDays}/{reward?.standardWorkDays || 26} ngày đúng giờ</strong>
-                            <span>{monthlyRewardEligible ? `Nhận ${rewardValue.toLocaleString('vi-VN')}đ chuyên cần` : 'Không áp dụng cho thời vụ'}</span>
-                            <b>{rewardSummary?.monthly.qualified ? 'Đã đạt' : `${rewardOnTimeDays}/${rewardTargetDays}`}</b>
-                        </div>
-                    </div>
+                <div className="att-attendance-achievement__hint">
+                    {rewardSummary?.waiver?.eligible
+                        ? 'Đã đạt mốc miễn 1 phạt nhẹ'
+                        : `Còn ${Math.max(0, waiverTargetDays - rewardStreak)} ngày để đạt mốc miễn 1 phạt nhẹ`}
                 </div>
             </section>
 
@@ -7402,6 +7384,9 @@ const openConfigModal = () => {
                     Math.max(0, attendanceOnTimeDays - attendanceWaiverTarget)
                     / Math.max(1, attendanceMonthlyTarget - attendanceWaiverTarget)
                 ) * (100 - attendanceWaiverMarkerPercent);
+            const attendanceRewardNotice = attendanceReward?.waiver?.eligible
+                ? 'Bạn có 1 lượt miễn phạt nhẹ. Nếu đi muộn, chuỗi đúng giờ sẽ bắt đầu lại.'
+                : `Tiếp tục đi làm đúng giờ ${Math.max(1, attendanceWaiverTarget - attendanceStreak)} ngày nữa để nhận 1 lượt miễn phạt nhẹ. Nếu đi muộn, chuỗi sẽ bị mất.`;
             const periodLabel = overviewDateRange[0].isSame(overviewDateRange[1], 'month')
                 ? `Tháng ${overviewDateRange[0].format('MM/YYYY')}`
                 : `${overviewDateRange[0].format('DD/MM/YYYY')} — ${overviewDateRange[1].format('DD/MM/YYYY')}`;
@@ -7505,6 +7490,10 @@ const openConfigModal = () => {
                                 <small>{attendanceReward?.monthly.eligibleEmployee === false
                                     ? 'Không áp dụng thưởng tháng cho nhân viên thời vụ'
                                     : `${attendanceReward?.monthly.onTimeDays || 0}/${attendanceReward?.monthly.targetDays || 24} ngày đúng giờ · ${attendanceReward?.monthly.qualified ? `Đủ điều kiện +${fmt(attendanceReward.monthly.rewardAmount)}` : `Mục tiêu +${fmt(attendanceRewardConfig?.monthlyRewardAmount || 200000)}`}`}</small>
+                            </div>
+
+                            <div className="att-staff-attendance-notice" role="status">
+                                <InfoCircleOutlined /> <span>{attendanceRewardNotice}</span>
                             </div>
 
                             <span className="att-staff-updated">Dữ liệu theo kỳ đang chọn</span>

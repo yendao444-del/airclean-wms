@@ -325,6 +325,10 @@ export interface ElectronAPI {
       batchId: number,
       evidenceId: number,
     ) => Promise<{ success: boolean; data?: { url: string }; error?: string }>;
+    startMobileEvidence: (batchId: number) => Promise<{ success: boolean; url?: string; secure?: boolean; connecting?: boolean; employee?: string; productName?: string; expiresAt?: number; address?: string; error?: string }>;
+    stopMobileEvidence: () => Promise<{ success: boolean; error?: string }>;
+    onMobileEvidenceUpdated: (callback: (data: { batchId: number; submittedAt: string }) => void) => () => void;
+    onMobileEvidenceUrlUpdated: (callback: (data: { url: string; secure: boolean; connecting: boolean }) => void) => () => void;
   };
   categories: {
     getAll: () => Promise<{
@@ -1024,6 +1028,20 @@ export interface ElectronAPI {
       data?: any;
       error?: string;
     }>;
+    resolveMismatch: (
+      id: number,
+      data: {
+        action: 'cancel' | 'pickup';
+        updatedAt?: string | Date;
+        pickedBy?: string;
+      },
+    ) => Promise<{
+      success: boolean;
+      skipped?: boolean;
+      reason?: string;
+      data?: any;
+      error?: string;
+    }>;
     saveTelegramSettings: (data: {
       chatId?: string;
       apiToken?: string;
@@ -1081,6 +1099,7 @@ export interface ElectronAPI {
         created: number;
         updated: number;
         skippedCompleted: number;
+        skippedCancelled?: number;
         mismatch: number;
       };
       error?: string;

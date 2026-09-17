@@ -158,6 +158,7 @@ const DATA_SAFETY_ALLOWED_CHANNELS = new Set([
   "ecommerceExports:importSnapshot",
   "ecommerceExports:update",
   "ecommerceExports:completePickup",
+  "ecommerceExports:resolveMismatch",
   // Deletion is restricted to administrators. Completed records remain
   // immutable so their order and stock history cannot diverge.
   "ecommerceExports:delete",
@@ -1571,6 +1572,7 @@ const DATA_SAFETY_BLOCKED_CHANNELS = new Map([
   ["ecommerceExports:create", "Tạo phiếu TMĐT có thể tác động tồn kho và đơn liên kết"],
   ["ecommerceExports:update", "Sửa phiếu TMĐT có thể hoàn/trừ tồn và tạo đơn liên kết"],
   ["ecommerceExports:bulkCancel", "Hủy hàng loạt phiếu TMĐT ghi đè trạng thái hiện tại"],
+  ["ecommerceExports:resolveMismatch", "Xác nhận trạng thái đơn cần đối soát; pickup có thể trừ tồn"],
   ["ecommerceExports:delete", "Xóa phiếu xuất TMĐT"],
   ["ecommerceExports:bulkDelete", "Xóa hàng loạt phiếu xuất TMĐT"],
   ["ecommerceExports:deleteAll", "Xóa toàn bộ phiếu xuất TMĐT"],
@@ -23264,7 +23266,7 @@ ipcMain.handle("ecommerceExports:getOperationalCounts", async () => {
       SELECT
         COUNT(*)::int AS "total",
         COUNT(*) FILTER (
-          WHERE "status" IN ('pending', 'mismatch')
+          WHERE "status" = 'pending'
             AND ("slaDeadlineAt" IS NULL OR "slaDeadlineAt" >= ${now})
         )::int AS "pending",
         COUNT(*) FILTER (
@@ -23276,7 +23278,7 @@ ipcMain.handle("ecommerceExports:getOperationalCounts", async () => {
         )::int AS "completed",
         COUNT(*) FILTER (WHERE "status" = 'mismatch')::int AS "mismatch",
         COUNT(*) FILTER (
-          WHERE "status" IN ('pending', 'mismatch') AND "slaDeadlineAt" < ${now}
+          WHERE "status" = 'pending' AND "slaDeadlineAt" < ${now}
         )::int AS "overdue",
         COUNT(*) FILTER (WHERE "status" = 'cancelled')::int AS "cancelled"
       FROM "EcommerceExport"
@@ -23959,7 +23961,7 @@ async function ensureMarketplaceOrderInTx(tx, record, actorName) {
 }
 
 // --- Core logic tach rieng de dung lai khi sync queue ---
-async function execEcommerceExportUpdate(id, data, { snapshotPickup = false } = {}) {
+async function execEcommerceExportUpdate(id, data, { snapshotPickup = false, allowMismatchPickup = false } = {}) {
   if (!prisma) throw new Error("Prisma not available");
   const result = await withStockLock(() =>
     prisma.$transaction(
@@ -23992,15 +23994,20 @@ async function execEcommerceExportUpdate(id, data, { snapshotPickup = false } = 
             "Không thể sửa đơn đã gửi để bảo toàn lịch sử đơn hàng và tồn kho.",
           );
         }
-        // A mismatch only records that the latest snapshot did not contain the
-        // order. It can be a delayed pickup and must not block handover.
+        if (snapshotPickup && oldRecord.status === "mismatch" && !allowMismatchPickup) {
+          throw new Error("CẦN ĐỐI SOÁT - Xác minh trạng thái đơn trên sàn trước khi pickup.");
+        }
         if (snapshotPickup && !isPickupEligibleStatus(oldRecord.status)) {
-          if (oldRecord.status === "cancelled") {
-            throw new Error("ĐƠN HỦY - phải giữ lại để kiểm tra.");
+          if (oldRecord.status === "mismatch" && allowMismatchPickup) {
+            // Explicitly confirmed from the Cần kiểm tra tab.
+          } else {
+            if (oldRecord.status === "cancelled") {
+              throw new Error("ĐƠN HỦY - phải giữ lại để kiểm tra.");
+            }
+            throw new Error(
+              `Trạng thái ${oldRecord.status || "không xác định"} không thể pickup.`,
+            );
           }
-          throw new Error(
-            `Trạng thái ${oldRecord.status || "không xác định"} không thể pickup.`,
-          );
         }
         if (oldRecord.updatedAt?.getTime() !== expectedUpdatedAt.getTime()) {
           throw new Error("Phiếu xuất TMĐT vừa được thay đổi ở máy khác. Vui lòng tải lại.");
@@ -24062,6 +24069,8 @@ async function execEcommerceExportUpdate(id, data, { snapshotPickup = false } = 
                 ecommerceExportDate: new Date(),
                 pickedBy:
                   data.pickedBy || oldRecord.pickedBy || oldRecord.createdBy || null,
+                mismatchAt: null,
+                mismatchReason: null,
               },
             });
             return {
@@ -24128,6 +24137,8 @@ async function execEcommerceExportUpdate(id, data, { snapshotPickup = false } = 
               data.status === "completed" && oldRecord.status !== "completed"
                 ? new Date()
                 : undefined,
+            mismatchAt: data.status === "completed" ? null : undefined,
+            mismatchReason: data.status === "completed" ? null : undefined,
           },
         });
 
@@ -24327,6 +24338,72 @@ ipcMain.handle("ecommerceExports:completePickup", async (event, id, data = {}) =
     };
   } catch (error) {
     console.error("Complete ecommerce pickup error:", error);
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle("ecommerceExports:resolveMismatch", async (event, id, data = {}) => {
+  try {
+    requireRole("admin", "manager");
+    const action = String(data?.action || "").trim().toLowerCase();
+    if (action === "pickup") {
+      return await (async () => {
+        const result = await execEcommerceExportUpdate(id, data, { snapshotPickup: true, allowMismatchPickup: true });
+        if (!result.skipped) {
+          const items = typeof result.data.items === "string"
+            ? JSON.parse(result.data.items || "[]")
+            : result.data.items || [];
+          emitStockChangedForSkus(
+            items.map((item) => item.variantSku || item.sku),
+            {
+              referenceType: "TMDT",
+              reference: result.data.orderNumber || result.data.ecommerceExportCode || `TMDT-${result.data.id}`,
+            },
+          );
+          void logActivity({
+            module: "export",
+            action: "UPDATE",
+            description: `Xác nhận mismatch vẫn chờ lấy, pickup TMDT #${result.data.id}`,
+            recordId: result.data.id,
+          });
+        }
+        return { success: true, skipped: !!result.skipped, reason: result.reason, data: result.data };
+      })();
+    }
+    if (action !== "cancel") throw new Error("Thao tác đối soát không hợp lệ.");
+    if (!prisma) throw new Error("Prisma not available");
+    const exportId = Number(id);
+    const expectedUpdatedAt = data?.updatedAt ? new Date(data.updatedAt) : null;
+    if (!Number.isSafeInteger(exportId) || exportId <= 0) throw new Error("Mã phiếu xuất TMĐT không hợp lệ.");
+    if (!expectedUpdatedAt || Number.isNaN(expectedUpdatedAt.getTime())) throw new Error("Vui lòng tải lại phiếu cần đối soát.");
+
+    const result = await withStockLock(() => prisma.$transaction(async (tx) => {
+      const lockedRows = await tx.$queryRaw`SELECT id FROM "EcommerceExport" WHERE id = ${exportId} FOR UPDATE`;
+      if (!Array.isArray(lockedRows) || lockedRows.length === 0) throw new Error("Không tìm thấy phiếu xuất.");
+      const current = await tx.ecommerceExport.findUnique({ where: { id: exportId } });
+      if (!current) throw new Error("Không tìm thấy phiếu xuất.");
+      if (current.status === "cancelled") return { skipped: true, reason: "already_cancelled", data: current };
+      if (current.status !== "mismatch") throw new Error(`Trạng thái hiện tại là ${current.status || "không xác định"}, không còn cần đối soát.`);
+      if (current.updatedAt?.getTime() !== expectedUpdatedAt.getTime()) throw new Error("Phiếu vừa được thay đổi ở máy khác. Vui lòng tải lại.");
+      const confirmer = String(currentSession?.username || currentSession?.fullName || "").trim();
+      const reason = `${current.mismatchReason || "Không còn trong file chờ lấy hàng mới nhất"} | Xác nhận hủy trên sàn bởi ${confirmer || "người dùng hiện tại"}`;
+      const updated = await tx.ecommerceExport.update({
+        where: { id: exportId },
+        data: { status: "cancelled", mismatchReason: reason },
+      });
+      return { skipped: false, data: updated };
+    }, { timeout: 30000, maxWait: 10000 }));
+    if (!result.skipped) {
+      void logActivity({
+        module: "export",
+        action: "UPDATE",
+        description: `Xác nhận hủy trên sàn TMDT #${result.data.id}`,
+        recordId: result.data.id,
+      });
+    }
+    return { success: true, skipped: !!result.skipped, reason: result.reason, data: result.data };
+  } catch (error) {
+    console.error("Resolve ecommerce mismatch error:", error);
     return { success: false, error: error.message };
   }
 });
@@ -24591,6 +24668,7 @@ ipcMain.handle("ecommerceExports:importSnapshot", async (event, payload = {}) =>
         const completedReconciliations = [];
         let updatedCount = 0;
         let skippedCompleted = 0;
+        let skippedCancelled = 0;
         for (const record of normalizedRecords) {
           const existing = existingByOrder.get(record.orderNumber);
           const notes = withMarketplaceOrderPlacedAtNote(record.notes, record);
@@ -24623,6 +24701,10 @@ ipcMain.handle("ecommerceExports:importSnapshot", async (event, payload = {}) =>
             // Đơn đã bàn giao là lịch sử bất biến: không tạo lại và không cập nhật ngược
             // bằng dữ liệu từ file "Chờ lấy hàng" được xuất muộn.
             skippedCompleted += 1;
+          } else if (existing.status === "cancelled") {
+            // A human-confirmed cancellation must not be reopened by a later
+            // snapshot unless a separate recovery workflow is added.
+            skippedCancelled += 1;
           } else {
             updateRecords.push({ existing, record, notes });
           }
@@ -24723,6 +24805,7 @@ ipcMain.handle("ecommerceExports:importSnapshot", async (event, payload = {}) =>
           created: createData.length,
           updated: updatedCount,
           skippedCompleted,
+          skippedCancelled,
           mismatch: missing.count,
         };
       },
@@ -24732,7 +24815,7 @@ ipcMain.handle("ecommerceExports:importSnapshot", async (event, payload = {}) =>
     void logActivity({
       module: "export",
       action: "IMPORT",
-      description: `Đối soát ${platform.label}: ${result.imported} đơn, ${result.mismatch} đơn trễ`,
+      description: `Đối soát ${platform.label}: ${result.imported} đơn, ${result.mismatch} đơn cần kiểm tra`,
     });
     return { success: true, data: result };
   } catch (error) {
@@ -26838,7 +26921,8 @@ ipcMain.handle("prepack:list", async (_event, filters = {}) => {
     const rows = await prisma.prepackBatch.findMany({
       where,
       include: {
-        evidences: { orderBy: { createdAt: "asc" } },
+        // Return only the latest daily proof; older proofs remain auditable.
+        evidences: { orderBy: { createdAt: "desc" }, take: 1 },
         movements: { orderBy: { createdAt: "desc" }, take: 20 },
       },
       orderBy: { createdAt: "desc" },
@@ -26865,6 +26949,15 @@ ipcMain.handle("prepack:create", async (_event, payload = {}) => {
       select: { id: true, username: true, fullName: true, status: true },
     });
     if (!packer || packer.status !== "active") throw new Error("Nhân viên đóng gói không còn hoạt động.");
+    const existingTarget = await prisma.prepackBatch.findFirst({
+      where: {
+        productSku: product.sku,
+        packerUsername: packer.username,
+        status: { in: ["active", "pending"] },
+      },
+      select: { id: true },
+    });
+    if (existingTarget) throw new Error("Nhân viên này đã có chỉ tiêu cho sản phẩm này.");
     const stamp = new Date().toISOString().replace(/\D/g, "").slice(2, 14);
     const code = `DG-${stamp}-${crypto.randomBytes(2).toString("hex").toUpperCase()}`;
     const created = await prisma.prepackBatch.create({
@@ -26878,6 +26971,7 @@ ipcMain.handle("prepack:create", async (_event, payload = {}) => {
         packerId: packer.id,
         packerUsername: packer.username,
         packerName: packer.fullName || packer.username,
+        status: "active",
         createdById: actor.id,
         createdByName: actor.fullName,
         note: String(payload.note || "").trim().slice(0, 1000) || null,
@@ -26891,19 +26985,21 @@ ipcMain.handle("prepack:create", async (_event, payload = {}) => {
   }
 });
 
-ipcMain.handle("prepack:submitEvidence", async (_event, payload = {}) => {
+async function submitPrepackEvidenceForActor(actor, payload = {}) {
   const uploadedKeys = [];
   try {
-    const actor = await getCurrentActor();
     if (!prisma.prepackBatch) throw new Error("Cần cập nhật Prisma Client cho Đóng gói sẵn.");
     const batchId = Number(payload.batchId);
-    const reportedQty = parsePositivePrepackQuantity(payload.reportedQty, "Số lượng đã đóng");
     const batch = await prisma.prepackBatch.findUnique({ where: { id: batchId } });
     if (!batch) throw new Error("Không tìm thấy lệnh đóng gói.");
-    if (!["pending", "rejected"].includes(batch.status)) throw new Error("Lệnh này không còn chờ báo hoàn thành.");
+    if (!["active", "pending"].includes(batch.status)) {
+      throw new Error("Chỉ tiêu này không còn hoạt động.");
+    }
     const ownsBatch = actor.id === batch.packerId || actor.username === batch.packerUsername;
     if (!ownsBatch) throw new Error("Chỉ người được giao mới được báo đã đóng.");
-    if (reportedQty > batch.requestedQty) throw new Error("Số đã đóng không được lớn hơn số lượng yêu cầu.");
+    const reportedQty = Number.isFinite(Number(payload.reportedQty))
+      ? parsePositivePrepackQuantity(payload.reportedQty, "Số lượng hiện có")
+      : batch.requestedQty;
     const images = Array.isArray(payload.images) ? payload.images : [];
     if (images.length < 1 || images.length > 3) throw new Error("Cần tải từ 1 đến 3 ảnh bằng chứng.");
 
@@ -26945,16 +27041,13 @@ ipcMain.handle("prepack:submitEvidence", async (_event, payload = {}) => {
     const reportedAt = new Date();
     const updated = await prisma.$transaction(async (tx) => {
       const stateUpdate = await tx.prepackBatch.updateMany({
-        where: { id: batch.id, updatedAt: batch.updatedAt, status: { in: ["pending", "rejected"] } },
+        where: { id: batch.id, updatedAt: batch.updatedAt, status: { in: ["active", "pending"] } },
         data: {
           reportedQty,
-          status: "waiting_acceptance",
+          status: "active",
           reportedAt,
+          acceptedQty: reportedQty,
           discrepancyReason: null,
-          acceptorId: null,
-          acceptorUsername: null,
-          acceptorName: null,
-          acceptedAt: null,
         },
       });
       if (stateUpdate.count !== 1) throw new Error("Lệnh đã thay đổi trên máy khác. Hãy tải lại.");
@@ -26963,7 +27056,7 @@ ipcMain.handle("prepack:submitEvidence", async (_event, payload = {}) => {
       }
       return tx.prepackBatch.findUnique({
         where: { id: batch.id },
-        include: { evidences: { orderBy: { createdAt: "asc" } }, movements: true },
+        include: { evidences: { orderBy: { createdAt: "desc" }, take: 1 }, movements: true },
       });
     });
     return { success: true, data: mapPrepackBatch(updated) };
@@ -26972,6 +27065,11 @@ ipcMain.handle("prepack:submitEvidence", async (_event, payload = {}) => {
     console.error("Prepack submit evidence error:", error);
     return { success: false, error: getPrepackErrorMessage(error) };
   }
+}
+
+ipcMain.handle("prepack:submitEvidence", async (_event, payload = {}) => {
+  const actor = await getCurrentActor();
+  return submitPrepackEvidenceForActor(actor, payload);
 });
 
 ipcMain.handle("prepack:accept", async (_event, payload = {}) => {
@@ -27097,6 +27195,169 @@ ipcMain.handle("prepack:getEvidenceUrl", async (_event, batchId, evidenceId) => 
     console.error("Prepack evidence image error:", error);
     return { success: false, error: getPrepackErrorMessage(error) };
   }
+});
+
+const MOBILE_PREPACK_EVIDENCE_PORT = 47823;
+let mobilePrepackEvidenceServer = null;
+let mobilePrepackEvidenceSession = null;
+let mobilePrepackEvidenceTunnel = null;
+let mobilePrepackEvidenceSender = null;
+
+function stopMobilePrepackEvidenceSession() {
+  mobilePrepackEvidenceSession = null;
+  mobilePrepackEvidenceSender = null;
+  if (mobilePrepackEvidenceTunnel) {
+    mobilePrepackEvidenceTunnel.kill();
+    mobilePrepackEvidenceTunnel = null;
+  }
+}
+
+function getMobilePrepackEvidenceSession(requestUrl) {
+  const token = requestUrl.searchParams.get("session");
+  if (!mobilePrepackEvidenceSession || token !== mobilePrepackEvidenceSession.token || mobilePrepackEvidenceSession.expiresAt <= Date.now()) {
+    throw new Error("Phiên QR không hợp lệ hoặc đã hết hạn.");
+  }
+  return mobilePrepackEvidenceSession;
+}
+
+function ensureMobilePrepackEvidenceServer() {
+  if (mobilePrepackEvidenceServer) return;
+  mobilePrepackEvidenceServer = http.createServer(async (request, response) => {
+    const requestUrl = new URL(request.url || "/", "http://localhost");
+    try {
+      if (request.method === "GET" && requestUrl.pathname === "/prepack-evidence") {
+        response.writeHead(200, {
+          "Cache-Control": "no-store",
+          "Content-Type": "text/html; charset=utf-8",
+          "X-Content-Type-Options": "nosniff",
+        });
+        response.end(fs.readFileSync(path.join(__dirname, "mobile-prepack-evidence.html")));
+        return;
+      }
+
+      const session = getMobilePrepackEvidenceSession(requestUrl);
+      const actor = await getMobileDailyEvidenceActor(session);
+      const targetActor = await getMobileDailyEvidenceTargetActor(session);
+      const batch = await prisma.prepackBatch.findUnique({ where: { id: session.batchId } });
+      if (!batch || !["active", "pending"].includes(batch.status)) throw new Error("Chỉ tiêu không còn hoạt động.");
+      if (targetActor.id !== batch.packerId && targetActor.username !== batch.packerUsername) {
+        throw new Error("Tài khoản không được giao chỉ tiêu này.");
+      }
+
+      if (request.method === "GET" && requestUrl.pathname === "/prepack-evidence/session") {
+        writeMobileDailyEvidenceJson(response, 200, {
+          success: true,
+          target: {
+            id: batch.id,
+            productName: batch.productName,
+            productSku: batch.productSku,
+            requestedQty: batch.requestedQty,
+            unit: batch.unit,
+            employee: batch.packerName,
+            reportedAt: batch.reportedAt,
+          },
+          expiresAt: session.expiresAt,
+        });
+        return;
+      }
+
+      if (request.method === "POST" && requestUrl.pathname === "/prepack-evidence/submit") {
+        const mimeType = String(request.headers["content-type"] || "").split(";")[0].trim().toLowerCase();
+        if (!new Set(["image/jpeg", "image/png", "image/webp"]).has(mimeType)) {
+          throw new Error("Chỉ nhận ảnh JPG, PNG hoặc WebP.");
+        }
+        const source = await readMobileDailyEvidenceBody(request, MAX_EVIDENCE_SOURCE_BYTES);
+        if (!source.length || !isValidEvidenceImage(source, mimeType)) throw new Error("Ảnh chụp không hợp lệ.");
+        let fileName = "anh-dong-goi-hom-nay.jpg";
+        try { fileName = decodeURIComponent(String(request.headers["x-file-name"] || fileName)); } catch {}
+        const result = await submitPrepackEvidenceForActor(targetActor, {
+          batchId: batch.id,
+          images: [{ name: fileName, mimeType, data: `data:${mimeType};base64,${source.toString("base64")}` }],
+        });
+        if (result.success && mobilePrepackEvidenceSender && !mobilePrepackEvidenceSender.isDestroyed()) {
+          mobilePrepackEvidenceSender.send("prepack:mobileEvidenceUpdated", { batchId: batch.id, submittedAt: new Date().toISOString() });
+        }
+        writeMobileDailyEvidenceJson(response, result.success ? 200 : 400, result);
+        return;
+      }
+
+      writeMobileDailyEvidenceJson(response, 404, { success: false, error: "Không tìm thấy đường dẫn." });
+    } catch (error) {
+      if (!response.headersSent) writeMobileDailyEvidenceJson(response, 400, { success: false, error: getPrepackErrorMessage(error) });
+    }
+  });
+  mobilePrepackEvidenceServer.on("error", (error) => console.error("Mobile prepack evidence server error:", error.message));
+  mobilePrepackEvidenceServer.listen(MOBILE_PREPACK_EVIDENCE_PORT, "0.0.0.0");
+}
+
+ipcMain.handle("prepack:startMobileEvidence", async (event, batchId) => {
+  try {
+    const actor = await getCurrentActor();
+    const batch = await prisma.prepackBatch.findUnique({ where: { id: Number(batchId) } });
+    if (!batch || !["active", "pending"].includes(batch.status)) throw new Error("Không tìm thấy chỉ tiêu đang hoạt động.");
+    const canOperateForEmployee = actor.id === batch.packerId || actor.username === batch.packerUsername || ["admin", "manager"].includes(actor.role);
+    if (!canOperateForEmployee) throw new Error("Chỉ nhân viên được giao hoặc quản lý mới được mở phiên chụp ảnh.");
+    ensureMobilePrepackEvidenceServer();
+    stopMobilePrepackEvidenceSession();
+    mobilePrepackEvidenceSender = event.sender;
+    mobilePrepackEvidenceSession = {
+      token: crypto.randomBytes(32).toString("base64url"),
+      ownerUserId: actor.id,
+      targetUserId: batch.packerId,
+      batchId: batch.id,
+      expiresAt: Date.now() + MOBILE_DAILY_EVIDENCE_TTL_MS,
+    };
+    const token = mobilePrepackEvidenceSession.token;
+    const pagePath = `/prepack-evidence?session=${encodeURIComponent(token)}`;
+    const lanAddress = getMobileDailyEvidenceLanAddress();
+    const localOrigin = `http://${lanAddress}:${MOBILE_PREPACK_EVIDENCE_PORT}`;
+    const info = { employee: batch.packerName, productName: batch.productName, expiresAt: mobilePrepackEvidenceSession.expiresAt, address: lanAddress };
+    const cloudflaredPath = path.join(__dirname, "..", "node_modules", "cloudflared", "bin", process.platform === "win32" ? "cloudflared.exe" : "cloudflared");
+    if (!fs.existsSync(cloudflaredPath)) return { success: true, url: `${localOrigin}${pagePath}`, secure: false, connecting: false, ...info };
+
+    setImmediate(() => {
+      if (mobilePrepackEvidenceSession?.token !== token) return;
+      let tunnel;
+      try {
+        tunnel = spawn(cloudflaredPath, ["tunnel", "--protocol", "http2", "--url", `http://127.0.0.1:${MOBILE_PREPACK_EVIDENCE_PORT}`, "--no-autoupdate"], { windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
+      } catch {
+        mobilePrepackEvidenceSender?.send("prepack:mobileEvidenceUrlUpdated", { url: `${localOrigin}${pagePath}`, secure: false, connecting: false });
+        return;
+      }
+      mobilePrepackEvidenceTunnel = tunnel;
+      let published = false;
+      const publish = (url, secure) => {
+        if (published || mobilePrepackEvidenceSession?.token !== token) return;
+        published = true;
+        mobilePrepackEvidenceSender?.send("prepack:mobileEvidenceUrlUpdated", { url, secure, connecting: false });
+      };
+      const inspect = (chunk) => {
+        const match = String(chunk).match(/https:\/\/[-a-z0-9]+\.trycloudflare\.com/i);
+        if (match) publish(`${match[0]}${pagePath}`, true);
+      };
+      tunnel.stdout.on("data", inspect);
+      tunnel.stderr.on("data", inspect);
+      const fallback = () => publish(`${localOrigin}${pagePath}`, false);
+      tunnel.on("error", fallback);
+      tunnel.on("exit", fallback);
+      setTimeout(() => { if (!published) { fallback(); tunnel.kill(); } }, 20000);
+    });
+    return { success: true, url: `${localOrigin}${pagePath}`, secure: false, connecting: true, ...info };
+  } catch (error) {
+    stopMobilePrepackEvidenceSession();
+    return { success: false, error: getPrepackErrorMessage(error) };
+  }
+});
+
+ipcMain.handle("prepack:stopMobileEvidence", () => {
+  stopMobilePrepackEvidenceSession();
+  return { success: true };
+});
+
+app.on("before-quit", () => {
+  stopMobilePrepackEvidenceSession();
+  mobilePrepackEvidenceServer?.close();
+  mobilePrepackEvidenceServer = null;
 });
 
 // ========================================
@@ -35731,7 +35992,7 @@ ipcMain.handle("einvoice:issueInvoices", async (event, orderIds) => {
     const pendingOrders = await prisma.eInvoice.findMany({
       where: {
         orderId: { in: orderIds },
-        status: "pending",
+        status: "active",
       },
     });
 
