@@ -819,7 +819,7 @@ export default function ProductsPage() {
                         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
                             {variantList.slice(0, 3).map((v: any, idx: number) => (
                                 <Tag key={idx} color="cyan" style={{ margin: 0, fontSize: 12 }}>
-                                    {v.color}: {v.stock}
+                                    {v.color}{canViewInventoryStock ? `: ${v.stock ?? 0}` : ''}
                                 </Tag>
                             ))}
                             {variantList.length > 3 && (

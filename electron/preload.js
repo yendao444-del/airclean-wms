@@ -185,7 +185,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
         getImportReceiptPreviewData: (purchaseId) => ipcRenderer.invoke('purchases:getImportReceiptPreviewData', { purchaseId }),
     },
     handlingUnits: {
-        getWorkspace: () => ipcRenderer.invoke('handlingUnits:getWorkspace'),
+        getWorkspace: (options) => ipcRenderer.invoke('handlingUnits:getWorkspace', options),
         createUnits: (records) => ipcRenderer.invoke('handlingUnits:createUnits', records),
         issueQrLabels: (data) => ipcRenderer.invoke('handlingUnits:issueQrLabels', data),
         resolveQrLabel: (code) => ipcRenderer.invoke('handlingUnits:resolveQrLabel', code),

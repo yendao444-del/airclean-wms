@@ -738,6 +738,9 @@ let handlingUnitsWorkspaceCache: Pick<
 export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
   const { user } = useAuth();
   const isAdmin = user?.role === "admin";
+  const hiddenStockLabel = "Đã ẩn";
+  const displayStock = (value: number, unitName?: string) =>
+    isAdmin ? `${fmt(value)} ${unitName || ""}`.trim() : hiddenStockLabel;
   const [workspace, setWorkspace] = useState(() =>
     handlingUnitsWorkspaceCache
       ? { ...emptyWorkspace, ...handlingUnitsWorkspaceCache }
@@ -3226,7 +3229,7 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
                                 </div>
                                 <div className="hu-sku-meta">
                                   <span className="hu-sku-stock">
-                                    <b>{fmt(item.stock)}</b> {item.unitName} ·{" "}
+                                    <b>{isAdmin ? fmt(item.stock) : hiddenStockLabel}</b> {isAdmin && item.unitName} ·{" "}
                                     {unitCount} kiện
                                   </span>
                                 </div>
@@ -3285,8 +3288,7 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
                         <div className="hu-metric-chip hu-chip-stock">
                           <span className="hu-chip-label">Tồn kiện:</span>
                           <span className="hu-chip-val">
-                            <strong>{fmt(selectedAllocated)}</strong>{" "}
-                            {selected.unitName}
+                            <strong>{displayStock(selectedAllocated, selected.unitName)}</strong>
                           </span>
                         </div>
                       </Tooltip>
@@ -3294,8 +3296,7 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
                         <div className="hu-metric-chip hu-chip-allocated">
                           <span className="hu-chip-label">Tồn phần mềm:</span>
                           <span className="hu-chip-val">
-                            <strong>{fmt(selected.stock)}</strong>{" "}
-                            {selected.unitName}
+                            <strong>{displayStock(selected.stock, selected.unitName)}</strong>
                           </span>
                         </div>
                       </Tooltip>
@@ -3305,8 +3306,7 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
                         >
                           <span className="hu-chip-label">Chênh lệch:</span>
                           <span className="hu-chip-val">
-                            <strong>{fmtSigned(selectedDifference)}</strong>{" "}
-                            {selected.unitName}
+                            <strong>{isAdmin ? `${fmtSigned(selectedDifference)} ${selected.unitName}` : hiddenStockLabel}</strong>
                           </span>
                         </div>
                       </Tooltip>
@@ -3466,7 +3466,11 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
                       <img src={imageFor(unit)} alt={`Minh hoạ ${unit.id}`} />
                       <div className="hu-package-number">
                         <small>{unit.status === "Đã tách" ? "Đã chuyển sang kiện con" : `${unit.unitName} còn lại`}</small>
-                        <strong>{unit.status === "Đã tách" ? `${unit.childUnits?.length || 0} kiện` : fmt(unit.currentPcs)}</strong>
+                        <strong>{unit.status === "Đã tách"
+                          ? `${unit.childUnits?.length || 0} kiện`
+                          : unit.status === "Nguyên niêm phong"
+                            ? displayStock(unit.currentPcs, unit.unitName)
+                            : hiddenStockLabel}</strong>
                       </div>
                       <div className="hu-package-meta">
                         <div className="hu-meta-row">
@@ -3851,7 +3855,9 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
               <div>
                 <small>CÒN LẠI</small>
                 <b>
-                  {fmt(detail.currentPcs)} {detail.unitName}
+                  {detail.status === "Nguyên niêm phong"
+                    ? displayStock(detail.currentPcs, detail.unitName)
+                    : hiddenStockLabel}
                 </b>
               </div>
               <div>
@@ -5477,15 +5483,13 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
                   <div>
                     <small>TỒN QUẢN LÝ KIỆN</small>
                     <b>
-                      {fmt(currentAllocAllocated)}{" "}
-                      {currentAllocProduct.unitName}
+                      {displayStock(currentAllocAllocated, currentAllocProduct.unitName)}
                     </b>
                   </div>
                   <div>
                     <small>TỒN PHẦN MỀM THAM KHẢO</small>
                     <b>
-                      {fmt(currentAllocProduct.stock)}{" "}
-                      {currentAllocProduct.unitName}
+                      {displayStock(currentAllocProduct.stock, currentAllocProduct.unitName)}
                     </b>
                   </div>
                   <div
@@ -5495,8 +5499,9 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
                   >
                     <small>CHÊNH LỆCH ĐỐI CHIẾU</small>
                     <b>
-                      {fmtSigned(currentAllocDifference)}{" "}
-                      {currentAllocProduct.unitName}
+                      {isAdmin
+                        ? `${fmtSigned(currentAllocDifference)} ${currentAllocProduct.unitName}`
+                        : hiddenStockLabel}
                     </b>
                   </div>
                 </div>
