@@ -2124,9 +2124,9 @@ function sanitizeUserForClient(user) {
 
 function requireInventoryLedgerReadAccess() {
   requireRole();
-  // The dedicated test operator mirrors admin permissions in the renderer;
-  // keep the backend read boundary consistent so its ledger tab can load.
-  if (currentSession.role === "admin" || isTestOperatorSession()) return;
+  // Test operators may exercise stock-check workflows, but the inventory
+  // ledger remains an admin-only data source.
+  if (currentSession.role === "admin") return;
   throw new Error("Khong co quyen xem The kho.");
 }
 
@@ -3109,15 +3109,16 @@ function stockAlertProductForNonAdmin(product) {
       .filter((variant) => Number(variant?.stock || 0) <= minStock)
       .map((variant) => {
         const {
+          stock: variantStock,
           cost: variantCost,
           maxStock: variantMaxStock,
           ...safeVariant
         } = variant || {};
-        return safeVariant;
+        return { ...safeVariant, inventoryStatus: "low" };
       });
     return { ...safeProduct, variants: JSON.stringify(allowedVariants) };
   }
-  return { ...safeProduct, stock };
+  return { ...safeProduct, inventoryStatus: Number(stock || 0) === 0 ? "out" : "low" };
 }
 
 function parseConfigObject(value) {
@@ -3175,23 +3176,13 @@ function inventoryCatalogProductForNonAdmin(product, visibilityConfig) {
         threshold,
         visibilityConfig.pausedVariants[safeVariant.sku],
       );
-      return {
-        ...safeVariant,
-        inventoryStatus,
-        ...(inventoryStatus !== "ok"
-          ? { stock: Number(variantStock || 0) }
-          : {}),
-      };
+      return { ...safeVariant, inventoryStatus };
     });
     return { ...safeProduct, variants: JSON.stringify(safeVariants) };
   }
 
   const inventoryStatus = getInventoryStatus(stock, minStock, false);
-  return {
-    ...safeProduct,
-    inventoryStatus,
-    ...(inventoryStatus !== "ok" ? { stock: Number(stock || 0) } : {}),
-  };
+  return { ...safeProduct, inventoryStatus };
 }
 
 function productSelectForCatalog() {
@@ -7134,10 +7125,14 @@ ipcMain.handle("products:getPackingCatalog", async () => {
   }
 });
 
-ipcMain.handle("handlingUnits:getWorkspace", async () => {
+ipcMain.handle("handlingUnits:getWorkspace", async (_event, options = {}) => {
   try {
+    const stockCheckWorkspace = options?.purpose === "stock-check";
     requireRole("admin", "manager", "staff");
     if (!prisma) throw new Error("Prisma not available");
+    // Non-admins can inspect package identity and location in the workspace,
+    // but never receive aggregate stock or opened-unit quantities.
+    const blindStockCheck = !isAdminStockCheckSession();
 
     const [
       productCandidates,
@@ -7354,15 +7349,30 @@ ipcMain.handle("handlingUnits:getWorkspace", async () => {
       hasWithdrawalHistory: withdrawalCodes.has(String(unit.id).toUpperCase()),
     }));
 
+    if (blindStockCheck) {
+      // The stock-check workspace needs package identity and location, but not
+      // the ledger quantities that would let a checker copy the expected count.
+      register = register.map((unit) => {
+        const sealed = unit.status === "Nguyên niêm phong";
+        if (sealed) return unit;
+        const { currentPcs, ...safeUnit } = unit;
+        return safeUnit;
+      });
+    }
+
     return {
       success: true,
       data: {
-        catalog: [...catalog.values()],
+        catalog: blindStockCheck
+          ? [...catalog.values()].map(({ stock, ...item }) => item)
+          : [...catalog.values()],
         register: register,
         packagingSpecs: packagingSpecs,
         qrLabels,
         suppliers,
-        recentTransactions: Array.isArray(recentTransactions)
+        recentTransactions: blindStockCheck
+          ? []
+          : Array.isArray(recentTransactions)
           ? recentTransactions
           : [],
       },
@@ -17781,7 +17791,7 @@ function getJpegExifCameraMetadata(buffer) {
       };
       if (readUInt16(tiffStart + 2) !== 42) return null;
 
-      const metadata = { make: "", model: "", dateTimeOriginal: "" };
+      const metadata = { make: "", model: "", dateTimeOriginal: "", orientation: 1 };
       const visitedIfds = new Set();
       const readAsciiEntry = (entryOffset, count) => {
         if (!Number.isInteger(count) || count <= 0 || count > 1024) return "";
@@ -17814,6 +17824,9 @@ function getJpegExifCameraMetadata(buffer) {
             if (tag === 0x0110) metadata.model = value;
             if (tag === 0x9003) metadata.dateTimeOriginal = value;
           }
+          if (tag === 0x0112 && type === 3 && count === 1) {
+            metadata.orientation = readUInt16(entryOffset + 8) || 1;
+          }
           if (tag === 0x8769) {
             const exifIfdOffset = readUInt32(entryOffset + 8);
             if (exifIfdOffset !== null) parseIfd(exifIfdOffset);
@@ -17827,6 +17840,37 @@ function getJpegExifCameraMetadata(buffer) {
       return metadata;
     }
     offset = segmentEnd;
+  }
+  return null;
+}
+
+function getJpegDisplayDimensions(buffer, orientation = 1) {
+  if (!isValidEvidenceImage(buffer, "image/jpeg")) return null;
+  const startOfFrameMarkers = new Set([
+    0xc0, 0xc1, 0xc2, 0xc3, 0xc5, 0xc6, 0xc7,
+    0xc9, 0xca, 0xcb, 0xcd, 0xce, 0xcf,
+  ]);
+  let offset = 2;
+  while (offset + 4 <= buffer.length) {
+    while (offset < buffer.length && buffer[offset] === 0xff) offset += 1;
+    if (offset >= buffer.length) break;
+    const marker = buffer[offset];
+    offset += 1;
+    if (marker === 0xda || marker === 0xd9) break;
+    if (marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) continue;
+    if (offset + 2 > buffer.length) break;
+    const segmentLength = buffer.readUInt16BE(offset);
+    if (segmentLength < 2 || offset + segmentLength > buffer.length) break;
+    if (startOfFrameMarkers.has(marker) && segmentLength >= 7) {
+      const encodedHeight = buffer.readUInt16BE(offset + 3);
+      const encodedWidth = buffer.readUInt16BE(offset + 5);
+      if (!encodedWidth || !encodedHeight) return null;
+      const rotated = orientation >= 5 && orientation <= 8;
+      return rotated
+        ? { width: encodedHeight, height: encodedWidth }
+        : { width: encodedWidth, height: encodedHeight };
+    }
+    offset += segmentLength;
   }
   return null;
 }
@@ -18680,6 +18724,12 @@ async function validateDailyTaskEvidenceSource(actor, payload) {
       throw new Error("File đã chọn không phải ảnh JPG/JPEG hợp lệ.");
     }
     const camera = getJpegExifCameraMetadata(buffer);
+    const dimensions = getJpegDisplayDimensions(buffer, camera?.orientation);
+    if (!dimensions?.width || !dimensions?.height || dimensions.width <= dimensions.height) {
+      throw new Error(
+        "Ảnh dọc hoặc ảnh vuông không được chấp nhận. Hãy xoay ngang điện thoại rồi chụp lại.",
+      );
+    }
     const screenshotSignals = getEvidenceScreenshotSignals(buffer);
     if (screenshotSignals?.likelyScreenshot) {
       throw new Error(
@@ -19281,6 +19331,16 @@ ipcMain.handle("dailyTasks:startMobileEvidence", async (event, options = {}) => 
       taskCount: tasks.length,
       expiresAt: mobileDailyEvidenceSession.expiresAt,
       address: lanAddress,
+    };
+    // Daily evidence is used on the workplace Wi-Fi. Keep one stable LAN QR
+    // instead of swapping it to an ephemeral trycloudflare hostname later.
+    // The free tunnel can disappear while a phone is opening the QR URL.
+    return {
+      success: true,
+      url: `${localOrigin}${pagePath}`,
+      secure: false,
+      connecting: false,
+      ...sessionInfo,
     };
     const cloudflaredPath = path.join(
       __dirname,
@@ -27077,7 +27137,6 @@ ipcMain.handle("prepack:list", async (_event, filters = {}) => {
       include: {
         // Return only the latest daily proof; older proofs remain auditable.
         evidences: { orderBy: { createdAt: "desc" }, take: 1 },
-        movements: { orderBy: { createdAt: "desc" }, take: 20 },
       },
       orderBy: { createdAt: "desc" },
       take: 300,
@@ -27095,7 +27154,15 @@ ipcMain.handle("prepack:create", async (_event, payload = {}) => {
     if (!prisma.prepackBatch) throw new Error("Cần cập nhật Prisma Client cho Đóng gói sẵn.");
     const actor = await getCurrentActor();
     const requestedQty = parsePositivePrepackQuantity(payload.requestedQty, "Số lượng yêu cầu");
-    const product = await resolvePrepackProduct(payload);
+    const requestedSkus = [...new Set(
+      (Array.isArray(payload.productSkus) ? payload.productSkus : [payload.productSku])
+        .map((sku) => String(sku || "").trim())
+        .filter(Boolean),
+    )];
+    if (!requestedSkus.length) throw new Error("Hãy chọn ít nhất một phân loại sản phẩm.");
+    const products = await Promise.all(
+      requestedSkus.map((productSku) => resolvePrepackProduct({ ...payload, productSku })),
+    );
     const requestedPackerIds = Array.isArray(payload.packerIds) ? payload.packerIds : [payload.packerId];
     const packerIds = [...new Set(requestedPackerIds.map(Number).filter((id) => Number.isInteger(id) && id > 0))];
     if (!packerIds.length) throw new Error("Hãy chọn ít nhất một nhân viên đóng gói.");
@@ -27106,25 +27173,28 @@ ipcMain.handle("prepack:create", async (_event, payload = {}) => {
     if (packers.length !== packerIds.length) throw new Error("Không thể giao chỉ tiêu cho Admin hoặc tài khoản không còn hoạt động.");
     const existingTargets = await prisma.prepackBatch.findMany({
       where: {
-        productSku: product.sku,
+        productSku: { in: products.map((product) => product.sku) },
         packerUsername: { in: packers.map((packer) => packer.username) },
         status: { in: ["active", "pending"] },
       },
-      select: { packerUsername: true, packerName: true },
+      select: { productSku: true, packerUsername: true },
     });
-    if (existingTargets.length) {
-      throw new Error(`${existingTargets.map((target) => target.packerName || target.packerUsername).join(", ")} đã có chỉ tiêu cho sản phẩm này.`);
-    }
+    const existingPairs = new Set(
+      existingTargets.map((target) => `${target.productSku}::${target.packerUsername}`),
+    );
+    const assignments = products.flatMap((product) => packers
+      .filter((packer) => !existingPairs.has(`${product.sku}::${packer.username}`))
+      .map((packer) => ({ product, packer })));
+    if (!assignments.length) throw new Error("Các nhân viên đã có đủ chỉ tiêu cho những phân loại đã chọn.");
     const stamp = new Date().toISOString().replace(/\D/g, "").slice(2, 14);
-    const unit = String(payload.unit || product.unit || "gói").trim().slice(0, 40) || "gói";
     const note = String(payload.note || "").trim().slice(0, 1000) || null;
-    const created = await prisma.$transaction(packers.map((packer, index) => prisma.prepackBatch.create({
+    const created = await prisma.$transaction(assignments.map(({ product, packer }, index) => prisma.prepackBatch.create({
       data: {
         code: `DG-${stamp}-${index + 1}-${crypto.randomBytes(2).toString("hex").toUpperCase()}`,
         productId: product.id,
         productSku: product.sku,
         productName: product.name,
-        unit,
+        unit: String(payload.unit || product.unit || "gói").trim().slice(0, 40) || "gói",
         requestedQty,
         packerId: packer.id,
         packerUsername: packer.username,
@@ -27140,6 +27210,7 @@ ipcMain.handle("prepack:create", async (_event, payload = {}) => {
       success: true,
       data: created.map(mapPrepackBatch),
       createdCount: created.length,
+      skippedCount: products.length * packers.length - created.length,
     };
   } catch (error) {
     console.error("Prepack create error:", error);
@@ -27149,7 +27220,7 @@ ipcMain.handle("prepack:create", async (_event, payload = {}) => {
 
 ipcMain.handle("prepack:updateTarget", async (_event, payload = {}) => {
   try {
-    requireRole("admin", "manager");
+    requireRole("admin");
     if (!prisma.prepackBatch) throw new Error("Cần cập nhật Prisma Client cho Đóng gói sẵn.");
     const batchId = Number(payload.batchId);
     if (!Number.isInteger(batchId) || batchId <= 0) throw new Error("Chỉ tiêu không hợp lệ.");
@@ -27207,7 +27278,7 @@ ipcMain.handle("prepack:updateTarget", async (_event, payload = {}) => {
 
 ipcMain.handle("prepack:deleteTarget", async (_event, batchIdValue) => {
   try {
-    requireRole("admin", "manager");
+    requireRole("admin");
     if (!prisma.prepackBatch) throw new Error("Cần cập nhật Prisma Client cho Đóng gói sẵn.");
     const batchId = Number(batchIdValue);
     if (!Number.isInteger(batchId) || batchId <= 0) throw new Error("Chỉ tiêu không hợp lệ.");
@@ -27254,6 +27325,10 @@ async function submitPrepackEvidenceForActor(actor, payload = {}) {
       }
       if (!isValidEvidenceImage(buffer, mimeType)) throw new Error("File bằng chứng không phải ảnh hợp lệ.");
       const hash = crypto.createHash("sha256").update(buffer).digest("hex");
+      const declaredHash = String(image?.sha256 || "").trim().toLowerCase();
+      if (declaredHash && declaredHash !== hash) {
+        throw new Error("Ảnh đã thay đổi sau khi tạo mã SHA-256.");
+      }
       if (requestHashes.has(hash)) throw new Error("Các ảnh bằng chứng không được trùng nhau.");
       requestHashes.add(hash);
       const reusedEvidence = await prisma.prepackEvidence.findUnique({
@@ -27306,8 +27381,10 @@ async function submitPrepackEvidenceForActor(actor, payload = {}) {
 }
 
 ipcMain.handle("prepack:submitEvidence", async (_event, payload = {}) => {
-  const actor = await getCurrentActor();
-  return submitPrepackEvidenceForActor(actor, payload);
+  return {
+    success: false,
+    error: "Bằng chứng Đóng gói sẵn chỉ được nộp qua phiên QR bằng camera điện thoại.",
+  };
 });
 
 ipcMain.handle("prepack:accept", async (_event, payload = {}) => {
@@ -27504,13 +27581,20 @@ function ensureMobilePrepackEvidenceServer() {
         if (!new Set(["image/jpeg", "image/png", "image/webp"]).has(mimeType)) {
           throw new Error("Chỉ nhận ảnh JPG, PNG hoặc WebP.");
         }
+        if (String(request.headers["x-camera-capture"] || "") !== "getusermedia") {
+          throw new Error("Ảnh phải được chụp trực tiếp bằng camera điện thoại.");
+        }
+        const declaredSha256 = String(request.headers["x-content-sha256"] || "").trim().toLowerCase();
+        if (!/^[a-f0-9]{64}$/.test(declaredSha256)) {
+          throw new Error("Không xác minh được mã SHA-256 của ảnh.");
+        }
         const source = await readMobileDailyEvidenceBody(request, MAX_EVIDENCE_SOURCE_BYTES);
         if (!source.length || !isValidEvidenceImage(source, mimeType)) throw new Error("Ảnh chụp không hợp lệ.");
         let fileName = "anh-dong-goi-hom-nay.jpg";
         try { fileName = decodeURIComponent(String(request.headers["x-file-name"] || fileName)); } catch {}
         const result = await submitPrepackEvidenceForActor(targetActor, {
           batchId: batch.id,
-          images: [{ name: fileName, mimeType, data: `data:${mimeType};base64,${source.toString("base64")}` }],
+          images: [{ name: fileName, mimeType, sha256: declaredSha256, data: `data:${mimeType};base64,${source.toString("base64")}` }],
         });
         if (result.success && mobilePrepackEvidenceSender && !mobilePrepackEvidenceSender.isDestroyed()) {
           mobilePrepackEvidenceSender.send("prepack:mobileEvidenceUpdated", { batchId: batch.id, submittedAt: new Date().toISOString() });
@@ -29827,6 +29911,16 @@ function getStockCheckTodayKey() {
   return getLocalDateKey(new Date());
 }
 
+function getBangkokHour(date = new Date()) {
+  return Number(
+    new Intl.DateTimeFormat("en-GB", {
+      timeZone: "Asia/Bangkok",
+      hour: "2-digit",
+      hourCycle: "h23",
+    }).format(date),
+  );
+}
+
 function normalizeStockCheckUsername(value) {
   return String(value || "")
     .trim()
@@ -29845,27 +29939,24 @@ function isPrivilegedStockCheckSession() {
   return currentSession?.role === "admin" || isTestOperatorSession();
 }
 
+// Test operators may exercise stock-check workflows, but must receive the
+// same blind-stock payload as every non-admin account.
+function isAdminStockCheckSession() {
+  return currentSession?.role === "admin";
+}
+
 function sanitizeStockCheckItem(item, isAdmin) {
   if (isAdmin) return item;
   const { systemStock, difference, ...safeItem } = item;
-  // Keep the count blind until the checker explicitly asks to balance it.
-  // Once a mismatch has been confirmed (or the row has been balanced), the
-  // immutable comparison snapshot is safe and necessary for reconciliation.
-  if (item?.requiresNote) {
-    safeItem.balanceSystemStock = Number(
-      item.balanceSystemStock ?? systemStock ?? 0,
-    );
-    safeItem.balanceActualStock = Number(
-      item.balanceActualStock ?? item.actualStock ?? 0,
-    );
-    safeItem.balanceDifference = Number(
-      item.balanceDifference ?? difference ?? 0,
-    );
-  } else if (!item?.balanced) {
-    delete safeItem.balanceSystemStock;
-    delete safeItem.balanceActualStock;
-    delete safeItem.balanceDifference;
-  }
+  // Never disclose the comparison snapshot to non-admin users, including
+  // after a mismatch. They only need the state (entered/needs a reason), not
+  // the stock quantity that could be copied into a new count.
+  delete safeItem.balanceSystemStock;
+  delete safeItem.balanceActualStock;
+  delete safeItem.balanceDifference;
+  delete safeItem.recheckOriginalSystemStock;
+  delete safeItem.recheckOriginalActualStock;
+  delete safeItem.recheckOriginalDifference;
   return safeItem;
 }
 
@@ -29876,6 +29967,25 @@ function sanitizeStockCheckSession(session, isAdmin) {
       sanitizeStockCheckItem(item, isAdmin),
     ),
   };
+}
+
+function sanitizeStockCheckBalance(balance, isAdmin) {
+  if (isAdmin || !balance) return balance;
+  // Batch balancing only needs to report completion to a checker. The stored
+  // history contains before/after quantities and notes that can reveal them.
+  const { items, notes, ...safeBalance } = balance;
+  return safeBalance;
+}
+
+function sanitizeStockCheckUnits(units, isAdmin) {
+  if (isAdmin) return units || [];
+  return (units || []).map((unit) => {
+    const safeUnit = { code: unit?.code, status: unit?.status };
+    const sealed = unit?.status === "sealed" || unit?.status === "Nguyên niêm phong";
+    return sealed
+      ? { ...safeUnit, currentPcs: Math.max(0, Number(unit?.currentPcs ?? unit?.remainingQuantity ?? 0)) }
+      : safeUnit;
+  });
 }
 
 function normalizeRequestedStockCheckItems(requestedItems, maxItems = 10000) {
@@ -29952,6 +30062,14 @@ function getStockCheckSessionOrThrow(
     throw new Error("Phiên kiểm hàng đã nộp, không thể sửa số đếm.");
   if (currentSession.role !== "admin" && !isStockCheckAssignee(session))
     throw new Error("Bạn không được phân công cho phiên kiểm hàng này.");
+  if (!isPrivilegedStockCheckSession()) {
+    const openingHour = session.type === "full" ? 16 : 17;
+    if (session.type !== "inspection" && session.type !== "recheck" && getBangkokHour() < openingHour) {
+      throw new Error(
+        `${session.type === "full" ? "Kiểm toàn bộ" : "Kiểm hàng ngày"} chỉ mở từ ${openingHour}:00 đối với non-admin.`,
+      );
+    }
+  }
   return session;
 }
 
@@ -30711,15 +30829,21 @@ function normalizeStockCheckUnitAdjustments(value) {
 
   const adjustments = value.map((entry) => ({
     code: String(entry?.code || "").trim().toUpperCase(),
-    expectedQuantity: Number(entry?.expectedQuantity),
+    // The expected ledger quantity is authoritative on the server. Older
+    // renderers may still send it, but stock-check clients no longer need to
+    // receive or echo that value.
+    expectedQuantity:
+      entry?.expectedQuantity === undefined || entry?.expectedQuantity === null
+        ? null
+        : Number(entry.expectedQuantity),
     actualQuantity: Number(entry?.actualQuantity),
   }));
   if (
     adjustments.some(
       (entry) =>
         !entry.code ||
-        !Number.isInteger(entry.expectedQuantity) ||
-        entry.expectedQuantity < 0 ||
+        (entry.expectedQuantity !== null &&
+          (!Number.isInteger(entry.expectedQuantity) || entry.expectedQuantity < 0)) ||
         !Number.isInteger(entry.actualQuantity) ||
         entry.actualQuantity < 0,
     )
@@ -30756,9 +30880,12 @@ async function reconcileStockCheckHandlingUnits(
     if (String(unit.sku || "").trim().toUpperCase() !== sku.toUpperCase()) {
       throw new Error(`Kiện [${adjustment.code}] không thuộc SKU ${sku}.`);
     }
-    if (Number(unit.remainingQuantity) !== adjustment.expectedQuantity) {
+    const expectedQuantity = adjustment.expectedQuantity === null
+      ? Number(unit.remainingQuantity)
+      : adjustment.expectedQuantity;
+    if (Number(unit.remainingQuantity) !== expectedQuantity) {
       throw new Error(
-        `Tồn kiện [${adjustment.code}] vừa thay đổi từ ${adjustment.expectedQuantity} thành ${unit.remainingQuantity}. Toàn bộ thao tác đã được hủy; vui lòng tải lại và kiểm lại.`,
+        `Tồn kiện [${adjustment.code}] vừa thay đổi. Toàn bộ thao tác đã được hủy; vui lòng tải lại và kiểm lại.`,
       );
     }
     if (adjustment.actualQuantity > Number(unit.initialQuantity)) {
@@ -30774,7 +30901,7 @@ async function reconcileStockCheckHandlingUnits(
             adjustment.actualQuantity === Number(unit.initialQuantity)
           ? "sealed"
           : "opened";
-    const variance = adjustment.actualQuantity - adjustment.expectedQuantity;
+    const variance = adjustment.actualQuantity - expectedQuantity;
     const updated =
       variance === 0 && unit.status === nextStatus
         ? unit
@@ -30796,14 +30923,14 @@ async function reconcileStockCheckHandlingUnits(
           : "Kiểm thực tồn - điều chỉnh",
       quantity: variance,
       remaining: adjustment.actualQuantity,
-      expectedQuantity: adjustment.expectedQuantity,
+      expectedQuantity,
       actualQuantity: adjustment.actualQuantity,
       variance,
       actor: currentSession?.username || "Renderer",
       reason: variance === 0 ? "Kiểm khớp" : note || "Kiểm thực tồn SKU",
       note: [
         `Phiên ${sessionId}`,
-        `Tồn kiện ${adjustment.expectedQuantity} → ${adjustment.actualQuantity}`,
+        `Đã ghi nhận số thực tế ${adjustment.actualQuantity}`,
         note,
       ]
         .filter(Boolean)
@@ -30894,6 +31021,14 @@ ipcMain.handle("stockCheck:balanceItems", async (event, payload = {}) => {
           }
           if (session.status === "completed") {
             throw new Error("Stock check session has already been submitted.");
+          }
+          if (!isPrivilegedStockCheckSession()) {
+            const openingHour = session.type === "full" ? 16 : 17;
+            if (session.type !== "inspection" && session.type !== "recheck" && getBangkokHour() < openingHour) {
+              throw new Error(
+                `${session.type === "full" ? "Kiểm toàn bộ" : "Kiểm hàng ngày"} chỉ mở từ ${openingHour}:00 đối với non-admin.`,
+              );
+            }
           }
           if (
             currentSession?.role !== "admin" &&
@@ -31075,10 +31210,17 @@ ipcMain.handle("stockCheck:balanceItems", async (event, payload = {}) => {
     return {
       success: true,
       ...response,
+      stockBalance: sanitizeStockCheckBalance(
+        response.stockBalance,
+        isAdminStockCheckSession(),
+      ),
       data: {
-        stockBalance: response.stockBalance,
+        stockBalance: sanitizeStockCheckBalance(
+          response.stockBalance,
+          isAdminStockCheckSession(),
+        ),
         sessions: (response.sessions || []).map((session) =>
-          sanitizeStockCheckSession(session, currentSession?.role === "admin"),
+          sanitizeStockCheckSession(session, isAdminStockCheckSession()),
         ),
       },
     };
@@ -31173,6 +31315,9 @@ ipcMain.handle("stockCheck:getSessions", async (_event, options = {}) => {
 ipcMain.handle("stockCheck:ensureDailySession", async (event, payload = {}) => {
   try {
     requireRole("admin", "manager");
+    if (!isPrivilegedStockCheckSession() && getBangkokHour() < 17) {
+      throw new Error("Kiểm hàng ngày chỉ mở từ 17:00 đối với non-admin.");
+    }
     const requestedItems = Array.isArray(payload.items)
       ? payload.items.filter(isTemporaryDailyStockCheckProduct)
       : [];
@@ -31355,6 +31500,9 @@ ipcMain.handle("stockCheck:createFullSession", async (event, payload = {}) => {
     requireRole();
     if (TEMPORARY_DAILY_ONLY_MODE) {
       throw new Error("Tạm thời hệ thống chỉ cho phép tạo phiên kiểm hàng ngày.");
+    }
+    if (!isPrivilegedStockCheckSession() && getBangkokHour() < 16) {
+      throw new Error("Kiểm toàn bộ chỉ mở từ 16:00 đối với non-admin.");
     }
     const assignedTo = String(payload.assignedTo || "").trim();
     if (!assignedTo) throw new Error("Chưa chọn người phụ trách phiên kiểm.");
@@ -32137,7 +32285,7 @@ ipcMain.handle("stockCheck:updateCount", async (event, payload = {}) => {
     return {
       success: true,
       status: "entered",
-      item: sanitizeStockCheckItem(item, isPrivilegedStockCheckSession()),
+      item: sanitizeStockCheckItem(item, isAdminStockCheckSession()),
     };
   } catch (error) {
     return { success: false, error: error.message };
@@ -32195,7 +32343,7 @@ ipcMain.handle("stockCheck:retryCount", async (event, payload = {}) => {
     return {
       success: true,
       status: "retry_opened",
-      item: sanitizeStockCheckItem(item, isPrivilegedStockCheckSession()),
+      item: sanitizeStockCheckItem(item, isAdminStockCheckSession()),
     };
   } catch (error) {
     return { success: false, code: error.code, error: error.message };
@@ -32235,21 +32383,21 @@ ipcMain.handle("stockCheck:updateNote", async (event, payload = {}) => {
     );
     return {
       success: true,
-      item: sanitizeStockCheckItem(item, isPrivilegedStockCheckSession()),
+      item: sanitizeStockCheckItem(item, isAdminStockCheckSession()),
     };
   } catch (error) {
     return { success: false, error: error.message };
   }
 });
 
-// A narrowly scoped audit view for the assigned checker. It is limited to the
-// session date plus the immediately preceding calendar day and SKU, while
-// exposing the same stock movement columns needed to explain a mismatch.
+// Admin-only audit view for the session date plus the immediately preceding
+// calendar day and SKU. Non-admin checkers must not receive ledger quantities.
 ipcMain.handle(
   "stockCheck:getReconciliationLogs",
   async (event, payload = {}) => {
     try {
-      requireRole("manager", "staff");
+      // Stock movement quantities are part of the ledger and remain admin-only.
+      requireRole("admin");
       const sessionId = String(payload.sessionId || "").trim();
       const sku = String(payload.sku || "").trim();
       const page = Math.max(1, Number.parseInt(payload.page, 10) || 1);
@@ -32619,15 +32767,15 @@ ipcMain.handle("stockCheck:balanceItem", async (event, payload = {}) => {
       success: true,
       status: result.status,
       item: result.item
-        ? sanitizeStockCheckItem(result.item, currentSession.role === "admin")
+        ? sanitizeStockCheckItem(result.item, isAdminStockCheckSession())
         : undefined,
       session: result.session
         ? sanitizeStockCheckSession(
             result.session,
-            currentSession.role === "admin",
+            isAdminStockCheckSession(),
           )
         : undefined,
-      units: result.units || [],
+      units: sanitizeStockCheckUnits(result.units, isAdminStockCheckSession()),
     };
   } catch (error) {
     return { success: false, error: error.message };
@@ -32728,7 +32876,7 @@ ipcMain.handle("stockCheck:submitSession", async (event, payload = {}) => {
       status: session.alreadyCompleted ? "already_completed" : "completed",
       session: sanitizeStockCheckSession(
         session.session,
-        currentSession.role === "admin",
+        isPrivilegedStockCheckSession(),
       ),
     };
   } catch (error) {

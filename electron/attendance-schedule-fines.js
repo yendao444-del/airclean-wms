@@ -2,6 +2,7 @@ const { addDays, isRestDay } = require('./attendance-rewards');
 
 const MISSING_SCHEDULE_FINE = 100000;
 const PARTIAL_ATTENDANCE_FINE = 50000;
+const OFFICIAL_ABSENCE_FINE = 200000;
 const POLICY_EFFECTIVE_DATE = '2026-09-19';
 const CUTOFF_HOUR = 19;
 
@@ -93,6 +94,17 @@ function dateRangeThroughToday(now) {
     return rows;
 }
 
+function completedWorkDatesThroughToday(now) {
+    const today = dateKeyFromTimestamp(now);
+    const rows = [];
+    let cursor = POLICY_EFFECTIVE_DATE;
+    while (cursor && cursor <= today && rows.length < 366) {
+        if (new Date(now).getTime() >= dateAtBangkok(cursor, CUTOFF_HOUR).getTime()) rows.push(cursor);
+        cursor = addDays(cursor, 1);
+    }
+    return rows;
+}
+
 async function reconcileMissingSeasonalScheduleFines(prisma, options = {}) {
     const evaluationNow = options.now || new Date();
     return prisma.$transaction(async (tx) => {
@@ -104,6 +116,7 @@ async function reconcileMissingSeasonalScheduleFines(prisma, options = {}) {
         try { attendanceData = JSON.parse(configRow.value || '{}'); } catch { throw new Error('Dữ liệu cấu hình chấm công không hợp lệ'); }
         const employees = Array.isArray(attendanceData.employees) ? attendanceData.employees : [];
         const schedules = Array.isArray(attendanceData.workSchedules) ? attendanceData.workSchedules : [];
+        const leaveRecords = Array.isArray(attendanceData.leaveRecords) ? attendanceData.leaveRecords : [];
         const existingFines = Array.isArray(attendanceData.extraFines) ? attendanceData.extraFines : [];
         const fineAuditLog = Array.isArray(attendanceData.fineAuditLog) ? attendanceData.fineAuditLog : [];
         const deletedIds = deletedFineIds(fineAuditLog);
@@ -186,6 +199,46 @@ async function reconcileMissingSeasonalScheduleFines(prisma, options = {}) {
             }
         }
 
+        const officialAbsenceFine = Number(attendanceData.config?.officialAbsentFine ?? OFFICIAL_ABSENCE_FINE);
+        const officialDates = options.dateKey ? [String(options.dateKey)] : completedWorkDatesThroughToday(evaluationNow);
+        for (const employee of employees.filter((item) => item?.type === 'Official')) {
+            for (const dateKey of officialDates) {
+                if (dateKey < POLICY_EFFECTIVE_DATE || isRestDay(dateKey)) continue;
+                if (new Date(evaluationNow).getTime() < dateAtBangkok(dateKey, CUTOFF_HOUR).getTime()) continue;
+                const logsForDate = logsByEmployeeAndDate(logs, employee.id, employees, dateKey);
+                const [year, month, day] = dateKey.split('-');
+                for (const session of ['morning', 'afternoon']) {
+                    const worked = session === 'morning'
+                        ? logsForDate.some((log) => ['morning_in', 'morning_out'].includes(log.checkType))
+                        : logsForDate.some((log) => ['afternoon_in', 'evening_out'].includes(log.checkType));
+                    const leave = leaveRecords.find((item) => (
+                        Number(item?.empId) === Number(employee.id)
+                        && item?.date === dateKey
+                        && item?.session === session
+                    ));
+                    const excused = Boolean(leave && !leave.unpaid);
+                    const id = `fine-attendance-official-absence-${employee.id}-${dateKey}-${session}`;
+                    const existing = existingFines.find((fine) => String(fine?.id) === id);
+                    if (worked || excused) {
+                        if (existing && existing.source === 'attendance-official-absence') removed.push(existing);
+                        continue;
+                    }
+                    if (existing || created.some((fine) => fine.id === id) || deletedIds.has(id)) continue;
+                    created.push({
+                        id,
+                        empId: Number(employee.id),
+                        type: 'Nghỉ không phép',
+                        detail: `Không đi làm ca ${session === 'morning' ? 'sáng' : 'chiều'} ngày ${Number(day)}/${Number(month)}/${year}`,
+                        amount: officialAbsenceFine,
+                        date: dateAtBangkok(dateKey, CUTOFF_HOUR).toISOString(),
+                        source: 'attendance-official-absence',
+                        attendanceDate: dateKey,
+                        scheduledSession: session,
+                    });
+                }
+            }
+        }
+
         const removedIds = new Set(removed.map((fine) => String(fine.id)));
         const nextFines = [
             ...existingFines.filter((fine) => !removedIds.has(String(fine?.id))),
@@ -203,6 +256,7 @@ module.exports = {
     CUTOFF_HOUR,
     MISSING_SCHEDULE_FINE,
     PARTIAL_ATTENDANCE_FINE,
+    OFFICIAL_ABSENCE_FINE,
     POLICY_EFFECTIVE_DATE,
     dateAtBangkok,
     deadlineFor,

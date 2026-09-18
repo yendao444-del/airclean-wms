@@ -395,7 +395,7 @@ const FlowTraceabilityDashboard: React.FC<FlowTraceabilityDashboardProps> = ({ p
                             options={productRows.flatMap(p => [
                                 { label: `📦 [Sản phẩm cha] ${p.productName}`, value: `combo_${p.sku}`, style: { fontWeight: 'bold', color: '#1d4ed8', background: '#f8fafc' } },
                                 ...p.variants.map(v => ({
-                                    label: `— Phân loại: ${v.color || v.sku} (Tồn: ${v.systemStock})`,
+                                    label: `— Phân loại: ${v.color || v.sku}`,
                                     value: v.sku,
                                     style: { paddingLeft: 20 }
                                 }))
@@ -1850,7 +1850,7 @@ export default function StockBalancePage() {
 
         return { filteredProductRows: rows, stockFilterCounts: counts, baseFilteredCount: matchingCount };
     }, [productRows, productDisplayMeta, selectedCategory, searchText, stockFilter]);
-    const canViewStockNumbers = isAdmin || stockFilter === 'need' || stockFilter === 'low';
+    const canViewStockNumbers = isAdmin;
 
     function isVariantInCurrentStockAlert(variant: StockBalanceItem): boolean {
         if (!isAdmin && variant.inventoryStatus) {
@@ -1872,7 +1872,7 @@ export default function StockBalancePage() {
     }
 
     function canViewVariantStock(variant: StockBalanceItem): boolean {
-        return isAdmin || isVariantInCurrentStockAlert(variant);
+        return isAdmin;
     }
 
     function getVisibleStockForRecord(record: ProductRow, fullStock: number): number | null {

@@ -141,7 +141,7 @@ interface HandlingUnitRow {
     status: string;
     location?: { zone?: string; rack?: string };
     initialPcs: number;
-    currentPcs: number;
+    currentPcs?: number;
     receiptCode?: string;
 }
 
@@ -416,7 +416,9 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
     // như admin, kể cả các phiên đang phân công cho người khác.
     const isTestOperator = user?.isTestAccount === true;
     const canManage = user?.role === 'admin' || isTestOperator;
-    const isAdmin = user?.role === 'admin' || isTestOperator;
+    // Test accounts may manage the workflow, but must still see the blind
+    // stock-check surface and never receive the inventory ledger.
+    const isAdmin = user?.role === 'admin';
     const canBrowseHistory = isAdmin || user?.isTestAccount === true;
     const canViewLedger = isAdmin;
 
@@ -535,7 +537,7 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
         let cancelled = false;
         setHandlingWorkspaceLoading(true);
         setHandlingWorkspaceError('');
-        window.electronAPI.handlingUnits.getWorkspace()
+        window.electronAPI.handlingUnits.getWorkspace({ purpose: 'stock-check' })
             .then(result => {
                 if (cancelled) return;
                 if (!result?.success || !result.data) {
@@ -558,7 +560,7 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
     const refreshHandlingHistory = useCallback(async () => {
         setHandlingHistoryLoading(true);
         try {
-            const result = await window.electronAPI.handlingUnits.getWorkspace();
+            const result = await window.electronAPI.handlingUnits.getWorkspace({ purpose: 'stock-check' });
             if (!result?.success || !result.data) {
                 throw new Error(result?.error || 'Không tải được lịch sử kiện hàng.');
             }
@@ -605,8 +607,11 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
     const isLockedDate = isPast || isFuture;
     const dailyWindowOpen = !isToday || clockNow.hour() >= DAILY_CHECK_OPEN_HOUR;
     const fullWindowOpen = !isToday || clockNow.hour() >= FULL_CHECK_OPEN_HOUR;
+    // Admin may prepare the daily session before the staff opening time, but
+    // non-admin checkers remain locked until 17:00.
+    const dailyWindowOpenForUser = dailyWindowOpen || isAdmin;
     const activeWindowOpen = activeTab === 'inspection'
-        || (activeTab === 'full' ? fullWindowOpen : dailyWindowOpen);
+        || (activeTab === 'full' ? fullWindowOpen : dailyWindowOpenForUser);
     const isActiveTimeLocked = isToday && !activeWindowOpen;
     const activeOpeningTime = activeTab === 'full' ? '16:00' : '17:00';
     const activeTimedLabel = activeTab === 'full' ? 'Kiểm toàn bộ' : 'Kiểm hàng ngày';
@@ -1093,12 +1098,12 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
                                 }}
                                 title={dailyDisabledByFull
                                     ? 'Hôm nay đã có phiên kiểm toàn bộ'
-                                    : !dailyWindowOpen ? 'Kiểm hàng ngày mở lúc 17:00' : undefined}
+                                    : !dailyWindowOpen && !isAdmin ? 'Kiểm hàng ngày mở lúc 17:00' : undefined}
                             >
                                 <span>Kiểm hàng ngày</span>
                                 {dailyDisabledByFull ? (
                                     <span style={getBadgeStyle(activeTab === 'daily', 'alert')}>Tạm dừng</span>
-                                ) : !dailyWindowOpen ? (
+                                ) : !dailyWindowOpen && !isAdmin ? (
                                     <span style={getBadgeStyle(activeTab === 'daily', 'time')}>17:00</span>
                                 ) : null}
                             </button>
@@ -1693,7 +1698,7 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
             message.info('Kiểm toàn bộ chỉ mở từ 16:00.');
             return;
         }
-        if (!useFullInventory && !dailyWindowOpen) {
+        if (!useFullInventory && !dailyWindowOpen && !isAdmin) {
             message.info('Kiểm hàng ngày chỉ mở từ 17:00.');
             return;
         }
@@ -1714,15 +1719,6 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
             return;
         }
         const sessionId = activeTab === 'full' ? `${todayStr}-full` : todayStr;
-        const sessionType: CheckSession['type'] = activeTab === 'full' ? 'full' : 'daily';
-        const session: CheckSession = {
-            id: sessionId, runId: createStockCheckRunId(), date: todayStr, type: sessionType,
-            assignedTo: assignee.username, assignedName: assignee.username,
-            status: 'in_progress', items,
-            dailyScopePolicyVersion: useFullInventory ? undefined : 3,
-            notes: '',
-            createdAt: dayjs().toISOString(),
-        };
         if (useFullInventory) {
             const result = await window.electronAPI.stockCheck.createFullSession({
                 items,
@@ -1751,13 +1747,24 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
             message.warning('Hôm nay đã có phiên kiểm toàn bộ. Phiên kiểm hàng ngày đã được tạm dừng.');
             return;
         }
-        // Xóa session cũ cùng tab type rồi thêm mới — không ảnh hưởng tab kia
-        persistSessions(sessions.filter(s => s.id !== sessionId).concat(session));
+        // Daily sessions must use the transactional server-owned creation
+        // route. Bulk adminSaveSessions is intentionally blocked by data
+        // safety mode and is only suitable for audited legacy maintenance.
+        const createResult = await window.electronAPI.stockCheck.ensureDailySession({ items });
+        if (!createResult?.success || !createResult.session) {
+            message.error(createResult?.error || 'Không thể lưu phiên kiểm hàng trên máy chủ.');
+            return;
+        }
+        const nextSessions = sessions.filter(s => s.id !== sessionId).concat(createResult.session)
+            .map(normalizeSessionStatus)
+            .slice(-90);
+        localStorage.setItem(LS_KEY, JSON.stringify(nextSessions));
+        setSessions(nextSessions);
         countingInputsRef.current = {};
         setCountingInputs({});
         setExpandedProductGroups({});
         setExpandedConvGroups({});
-        message.success(`Tạo phiên kiểm ${items.length} SKU phân loại → ${session.assignedName}`);
+        message.success(`Tạo phiên kiểm ${items.length} SKU phân loại → ${createResult.session.assignedName}`);
     };
 
     const handleDirectActualStock = (sku: string, value: number | null) => {
@@ -2480,7 +2487,6 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
                 reference: `STOCK-CHECK-${todaySession?.runId || todaySessionId}-${item.sku}`,
                 unitAdjustments: skuUnits.map(unit => ({
                     code: unit.id,
-                    expectedQuantity: Number(unit.currentPcs || 0),
                     actualQuantity: Number(actualUnitCounts[unit.id] || 0),
                 })),
             });
@@ -2499,10 +2505,10 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
                 setPackageConfirmation(current => current ? {
                     ...current,
                     actualTotal: Number.isFinite(revealedActualTotal) ? revealedActualTotal : current.actualTotal,
-                    systemStock: Number.isFinite(revealedSystemStock)
+                    systemStock: isAdmin && Number.isFinite(revealedSystemStock)
                         ? revealedSystemStock
-                        : current.actualTotal - (Number.isFinite(revealedDifference) ? revealedDifference : current.stockDifference),
-                    stockDifference: Number.isFinite(revealedDifference) ? revealedDifference : current.stockDifference,
+                        : null,
+                    stockDifference: isAdmin && Number.isFinite(revealedDifference) ? revealedDifference : 0,
                     requiresReason: true,
                 } : current);
                 message.warning('Tổng thực tế từ các kiện đang khác tồn kho trên phần mềm. Hãy kiểm tra lại hoặc nhập lý do để cân bằng.');
@@ -2528,7 +2534,9 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
                     if (!updated) return unit;
                     return {
                         ...unit,
-                        currentPcs: Number(updated.remainingQuantity || 0),
+                        ...(isAdmin && updated.remainingQuantity !== undefined
+                            ? { currentPcs: Number(updated.remainingQuantity || 0) }
+                            : {}),
                         status: updated.status === 'sealed'
                             ? 'Nguyên niêm phong'
                             : updated.status === 'empty'
@@ -2575,9 +2583,9 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
             (sum, unit) => sum + Number(actualUnitCounts[unit.id] || 0),
             0,
         );
-        const changedUnits = skuUnits.filter(unit =>
-            Number(actualUnitCounts[unit.id] || 0) !== Number(unit.currentPcs || 0)
-        );
+        const changedUnits = isAdmin
+            ? skuUnits.filter(unit => Number(actualUnitCounts[unit.id] || 0) !== Number(unit.currentPcs || 0))
+            : [];
         setPackageConfirmationNote(item.note || '');
         setPackageConfirmation({
             item,
@@ -3548,9 +3556,6 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
                                                     items={[
                                                         { key: 'check', label: '⚖️ Kiểm hàng' },
                                                         ...(canViewLedger ? [{ key: 'ledger', label: '📋 Thẻ kho' }] : []),
-                                                        ...(!isAdmin && group.items.some(item => item.countLocked && item.requiresNote && !item.balanced)
-                                                            ? [{ key: 'reconciliation', label: '🔎 Đối soát 2 ngày' }]
-                                                            : []),
                                                     ]}
                                                 />
                                             </div>
@@ -3806,16 +3811,6 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
                                                                                         </Button>
                                                                                     </Tooltip>
                                                                                 )}
-                                                                            {!isAdmin && item.countLocked && item.requiresNote && !item.balanced && (
-                                                                                <Button
-                                                                                    type="link"
-                                                                                    size="small"
-                                                                                    onClick={() => { void openReconciliation(group, item); }}
-                                                                                    style={{ display: 'block', margin: '4px auto 0', padding: 0, height: 20, fontSize: 11, fontWeight: 700 }}
-                                                                                >
-                                                                                    Đối soát 2 ngày
-                                                                                </Button>
-                                                                            )}
                                                                         </td>
                                                                     </tr>
                                                                 );
@@ -3851,7 +3846,6 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
                                                 </div>
                                             )}
                                             {isAdmin && (productTabs[group.productName] || 'check') === 'ledger' && renderLedgerTab(group)}
-                                            {!isAdmin && (productTabs[group.productName] || 'check') === 'reconciliation' && renderReconciliationTab(group)}
                                         </div>
                                     )}
                                 </div>
@@ -3959,19 +3953,21 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
                                                     <article key={unit.id} className={`stock-check-package-card${sealed ? ' sealed' : ' opened'}`}>
                                                         <div className="stock-check-package-card-top">
                                                             <div><b>{unit.id}</b><span>{unit.packageType}</span></div>
-                                                            <Tag color={sealed ? 'green' : 'orange'}>{sealed ? 'Nguyên niêm phong' : unit.status}</Tag>
+                                                            <Tag color={sealed ? 'green' : 'orange'}>{isAdmin ? (sealed ? 'Nguyên niêm phong' : unit.status) : 'Cần kiểm thực tế'}</Tag>
                                                         </div>
                                                         <img src={handlingUnitImage(unit)} alt={`Minh họa kiện ${unit.id}`} />
                                                         <div className="stock-check-package-meta">
                                                             <div><span>Vị trí</span><strong>{handlingUnitLocation(unit)}</strong></div>
                                                             <div><span>Quy cách</span><strong>{unit.packageLabel || `${unit.initialPcs.toLocaleString('vi-VN')} ${unit.unitName}`}</strong></div>
-                                                            <div className="stock-check-package-ledger-stock">
-                                                                <span>Tồn trên Quản lý kiện hàng</span>
-                                                                <strong>{Number(unit.currentPcs || 0).toLocaleString('vi-VN')} {unit.unitName}</strong>
-                                                            </div>
+                                                            {sealed && unit.currentPcs !== undefined && (
+                                                                <div className="stock-check-package-ledger-stock">
+                                                                    <span>Tồn trên Quản lý kiện hàng</span>
+                                                                    <strong>{Number(unit.currentPcs || 0).toLocaleString('vi-VN')} {unit.unitName}</strong>
+                                                                </div>
+                                                            )}
                                                             {unit.receiptCode && <div><span>Phiếu nhập</span><strong>{unit.receiptCode}</strong></div>}
                                                         </div>
-                                                        {sealed ? (
+                                                        {sealed && isAdmin ? (
                                                             <div className="stock-check-sealed-choice">
                                                                 <Radio.Group
                                                                     value={actualUnitCounts[unit.id] === null || actualUnitCounts[unit.id] === undefined
@@ -4016,7 +4012,7 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
                                                                     disabled={disabled}
                                                                     onChange={value => handleUnitActualCount(selectedItem, unit.id, value)}
                                                                 />
-                                                                <small>Nhập số đếm thực tế để đối chiếu với tồn trên Quản lý kiện hàng.</small>
+                                                                <small>Nhập số đếm thực tế của kiện sau khi kiểm trực tiếp.</small>
                                                             </div>
                                                         )}
                                                     </article>
@@ -4028,8 +4024,10 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
                                     {selectedSkuUnits.length > 0 && (
                                         <div className="stock-check-package-summary">
                                             <div><span>Số kiện đã nhập</span><strong>{selectedSkuUnits.filter(unit => actualUnitCounts[unit.id] !== null && actualUnitCounts[unit.id] !== undefined).length}/{selectedSkuUnits.length}</strong></div>
-                                            <div><span>Tổng trên phần mềm</span><strong>{selectedSkuUnits.reduce((sum, unit) => sum + Number(unit.currentPcs || 0), 0).toLocaleString('vi-VN')}</strong></div>
-                                            <div><span>Chênh lệch thực tế</span><strong>{selectedItem.actualStock === null ? '—' : `${selectedItem.actualStock - selectedSkuUnits.reduce((sum, unit) => sum + Number(unit.currentPcs || 0), 0) > 0 ? '+' : ''}${(selectedItem.actualStock - selectedSkuUnits.reduce((sum, unit) => sum + Number(unit.currentPcs || 0), 0)).toLocaleString('vi-VN')}`}</strong></div>
+                                            {isAdmin && <>
+                                                <div><span>Tổng trên phần mềm</span><strong>{selectedSkuUnits.reduce((sum, unit) => sum + Number(unit.currentPcs || 0), 0).toLocaleString('vi-VN')}</strong></div>
+                                                <div><span>Chênh lệch thực tế</span><strong>{selectedItem.actualStock === null ? '—' : `${selectedItem.actualStock - selectedSkuUnits.reduce((sum, unit) => sum + Number(unit.currentPcs || 0), 0) > 0 ? '+' : ''}${(selectedItem.actualStock - selectedSkuUnits.reduce((sum, unit) => sum + Number(unit.currentPcs || 0), 0)).toLocaleString('vi-VN')}`}</strong></div>
+                                            </>}
                                             <div className="total"><span>Tổng kiểm thực tế</span><strong>{selectedItem.actualStock === null ? 'Chưa hoàn tất' : selectedItem.actualStock.toLocaleString('vi-VN')}</strong></div>
                                         </div>
                                     )}
@@ -4042,11 +4040,6 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
                                             {selectedItem.balanced && <Tag color="green">Đã cân bằng</Tag>}
                                         </div>
                                         <div>
-                                            {!isAdmin && selectedItem.countLocked && selectedItem.requiresNote && !selectedItem.balanced && (
-                                                <Button onClick={() => { const group = productGroups.find(entry => entry.productName === selectedItem.productName); if (group) void openReconciliation(group, selectedItem); }}>
-                                                    Đối soát 2 ngày
-                                                </Button>
-                                            )}
                                             <Button
                                                 type="primary"
                                                 icon={<CheckOutlined />}
@@ -4272,14 +4265,14 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
                     <div className="stock-check-confirm-count">
                         {packageConfirmation.changedUnits.length > 0 ? (
                             <section className="stock-check-confirm-units">
-                                <strong>Các kiện có số thực tế khác số đang ghi nhận</strong>
+                                <strong>{isAdmin ? 'Các kiện có số thực tế khác số đang ghi nhận' : 'Các kiện đã ghi nhận số đếm'}</strong>
                                 {packageConfirmation.changedUnits.map(unit => (
                                     <div key={unit.id}>
                                         <code>{unit.id}</code>
-                                        <span>
+                                        {isAdmin && <span>
                                             {Number(unit.currentPcs || 0).toLocaleString('vi-VN')} →{' '}
                                             <b>{Number(actualUnitCounts[unit.id] || 0).toLocaleString('vi-VN')}</b>
-                                        </span>
+                                        </span>}
                                     </div>
                                 ))}
                             </section>
@@ -4287,8 +4280,10 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
                             <Alert
                                 type="success"
                                 showIcon
-                                message="Kiểm từng kiện đã khớp"
-                                description="Số đếm từng kiện khớp với số đang ghi nhận trong Quản lý kiện hàng."
+                                message={isAdmin ? 'Kiểm từng kiện đã khớp' : 'Đã ghi nhận số đếm từng kiện'}
+                                description={isAdmin
+                                    ? 'Số đếm từng kiện khớp với số đang ghi nhận trong Quản lý kiện hàng.'
+                                    : 'Số tồn trên phần mềm được đối chiếu ở máy chủ; số liệu tham chiếu không hiển thị cho tài khoản này.'}
                             />
                         )}
                         {packageConfirmation.requiresReason && packageConfirmation.systemStock !== null && (
@@ -4324,7 +4319,9 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
                             value={packageConfirmationNote}
                             onChange={event => setPackageConfirmationNote(event.target.value)}
                             placeholder={packageConfirmation.requiresReason
-                                ? `Nhập lý do ${packageConfirmation.stockDifference < 0 ? 'thiếu' : 'thừa'} ${Math.abs(packageConfirmation.stockDifference).toLocaleString('vi-VN')} ${packageConfirmation.item.unit}...`
+                                ? (packageConfirmation.systemStock === null
+                                    ? 'Nhập lý do chênh lệch thực tế để cân bằng...'
+                                    : `Nhập lý do ${packageConfirmation.stockDifference < 0 ? 'thiếu' : 'thừa'} ${Math.abs(packageConfirmation.stockDifference).toLocaleString('vi-VN')} ${packageConfirmation.item.unit}...`)
                                 : 'Ghi chú thêm nếu cần'}
                             status={packageConfirmation.requiresReason && !packageConfirmationNote.trim() ? 'error' : undefined}
                             autoSize={{ minRows: 2, maxRows: 5 }}

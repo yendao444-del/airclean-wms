@@ -3416,11 +3416,14 @@ const DailyTasks = () => {
                             icon={<QrcodeOutlined />}
                             loading={mobileEvidenceStarting}
                             onClick={() => {
-                                if (mobileEvidenceSession) {
+                                const sessionActive = mobileEvidenceSession && mobileEvidenceSession.expiresAt > Date.now();
+                                if (sessionActive) {
                                     setMobileEvidenceOpen(true);
                                 } else if (isAdmin && !isRolePreview) {
+                                    setMobileEvidenceSession(null);
                                     setMobileEvidenceTargetOpen(true);
                                 } else {
+                                    setMobileEvidenceSession(null);
                                     void startMobileEvidence(isRolePreview ? user?.username : undefined);
                                 }
                             }}
@@ -3534,6 +3537,12 @@ const DailyTasks = () => {
                             </span>
                         </div>
                     </div>
+                    <Alert
+                        showIcon
+                        type="warning"
+                        message="Yêu cầu ảnh chụp ngang"
+                        description="Nhân viên cần xoay ngang điện thoại trước khi chụp. Hệ thống sẽ tự động từ chối ảnh dọc hoặc ảnh vuông."
+                    />
                 </div>}
             </Modal>
 

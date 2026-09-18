@@ -325,7 +325,7 @@ export interface ElectronAPI {
   };
   prepack: {
     list: (filters?: { status?: string }) => Promise<{ success: boolean; data?: any[]; error?: string }>;
-    create: (data: any) => Promise<{ success: boolean; data?: any; error?: string }>;
+    create: (data: any) => Promise<{ success: boolean; data?: any; createdCount?: number; skippedCount?: number; error?: string }>;
     updateTarget: (data: any) => Promise<{ success: boolean; data?: any; error?: string }>;
     deleteTarget: (batchId: number) => Promise<{ success: boolean; error?: string }>;
     submitEvidence: (data: any) => Promise<{ success: boolean; data?: any; error?: string }>;
@@ -494,7 +494,7 @@ export interface ElectronAPI {
     }>;
   };
   handlingUnits: {
-    getWorkspace: () => Promise<{
+    getWorkspace: (options?: { purpose?: 'stock-check' }) => Promise<{
       success: boolean;
       data?: {
         catalog: any[];
@@ -1666,7 +1666,7 @@ export interface ElectronAPI {
       reference?: string;
       unitAdjustments?: Array<{
         code: string;
-        expectedQuantity: number;
+        expectedQuantity?: number;
         actualQuantity: number;
       }>;
     }) => Promise<{

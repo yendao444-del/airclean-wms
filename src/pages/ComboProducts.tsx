@@ -2,6 +2,7 @@ import { useState, useEffect, useMemo } from 'react';
 import { Card, Button, Modal, message, Space, Typography, Tag, Empty, Input } from 'antd';
 import { PlusOutlined, EditOutlined, DeleteOutlined, GiftOutlined, RightOutlined, SearchOutlined } from '@ant-design/icons';
 import ComboWizardModal from '../components/ComboWizardModal';
+import { useAuth } from '../contexts/AuthContext';
 
 const { Title, Text } = Typography;
 
@@ -67,6 +68,8 @@ const extractQuantityGroup = (combo: ComboProduct): number => {
 };
 
 export default function ComboProductsPage() {
+    const { user } = useAuth();
+    const isAdmin = user?.role === 'admin';
     const [combos, setCombos] = useState<ComboProduct[]>([]);
     const [products, setProducts] = useState<Product[]>([]);
     const [loading, setLoading] = useState(false);
@@ -333,8 +336,10 @@ export default function ComboProductsPage() {
                                                             </div>
                                                             <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 11, color: '#9ca3af' }}>
                                                                 <span>Giá: {fmt(combosInGroup[0]?.cost || 0)}đ</span>
-                                                                <span>·</span>
-                                                                <span>Tồn: {combosInGroup.reduce((s, c) => s + (c.stock || 0), 0)}</span>
+                                                                {isAdmin && <>
+                                                                    <span>·</span>
+                                                                    <span>Tồn: {combosInGroup.reduce((s, c) => s + (c.stock || 0), 0)}</span>
+                                                                </>}
                                                             </div>
                                                         </div>
 
@@ -343,7 +348,7 @@ export default function ComboProductsPage() {
                                                             <div>
                                                                 {/* Mini header */}
                                                                 <div style={{
-                                                                    display: 'grid', gridTemplateColumns: '200px 1fr 90px 60px 120px',
+                                                                    display: 'grid', gridTemplateColumns: isAdmin ? '200px 1fr 90px 60px 120px' : '200px 1fr 90px 120px',
                                                                     padding: '6px 20px 6px 100px', fontSize: 11, fontWeight: 600,
                                                                     color: '#9ca3af', background: '#f5f6f8', borderBottom: '1px solid #eef0f3',
                                                                     textTransform: 'uppercase' as const, letterSpacing: 0.3,
@@ -351,12 +356,12 @@ export default function ComboProductsPage() {
                                                                     <div>SKU</div>
                                                                     <div>Tên combo</div>
                                                                     <div style={{ textAlign: 'right' }}>Giá vốn</div>
-                                                                    <div style={{ textAlign: 'center' }}>Tồn</div>
+                                                                    {isAdmin && <div style={{ textAlign: 'center' }}>Tồn</div>}
                                                                     <div style={{ textAlign: 'right' }}>Thao tác</div>
                                                                 </div>
                                                                 {combosInGroup.map((combo, ci) => (
                                                                     <div key={combo.id} style={{
-                                                                        display: 'grid', gridTemplateColumns: '200px 1fr 90px 60px 120px',
+                                                                        display: 'grid', gridTemplateColumns: isAdmin ? '200px 1fr 90px 60px 120px' : '200px 1fr 90px 120px',
                                                                         padding: '8px 20px 8px 100px', fontSize: 13,
                                                                         borderBottom: ci < combosInGroup.length - 1 ? '1px solid #f5f5f5' : '1px solid #eef0f3',
                                                                         background: '#fff', transition: 'background 0.1s',
@@ -374,7 +379,7 @@ export default function ComboProductsPage() {
                                                                         <div style={{ textAlign: 'right', fontWeight: 600, color: '#111827', fontSize: 12 }}>
                                                                             {fmt(combo.cost)}đ
                                                                         </div>
-                                                                        <div style={{ textAlign: 'center' }}>
+                                                                        {isAdmin && <div style={{ textAlign: 'center' }}>
                                                                             <span style={{
                                                                                 display: 'inline-block', padding: '2px 8px', borderRadius: 4,
                                                                                 fontSize: 12, fontWeight: 700,
@@ -383,7 +388,7 @@ export default function ComboProductsPage() {
                                                                             }}>
                                                                                 {combo.stock}
                                                                             </span>
-                                                                        </div>
+                                                                        </div>}
                                                                         <div style={{ textAlign: 'right' }}>
                                                                             <Space size={4}>
                                                                                 <Button size="small" type="text" icon={<EditOutlined />}

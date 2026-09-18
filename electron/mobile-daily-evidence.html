@@ -38,6 +38,13 @@
     input[type=file] { position:absolute; width:1px; height:1px; opacity:0; pointer-events:none; }
     .capture,.submit { width:100%; }
     .capture { margin-bottom:10px; }
+    .landscape-guide { display:grid; grid-template-columns:74px minmax(0,1fr); align-items:center; gap:12px; margin-bottom:14px; padding:12px; border:1px solid #f3cd73; border-radius:14px; color:#6c4a00; background:#fff9e8; }
+    .landscape-guide-icon { position:relative; width:70px; height:42px; border:3px solid #b87900; border-radius:9px; background:#fff; box-shadow:inset 0 0 0 2px #fff3c9; }
+    .landscape-guide-icon::before { content:''; position:absolute; top:50%; right:-7px; width:4px; height:12px; border-radius:0 3px 3px 0; background:#b87900; transform:translateY(-50%); }
+    .landscape-guide-icon::after { content:'↔'; position:absolute; inset:0; display:grid; place-items:center; color:#b87900; font-size:25px; font-weight:900; }
+    .landscape-guide strong,.landscape-guide span { display:block; }
+    .landscape-guide strong { margin-bottom:2px; font-size:14px; }
+    .landscape-guide span { font-size:12px; line-height:1.4; }
     .photos { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px; margin:12px 0; }
     .photo { position:relative; overflow:hidden; min-height:130px; border:1px solid var(--line); border-radius:14px; background:#edf5f1; }
     .photo img { display:block; width:100%; height:130px; object-fit:cover; }
@@ -64,8 +71,9 @@
     <section id="editorView" class="editor">
       <div class="editor-header"><button id="back" class="back" type="button" aria-label="Quay lại">‹</button><div><h2 id="taskTitle"></h2><p id="taskMeta"></p></div></div>
       <div class="card">
+        <div class="landscape-guide"><span class="landscape-guide-icon" aria-hidden="true"></span><div><strong>Chỉ chụp ảnh ngang</strong><span>Xoay ngang điện thoại trước khi chụp. Ảnh dọc hoặc ảnh vuông sẽ bị từ chối.</span></div></div>
         <input id="cameraInput" type="file" accept="image/jpeg" capture="environment">
-        <button id="capture" class="capture secondary" type="button">Chụp thêm ảnh</button>
+        <button id="capture" class="capture secondary" type="button" aria-label="Bấm để mở camera và chụp ảnh ngang">📷 &nbsp;Bấm để mở camera · Chụp ảnh ngang</button>
         <div id="emptyPhotos" class="empty">Chưa có ảnh.</div><div id="photos" class="photos"></div>
         <button id="submit" class="submit" type="button" disabled>Gửi bằng chứng</button>
         <div id="status" class="status"></div>
@@ -132,7 +140,7 @@
       selectedFiles = []; statusBox.className = 'status';
       document.querySelector('#taskTitle').textContent = activeTask.title;
       document.querySelector('#taskMeta').textContent = `${activeTask.category} · Hạn ${formatDue(activeTask.dueAt)} · Cần ${activeTask.requiredCount} ảnh`;
-      emptyPhotos.textContent = `Chụp tối thiểu ${activeTask.requiredCount} ảnh thực tế bằng camera.`;
+      emptyPhotos.textContent = `Chụp tối thiểu ${activeTask.requiredCount} ảnh ngang thực tế bằng camera.`;
       listView.style.display = 'none'; editorView.classList.add('active'); renderPhotos();
     }
     function closeTask() { selectedFiles = []; previewUrls.forEach(URL.revokeObjectURL); previewUrls = []; activeTask = null; editorView.classList.remove('active'); listView.style.display = 'block'; renderTaskList(); }
@@ -144,11 +152,30 @@
     }
     document.querySelector('#back').onclick = closeTask;
     captureButton.onclick = () => input.click();
-    input.onchange = () => {
+    function getImageDimensions(file) {
+      return new Promise((resolve, reject) => {
+        const url = URL.createObjectURL(file);
+        const image = new Image();
+        image.onload = () => { const dimensions = { width:image.naturalWidth, height:image.naturalHeight }; URL.revokeObjectURL(url); resolve(dimensions); };
+        image.onerror = () => { URL.revokeObjectURL(url); reject(new Error('Không thể đọc kích thước ảnh.')); };
+        image.src = url;
+      });
+    }
+    input.onchange = async () => {
       const file = input.files?.[0]; input.value = ''; if (!file) return;
       if (file.type !== 'image/jpeg') { setStatus('error', 'Chỉ nhận ảnh JPG/JPEG chụp trực tiếp từ camera.'); return; }
       if (file.size > 15 * 1024 * 1024) { setStatus('error', 'Mỗi ảnh không được vượt quá 15 MB.'); return; }
       if (selectedFiles.length >= 5) return;
+      try {
+        const dimensions = await getImageDimensions(file);
+        if (!dimensions.width || !dimensions.height || dimensions.width <= dimensions.height) {
+          setStatus('error', 'Ảnh dọc hoặc ảnh vuông không được chấp nhận. Hãy xoay ngang điện thoại rồi chụp lại.');
+          return;
+        }
+      } catch (error) {
+        setStatus('error', error?.message || 'Không thể kiểm tra chiều ảnh. Vui lòng chụp lại.');
+        return;
+      }
       selectedFiles.push(file); statusBox.className = 'status'; renderPhotos();
     };
     submitButton.onclick = async () => {
