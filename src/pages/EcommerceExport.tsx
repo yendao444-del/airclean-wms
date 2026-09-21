@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { useAuth } from '../contexts/AuthContext';
 import { useCurrentUser } from '../lib/hooks/useCurrentUser';
+import { usePageHeader } from '../contexts/PageHeaderContext';
 import {
     Card,
     Button,
@@ -415,6 +416,7 @@ function calculateImportedOrderTotal(orderItems: any[]): number {
 export default function EcommerceExportPage() {
     const { user } = useAuth();
     const currentUser = useCurrentUser();
+    const { setHeaderExtra, clearHeaderExtra } = usePageHeader();
     const isAdmin = user?.role === 'admin';
 
     const [ecommerceExports, setEcommerceExports] = useState<EcommerceExport[]>([]);
@@ -468,6 +470,9 @@ export default function EcommerceExportPage() {
     const audioCtxRef = useRef<AudioContext | null>(null);
     const successBufRef = useRef<AudioBuffer | null>(null);
     const alertBufRef = useRef<AudioBuffer | null>(null);
+    const handleExportExcelRef = useRef<(filterStatus: 'all' | 'completed' | 'processing') => void>(() => undefined);
+    const handleImportFolderRef = useRef<() => void>(() => undefined);
+    const handleBulkDeleteRef = useRef<() => void>(() => undefined);
 
     // 🔍 State cho bộ lọc trạng thái
     const [statusFilter, setStatusFilter] = useState<'all' | 'pending' | 'completed' | 'overdue' | 'mismatch' | 'cancelled'>('pending');
@@ -623,7 +628,7 @@ export default function EcommerceExportPage() {
     };
 
     // 🔊 Play từ decoded buffer — zero delay, hỗ trợ overlap
-    const playBuf = (buf: AudioBuffer | null) => {
+    const playBuf = (buf: AudioBuffer | null, volumeBoost: number) => {
         const ctx = audioCtxRef.current;
         if (!ctx) return;
         try {
@@ -638,7 +643,15 @@ export default function EcommerceExportPage() {
                     for (let i = 0; i < samples.length; i += 1) samples[i] = Math.sin((i / ctx.sampleRate) * Math.PI * 2 * 880) * (1 - i / samples.length);
                     src.buffer = fallback;
                 }
-                src.connect(ctx.destination);
+                const outputGain = ctx.createGain();
+                outputGain.gain.value = volumeBoost;
+                const limiter = ctx.createDynamicsCompressor();
+                limiter.threshold.value = -3;
+                limiter.knee.value = 0;
+                limiter.ratio.value = 20;
+                limiter.attack.value = 0.002;
+                limiter.release.value = 0.1;
+                src.connect(outputGain).connect(limiter).connect(ctx.destination);
                 src.start(0);
             };
             if (ctx.state === 'suspended') {
@@ -648,8 +661,8 @@ export default function EcommerceExportPage() {
             }
         } catch { /* ignore */ }
     };
-    const playSuccess = () => playBuf(successBufRef.current);
-    const playAlert = () => playBuf(alertBufRef.current);
+    const playSuccess = () => playBuf(successBufRef.current, 2);
+    const playAlert = () => playBuf(alertBufRef.current, 2.4);
 
     // 🗺️ Rebuild tracking lookup Map mỗi khi data thay đổi
     // Lưu tracking → record.id (KHÔNG phải index, vì index stale sau reload/import)
@@ -823,29 +836,6 @@ export default function EcommerceExportPage() {
         return () => clearTimeout(timer);
     }, [statusFilter, searchKeyword]);
 
-    const purgeCancelledExports = async (silent = true) => {
-        try {
-            if (operationalCounts.cancelled === 0) {
-                if (!silent) message.info('Không có đơn TMDT đã hủy để xóa.');
-                return 0;
-            }
-
-            const result = await window.electronAPI.ecommerceExports.deleteCancelled();
-            if (!result?.success) {
-                if (!silent) message.error(result?.error || 'Không thể xóa đơn TMDT đã hủy');
-                return 0;
-            }
-            const deletedCount = result.data || 0;
-            if (!silent && deletedCount > 0) {
-                message.success(`Đã xóa ${deletedCount} đơn TMDT đã hủy`);
-            }
-            return deletedCount;
-        } catch (error) {
-            if (!silent) message.error('Không thể xóa đơn TMDT đã hủy');
-            return 0;
-        }
-    };
-
     const saveEcommerceExports = (_newEcommerceExports: EcommerceExport[]) => {
         // Data is now saved via individual API calls (create/update/delete)
         // This function just reloads from database
@@ -1000,33 +990,6 @@ export default function EcommerceExportPage() {
                 } catch (error) {
                     console.error('Bulk delete error:', error);
                     message.error('Lỗi khi xóa phiếu xuất hàng loạt!');
-                }
-            },
-        });
-    };
-
-    const handleDeleteCancelled = () => {
-        if (!isAdmin) {
-            message.error('Chỉ quản trị viên mới có quyền xóa đơn hàng!');
-            return;
-        }
-
-        if (operationalCounts.cancelled === 0) {
-            message.info('Không có đơn TMDT đã hủy để xóa.');
-            return;
-        }
-
-        Modal.confirm({
-            title: `Xóa ${operationalCounts.cancelled} đơn TMDT đã hủy?`,
-            content: 'Thao tác này sẽ xóa toàn bộ đơn có trạng thái cancelled trong Xuất hàng TMDT. Không ảnh hưởng đơn đã hoàn thành ở mục Đơn hàng.',
-            okText: 'Xóa đơn hủy',
-            okType: 'danger',
-            cancelText: 'Hủy',
-            onOk: async () => {
-                const deletedCount = await purgeCancelledExports(false);
-                if (deletedCount > 0) {
-                    await loadEcommerceExports();
-                    if (statusFilter === 'cancelled') setStatusFilter('pending');
                 }
             },
         });
@@ -2503,7 +2466,162 @@ Thời gian: ${currentTime}`;
         }
     };
 
+    handleExportExcelRef.current = handleExportExcel;
+    handleImportFolderRef.current = handleImportFolder;
+    handleBulkDeleteRef.current = handleBulkDelete;
 
+    const ecommerceStatusChips = (
+        <>
+            <Tag
+                className="ecommerce-status-chip"
+                onClick={() => setStatusFilter('all')}
+                style={{
+                    cursor: 'pointer', flexShrink: 0,
+                    padding: '4px 10px', fontSize: 12, fontWeight: 600,
+                    borderRadius: 8, border: 'none',
+                    background: statusFilter === 'all'
+                        ? 'linear-gradient(135deg, #1677ff 0%, #4096ff 100%)'
+                        : 'linear-gradient(135deg, #bae0ff 0%, #e6f4ff 100%)',
+                    color: statusFilter === 'all' ? '#fff' : '#0958d9',
+                }}
+            >
+                Tất cả: {operationalCounts.total}
+            </Tag>
+            <Tag
+                className="ecommerce-status-chip"
+                onClick={() => setStatusFilter('pending')}
+                style={{
+                    cursor: 'pointer', flexShrink: 0,
+                    padding: '4px 10px', fontSize: 12, fontWeight: 600,
+                    borderRadius: 8, border: 'none',
+                    background: statusFilter === 'pending'
+                        ? 'linear-gradient(135deg, #fa8c16 0%, #faad14 100%)'
+                        : 'linear-gradient(135deg, #ffd591 0%, #ffe7ba 100%)',
+                    color: '#fff',
+                }}
+            >
+                Chờ lấy hàng: {operationalCounts.pending}
+            </Tag>
+            <Tag
+                className="ecommerce-status-chip"
+                onClick={() => setStatusFilter('completed')}
+                style={{
+                    cursor: 'pointer', flexShrink: 0,
+                    padding: '4px 10px', fontSize: 12, fontWeight: 600,
+                    borderRadius: 8, border: 'none',
+                    background: statusFilter === 'completed'
+                        ? 'linear-gradient(135deg, #52c41a 0%, #73d13d 100%)'
+                        : 'linear-gradient(135deg, #d9f7be 0%, #f6ffed 100%)',
+                    color: statusFilter === 'completed' ? '#fff' : '#389e0d',
+                }}
+            >
+                Đã gửi: {operationalCounts.completed}
+            </Tag>
+            <Tag
+                className="ecommerce-status-chip"
+                onClick={() => setStatusFilter('overdue')}
+                style={{
+                    cursor: 'pointer', flexShrink: 0,
+                    padding: '4px 10px', fontSize: 12, fontWeight: 600,
+                    borderRadius: 8, border: 'none',
+                    background: statusFilter === 'overdue'
+                        ? 'linear-gradient(135deg, #cf1322 0%, #ff4d4f 100%)'
+                        : 'linear-gradient(135deg, #ffccc7 0%, #fff1f0 100%)',
+                    color: statusFilter === 'overdue' ? '#fff' : '#cf1322',
+                }}
+            >
+                Đơn trễ: {operationalCounts.overdue}
+            </Tag>
+            <Tag
+                className="ecommerce-status-chip"
+                onClick={() => setStatusFilter('mismatch')}
+                style={{
+                    cursor: 'pointer', flexShrink: 0,
+                    padding: '4px 10px', fontSize: 12, fontWeight: 600,
+                    borderRadius: 8, border: 'none',
+                    background: statusFilter === 'mismatch'
+                        ? 'linear-gradient(135deg, #d46b08 0%, #fa8c16 100%)'
+                        : 'linear-gradient(135deg, #ffe7ba 0%, #fff7e6 100%)',
+                    color: statusFilter === 'mismatch' ? '#fff' : '#ad4e00',
+                }}
+            >
+                Cần kiểm tra: {operationalCounts.mismatch}
+            </Tag>
+            <Tag
+                className="ecommerce-status-chip"
+                onClick={() => setStatusFilter('cancelled')}
+                style={{
+                    cursor: 'pointer', flexShrink: 0,
+                    padding: '4px 10px', fontSize: 12, fontWeight: 600,
+                    borderRadius: 8, border: 'none',
+                    background: statusFilter === 'cancelled'
+                        ? 'linear-gradient(135deg, #141414 0%, #434343 100%)'
+                        : 'linear-gradient(135deg, #595959 0%, #8c8c8c 100%)',
+                    color: '#fff',
+                }}
+            >
+                Hủy: {operationalCounts.cancelled}
+            </Tag>
+        </>
+    );
+
+    // Keep page-level file/configuration actions in the shared sticky header.
+    // Data-specific filters, scanning, and packer assignment stay in the workspace.
+    useEffect(() => {
+        setHeaderExtra(
+            <div className="ecommerce-header-toolbar">
+                <div className="ecommerce-status-group">
+                    {ecommerceStatusChips}
+                </div>
+                <Input
+                    className="ecommerce-search"
+                    value={searchKeyword}
+                    onChange={(e) => setSearchKeyword(e.target.value)}
+                    placeholder="Tìm mã vận đơn / mã đơn hàng..."
+                    allowClear
+                    prefix={<SearchOutlined style={{ color: '#1890ff' }} />}
+                />
+                <Space className="ecommerce-app-header-actions" size={8}>
+                    {isAdmin && selectedRowKeys.length > 0 && (
+                        <Button className="ecommerce-toolbar-button" danger icon={<DeleteOutlined />} onClick={() => handleBulkDeleteRef.current()}>
+                            Xóa ({selectedRowKeys.length})
+                        </Button>
+                    )}
+                <Dropdown
+                    getPopupContainer={getEcommercePopupContainer}
+                    menu={{
+                        items: [
+                            { key: 'all', label: 'Xuất tất cả', onClick: () => handleExportExcelRef.current('all') },
+                            { key: 'completed', label: 'Chỉ xuất đơn đã gửi', onClick: () => handleExportExcelRef.current('completed') },
+                            { key: 'processing', label: 'Chỉ xuất đơn chờ lấy hàng', onClick: () => handleExportExcelRef.current('processing') },
+                        ],
+                    }}
+                    trigger={['click']}
+                >
+                    <Button className="ecommerce-toolbar-button ecommerce-export-button" icon={<DownloadOutlined />}>
+                        Xuất Excel
+                    </Button>
+                </Dropdown>
+                <Button
+                    className="ecommerce-toolbar-button ecommerce-import-button"
+                    type="primary"
+                    icon={<FolderOpenOutlined />}
+                    onClick={() => handleImportFolderRef.current()}
+                >
+                    Nhập Excel
+                </Button>
+                <Button
+                    className="ecommerce-toolbar-button ecommerce-settings-button"
+                    icon={<SettingOutlined />}
+                    onClick={() => setSettingsModalVisible(true)}
+                    title="Cài đặt Telegram"
+                    aria-label="Cài đặt Telegram"
+                />
+                </Space>
+            </div>,
+        );
+        return () => clearHeaderExtra();
+    }, [clearHeaderExtra, isAdmin, operationalCounts, searchKeyword, selectedRowKeys.length, setHeaderExtra, statusFilter]);
 
     const columns: ColumnsType<EcommerceExport> = [
         {
@@ -2987,7 +3105,7 @@ Thời gian: ${currentTime}`;
     return (
         <div className="ecommerce-page">
             {/* Dòng 1: Stats + Search + Actions */}
-            <div className="ecommerce-toolbar">
+            <div className="ecommerce-toolbar ecommerce-toolbar--legacy-hidden">
                 <div className="ecommerce-status-group">
                     <Tag
                     className="ecommerce-status-chip"
@@ -3097,46 +3215,6 @@ Thời gian: ${currentTime}`;
                         Xóa ({selectedRowKeys.length})
                     </Button>
                     )}
-                    {isAdmin && operationalCounts.cancelled > 0 && (
-                    <Button
-                        className="ecommerce-toolbar-button"
-                        danger
-                        icon={<DeleteOutlined />}
-                        onClick={handleDeleteCancelled}
-                        style={{ flexShrink: 0 }}
-                    >
-                        Xóa đơn hủy ({operationalCounts.cancelled})
-                    </Button>
-                    )}
-                    <Dropdown
-                    getPopupContainer={getEcommercePopupContainer}
-                    menu={{
-                        items: [
-                            { key: 'all', label: 'Xuất tất cả', onClick: () => handleExportExcel('all') },
-                            { key: 'completed', label: 'Chỉ xuất đơn đã gửi', onClick: () => handleExportExcel('completed') },
-                            { key: 'processing', label: 'Chỉ xuất đơn chờ lấy hàng', onClick: () => handleExportExcel('processing') },
-                        ],
-                    }}
-                    trigger={['click']}
-                >
-                    <Button className="ecommerce-toolbar-button ecommerce-export-button" icon={<DownloadOutlined />} style={{ flexShrink: 0 }}>Xuất Excel</Button>
-                    </Dropdown>
-                    <Button
-                    className="ecommerce-toolbar-button ecommerce-import-button"
-                    type="primary"
-                    icon={<FolderOpenOutlined />}
-                    onClick={handleImportFolder}
-                    style={{ background: '#52c41a', borderColor: '#52c41a', flexShrink: 0 }}
-                >
-                    Nhập Excel
-                    </Button>
-                    <Button
-                    className="ecommerce-toolbar-button ecommerce-settings-button"
-                    icon={<SettingOutlined />}
-                    onClick={() => setSettingsModalVisible(true)}
-                    title="Cài đặt Telegram"
-                    style={{ flexShrink: 0 }}
-                    />
                 </div>
             </div>
 

@@ -21,6 +21,7 @@ import dayjs, { Dayjs } from 'dayjs';
 import isSameOrAfter from 'dayjs/plugin/isSameOrAfter';
 import isSameOrBefore from 'dayjs/plugin/isSameOrBefore';
 import { isVietnamRestDay } from '../lib/workCalendar';
+import { usePageHeader } from '../contexts/PageHeaderContext';
 import './Orders.css';
 
 dayjs.extend(isSameOrAfter);
@@ -71,6 +72,7 @@ const getDefaultOrdersCacheKey = () => JSON.stringify({
 
 export default function OrdersPage() {
     const { message, modal } = App.useApp();
+    const { setHeaderExtra, clearHeaderExtra } = usePageHeader();
     const { user } = useAuth();
     const isAdmin = user?.role === 'admin';
     const initialCache = ordersPageCache.get(getDefaultOrdersCacheKey());
@@ -558,6 +560,24 @@ export default function OrdersPage() {
         }
     };
 
+    // Keep page-level actions in the shared sticky header so the order workspace
+    // does not repeat its title inside the content area.
+    useEffect(() => {
+        setHeaderExtra(
+            <Space className="orders-app-header-actions" size={8}>
+                <Button
+                    className="orders-export-button"
+                    icon={<DownloadOutlined />}
+                    loading={exportLoading}
+                    onClick={handleExportExcel}
+                >
+                    Xuất Excel
+                </Button>
+            </Space>,
+        );
+        return () => clearHeaderExtra();
+    }, [clearHeaderExtra, exportLoading, setHeaderExtra]);
+
     const getStatusMeta = (status: string) => {
         const normalized = (status || '').toLowerCase();
         if (['cancelled', 'canceled', 'returned', 'refunded'].includes(normalized)) {
@@ -786,23 +806,6 @@ export default function OrdersPage() {
 
     return (
         <div className="orders-redesign">
-            {/* Header */}
-            <div className="orders-page-header">
-                <Title level={2}>Đơn hàng</Title>
-                <Space className="orders-page-actions" size={12}>
-                    <Input className="orders-search" placeholder="Tìm mã đơn, khách hàng, SĐT, mã vận đơn, tracking..." prefix={<SearchOutlined />}
-                        value={searchKeyword} onChange={handleSearchChange}
-                        allowClear suffix={searchLoading ? <Spin size="small" /> : null}
-                    />
-                    {selectedRowKeys.length > 0 && isAdmin && (
-                        <Button danger icon={<DeleteOutlined />} onClick={handleBulkDelete}>
-                            Xóa ({selectedRowKeys.length})
-                        </Button>
-                    )}
-                    <Button className="orders-export-button" icon={<DownloadOutlined />} loading={exportLoading} onClick={handleExportExcel}>Xuất Excel</Button>
-                </Space>
-            </div>
-
             <section className="orders-overview" aria-label={`Tổng quan ${periodLabel.toLowerCase()}`}>
                 <div className="orders-section-heading">
                     <Title level={4}>Tổng quan {periodLabel.toLowerCase()}</Title>
@@ -1145,6 +1148,15 @@ export default function OrdersPage() {
                 </div>
                 <div className="orders-filter-toolbar">
                     <Space wrap size={10}>
+                        <Input
+                            className="orders-list-search"
+                            placeholder="Tìm mã đơn, khách hàng, SĐT..."
+                            prefix={<SearchOutlined />}
+                            value={searchKeyword}
+                            onChange={handleSearchChange}
+                            allowClear
+                            suffix={searchLoading ? <Spin size="small" /> : null}
+                        />
                         <Dropdown menu={{ items: sourceMenuItems }} trigger={['click']}>
                             <Button className="orders-filter-button">
                                 <span>Nguồn:</span> <strong>{sourceLabels[sourceFilter]}</strong>
@@ -1162,6 +1174,11 @@ export default function OrdersPage() {
                         <Popover content={advancedFilters} trigger="click" placement="bottomLeft">
                             <Button className="orders-filter-button" icon={<FilterOutlined />}>Bộ lọc</Button>
                         </Popover>
+                        {selectedRowKeys.length > 0 && isAdmin && (
+                            <Button danger icon={<DeleteOutlined />} onClick={handleBulkDelete}>
+                                Xóa ({selectedRowKeys.length})
+                            </Button>
+                        )}
                     </Space>
                     <Text type="secondary">Cập nhật lúc {dayjs().format('HH:mm')} <ReloadOutlined /></Text>
                 </div>

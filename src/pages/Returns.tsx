@@ -53,6 +53,7 @@ import type { ColumnsType } from 'antd/es/table';
 import type { MenuProps } from 'antd';
 import { useCurrentUser } from '../lib/hooks/useCurrentUser';
 import { useAuth } from '../contexts/AuthContext';
+import { usePageHeader } from '../contexts/PageHeaderContext';
 import dayjs from 'dayjs';
 import customParseFormat from 'dayjs/plugin/customParseFormat';
 import './Returns.css';
@@ -146,6 +147,7 @@ interface ProcessLog {
 export default function ReturnsPage() {
     const currentUser = useCurrentUser();
     const { user } = useAuth();
+    const { setHeaderExtra, clearHeaderExtra } = usePageHeader();
     const isAdmin = user?.role === 'admin';
     const [returns, setReturns] = useState<Return[]>([]);
     const [loading, setLoading] = useState(false);
@@ -1456,6 +1458,25 @@ export default function ReturnsPage() {
         />
     );
 
+    useEffect(() => {
+        setHeaderExtra(
+            <Space wrap className="returns-heading-actions">
+                <Tooltip title="Làm mới dữ liệu">
+                    <Button aria-label="Tải lại dữ liệu" icon={<ReloadOutlined />} onClick={() => loadReturns()} loading={loading}>
+                        Tải lại
+                    </Button>
+                </Tooltip>
+                <Button icon={<FileExcelOutlined />} onClick={handleExportDisplayed}>
+                    Xuất Excel
+                </Button>
+                <Button type="primary" icon={<PlusOutlined />} onClick={handleAdd}>
+                    Tạo phiếu trả
+                </Button>
+            </Space>,
+        );
+        return () => clearHeaderExtra();
+    }, [clearHeaderExtra, handleAdd, handleExportDisplayed, loading, setHeaderExtra]);
+
     return (
         <Spin spinning={importLoading} tip="Đang xử lý..." size="large">
             <div className="returns-page">
@@ -1468,29 +1489,6 @@ export default function ReturnsPage() {
                         description="Hạn xử lý là 10 ngày. Từ ngày thứ 11, nếu phiếu chưa Hoàn thành sẽ phạt tài khoản nguyendinhtoan từ 30.000đ/đơn và tăng thêm 10.000đ mỗi ngày được phép tính. Chủ nhật và ngày lễ toàn quốc không tính phạt."
                     />
                 )}
-                <div className="returns-page-heading">
-                    <div className="returns-page-title">
-                        <span className="returns-title-icon"><SyncOutlined /></span>
-                        <div>
-                            <Title level={2}>Trả hàng</Title>
-                            <Text type="secondary">Theo dõi, phân công và xử lý khiếu nại trả hàng</Text>
-                        </div>
-                    </div>
-                    <div className="returns-heading-actions">
-                        <Tooltip title="Làm mới dữ liệu">
-                            <Button className="returns-action returns-action--icon" aria-label="Tải lại dữ liệu" icon={<ReloadOutlined />} onClick={() => loadReturns()} loading={loading}>
-                                <span className="returns-action-label">Tải lại</span>
-                            </Button>
-                        </Tooltip>
-                        <Button className="returns-action returns-action--icon" aria-label="Xuất Excel" icon={<FileExcelOutlined />} onClick={handleExportDisplayed}>
-                            <span className="returns-action-label">Xuất Excel</span>
-                        </Button>
-                        <Button className="returns-action returns-action--primary" type="primary" icon={<PlusOutlined />} size="large" onClick={handleAdd}>
-                            <span>Tạo phiếu trả</span>
-                        </Button>
-                    </div>
-                </div>
-
                 <div className="returns-stat-grid">
                     <button type="button" className="returns-stat-card returns-stat-card--green" onClick={() => { setActiveTab('active'); setSlaFilter('all'); }}>
                         <span className="returns-stat-icon"><SyncOutlined /></span>

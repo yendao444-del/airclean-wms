@@ -701,6 +701,11 @@ model PrepackBatch {
   productSku        String
   productName       String
   unit              String    @default("gói")
+  packagingType     String    @default("single") // single or combo
+  packagingKey      String    @default("")
+  packagingLabel    String?
+  packSize          Int       @default(1)
+  componentsJson    String?
   requestedQty      Int
   reportedQty       Int       @default(0)
   acceptedQty       Int       @default(0)
@@ -727,6 +732,7 @@ model PrepackBatch {
   @@index([status, createdAt])
   @@index([packerUsername, status])
   @@index([productSku, status])
+  @@index([packagingKey, status])
 }
 
 model PrepackEvidence {

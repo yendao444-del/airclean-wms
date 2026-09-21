@@ -21,7 +21,8 @@ import {
     Select,
     Radio,
     Alert,
-    Spin
+    Spin,
+    Tabs
 } from 'antd';
 const { TextArea } = Input;
 const { Option } = Select;
@@ -277,6 +278,12 @@ const getAssignmentRecipients = (task: Task): string[] => {
         : [task.assignee].filter(Boolean);
 };
 const DAILY_EVIDENCE_DEADLINE = '23:59';
+const PREPACK_AREA = 'Đóng gói sẵn';
+const STOCK_CHECK_AREA = 'Kiểm hàng';
+const LINKED_MODULE_OPTIONS = [
+    { value: PREPACK_AREA, label: '📦 Đóng gói sẵn' },
+    { value: STOCK_CHECK_AREA, label: '📋 Quản lý kho > Kiểm hàng' },
+];
 
 const normalizePenaltyAmount = (value: unknown): number => {
     const raw = typeof value === 'string' ? value.replace(/[^\d]/g, '') : value;
@@ -314,7 +321,6 @@ const CATEGORIES = [
     { key: 'Vệ sinh', icon: '🧹', color: '#722ed1', gradient: 'linear-gradient(135deg, #43e97b 0%, #38f9d7 100%)' },
     { key: 'Báo cáo', icon: '📊', color: '#fa8c16', gradient: 'linear-gradient(135deg, #fa709a 0%, #fee140 100%)' }
 ];
-
 const GRADIENT_PRESETS = [
     'linear-gradient(135deg, #667eea 0%, #764ba2 100%)', // Purple
     'linear-gradient(135deg, #f093fb 0%, #f5576c 100%)', // Pink
@@ -330,12 +336,31 @@ const GRADIENT_PRESETS = [
 
 const DailyTasks = () => {
     const { user, isRolePreview } = useAuth();
+    const isPrepackUiTest = import.meta.env.DEV && new URLSearchParams(window.location.search).has('prepackedUiTest');
     const isAdmin = user?.role === 'admin';
     // Tài khoản test có vai trò quản lý mở rộng để kiểm thử toàn bộ luồng công việc.
     const isTestOperator = Boolean(user?.isTestAccount);
     const taskVisibilityScope = `${isRolePreview ? 'preview' : 'actual'}:${user?.username || ''}`;
     const previousTaskVisibilityScopeRef = useRef(taskVisibilityScope);
     const canReviewEvidence = user?.role === 'admin' || user?.role === 'manager' || isTestOperator;
+    const getLinkedModule = useCallback((task: Task) => {
+        const attachments = parseAttachments(task.attachments);
+        if (attachments.prepackReport && Array.isArray(attachments.prepackReport.batchIds)) return PREPACK_AREA;
+        const area = String(task.area || '').trim().toLocaleLowerCase('vi-VN');
+        return [PREPACK_AREA, STOCK_CHECK_AREA].find(value => value.toLocaleLowerCase('vi-VN') === area) || null;
+    }, []);
+    const isPrepackVerificationTask = useCallback((task: Task) => getLinkedModule(task) === PREPACK_AREA, [getLinkedModule]);
+    const isLinkedModuleTask = useCallback((task: Task) => Boolean(getLinkedModule(task)), [getLinkedModule]);
+    const isCurrentTaskAssignee = useCallback((task: Task) => {
+        if (isTestOperator || isAdmin) return true;
+        const currentUserNames = [user?.username, user?.fullName]
+            .map(name => String(name || '').trim().toLowerCase())
+            .filter(Boolean);
+        return currentUserNames.includes(String(task.assignee || '').trim().toLowerCase());
+    }, [isAdmin, isTestOperator, user?.fullName, user?.username]);
+    const canReviewEvidenceForTask = useCallback((task: Task) => {
+        return isPrepackVerificationTask(task) ? isCurrentTaskAssignee(task) : canReviewEvidence;
+    }, [canReviewEvidence, isCurrentTaskAssignee, isPrepackVerificationTask]);
     const isAssignmentRecipient = useCallback((task: Task) => {
         if (isTestOperator) return true;
         const currentUserNames = [user?.username, user?.fullName]
@@ -345,7 +370,15 @@ const DailyTasks = () => {
             currentUserNames.includes(String(assignee || '').trim().toLowerCase())
         );
     }, [isTestOperator, user?.fullName, user?.username]);
-    const [tasks, setTasks] = useState<Task[]>([]);
+    const [tasks, setTasks] = useState<Task[]>(() => {
+        if (!isPrepackUiTest) return [];
+        try {
+            const raw = localStorage.getItem('prepack-demo-task');
+            return raw ? [JSON.parse(raw) as Task] : [];
+        } catch {
+            return [];
+        }
+    });
     const [categories, setCategories] = useState(CATEGORIES);
     const [editingCategory, setEditingCategory] = useState<any>(null);
     const [categoryModalVisible, setCategoryModalVisible] = useState(false);
@@ -354,6 +387,7 @@ const DailyTasks = () => {
     const [editingTask, setEditingTask] = useState<Task | null>(null);
     const [taskModalVisible, setTaskModalVisible] = useState(false);
     const [taskForm] = Form.useForm();
+    const [taskCreateMode, setTaskCreateMode] = useState<'regular' | 'linked'>('regular');
     const [assignmentMode, setAssignmentMode] = useState<'fixed' | 'daily'>('fixed');
     const [loading, setLoading] = useState(false);
     const [mobileEvidenceOpen, setMobileEvidenceOpen] = useState(false);
@@ -386,6 +420,7 @@ const DailyTasks = () => {
 
     // Load assignee list + categories from database on mount
     useEffect(() => {
+        if (isPrepackUiTest) return;
         (async () => {
             try {
                 // Load assignee list
@@ -588,6 +623,7 @@ const DailyTasks = () => {
 
     // Load tasks from backend
     useEffect(() => {
+        if (isPrepackUiTest) return;
         // Show task cards first; reset/history work can finish in the background.
         void loadTasks();
         let maintenanceRefreshTimer: number | undefined;
@@ -648,7 +684,7 @@ const DailyTasks = () => {
             if (midnightTimer !== undefined) window.clearTimeout(midnightTimer);
             if (maintenanceRefreshTimer !== undefined) window.clearTimeout(maintenanceRefreshTimer);
         };
-    }, []);
+    }, [isPrepackUiTest]);
 
     const applyEvidencePenalties = async () => {
         try {
@@ -678,6 +714,16 @@ const DailyTasks = () => {
     };
 
     const loadTasks = async () => {
+        if (isPrepackUiTest) {
+            try {
+                const raw = localStorage.getItem('prepack-demo-task');
+                setTasks(raw ? [JSON.parse(raw) as Task] : []);
+            } catch {
+                setTasks([]);
+            }
+            setLoading(false);
+            return;
+        }
         try {
             setLoading(true);
             // Reset and reconciliation run independently on page entry. Task
@@ -716,35 +762,53 @@ const DailyTasks = () => {
     };
 
     useEffect(() => {
+        if (!isPrepackUiTest) return;
+        const handlePrepackTaskCreated = (event: Event) => {
+            const task = (event as CustomEvent<Task>).detail;
+            if (task) setTasks([task]);
+        };
+        window.addEventListener('prepack:task-created', handlePrepackTaskCreated);
+        return () => window.removeEventListener('prepack:task-created', handlePrepackTaskCreated);
+    }, [isPrepackUiTest]);
+
+    useEffect(() => {
         if (previousTaskVisibilityScopeRef.current === taskVisibilityScope) return;
         previousTaskVisibilityScopeRef.current = taskVisibilityScope;
         void loadTasks();
     }, [taskVisibilityScope]); // eslint-disable-line react-hooks/exhaustive-deps
 
-    useEffect(() => window.electronAPI.dailyTasks.onMobileEvidenceUpdated(() => {
-        void loadTasks();
-    }), []); // eslint-disable-line react-hooks/exhaustive-deps
+    useEffect(() => {
+        const api = window.electronAPI?.dailyTasks;
+        if (isPrepackUiTest || !api?.onMobileEvidenceUpdated) return;
+        return api.onMobileEvidenceUpdated(() => {
+            void loadTasks();
+        });
+    }, [isPrepackUiTest]); // eslint-disable-line react-hooks/exhaustive-deps
 
-    useEffect(() => window.electronAPI.dailyTasks.onMobileEvidenceUrlUpdated((data) => {
-        const pendingSession = mobileEvidencePendingSessionRef.current;
-        setMobileEvidenceSession(current => {
-            const session = current || pendingSession;
-            return session ? {
-            ...session,
-            url: data.url,
-            secure: data.secure,
-            connecting: data.connecting,
-            } : current;
+    useEffect(() => {
+        const api = window.electronAPI?.dailyTasks;
+        if (isPrepackUiTest || !api?.onMobileEvidenceUrlUpdated) return;
+        return api.onMobileEvidenceUrlUpdated((data) => {
+            const pendingSession = mobileEvidencePendingSessionRef.current;
+            setMobileEvidenceSession(current => {
+                const session = current || pendingSession;
+                return session ? {
+                    ...session,
+                    url: data.url,
+                    secure: data.secure,
+                    connecting: data.connecting,
+                } : current;
+            });
+            mobileEvidencePendingSessionRef.current = null;
+            message.success({
+                key: 'mobile-evidence-start',
+                content: data.secure
+                    ? 'Kết nối bảo mật đã sẵn sàng. Bạn có thể quét mã QR.'
+                    : 'Mã QR Wi-Fi đã sẵn sàng để quét.',
+                duration: 2,
+            });
         });
-        mobileEvidencePendingSessionRef.current = null;
-        message.success({
-            key: 'mobile-evidence-start',
-            content: data.secure
-                ? 'Kết nối bảo mật đã sẵn sàng. Bạn có thể quét mã QR.'
-                : 'Mã QR Wi-Fi đã sẵn sàng để quét.',
-            duration: 2,
-        });
-    }), []);
+    }, [isPrepackUiTest]);
 
     const startMobileEvidence = async (targetUsername?: string) => {
         setMobileEvidenceStarting(true);
@@ -1599,6 +1663,7 @@ const DailyTasks = () => {
     // Add task
     const handleAddTask = (categoryKey?: string) => {
         setEditingTask(null);
+        setTaskCreateMode('regular');
         setAssignmentMode('fixed');
         taskForm.resetFields();
 
@@ -1606,6 +1671,7 @@ const DailyTasks = () => {
         taskForm.setFieldsValue({
             priority: 'normal',
             category: categoryKey || categories[0]?.key || 'Sàn TMDT',
+            area: '',
             status: 'pending',
             evidenceRequired: false,
             assignmentMode: 'fixed',
@@ -1623,6 +1689,8 @@ const DailyTasks = () => {
     // Edit task
     const handleEditTask = (task: Task) => {
         setEditingTask(task);
+        const linkedTask = isPrepackVerificationTask(task);
+        setTaskCreateMode(linkedTask ? 'linked' : 'regular');
         const assignment = parseAttachments(task.attachments).assignment || {};
         const rotationAssignees = Array.isArray(assignment.dailyRotation?.assignees)
             ? assignment.dailyRotation.assignees
@@ -1635,7 +1703,7 @@ const DailyTasks = () => {
             ...task,
             dueDate: dayjs(`${task.dueDate} ${task.dueTime}`, 'YYYY-MM-DD HH:mm'),
             tags: task.tags ? task.tags.join(', ') : '',
-            evidenceRequired: getEvidence(task).required || false,
+            evidenceRequired: linkedTask ? false : getEvidence(task).required || false,
             assignmentMode: mode,
             rotationAssignees,
             penaltyAmount: normalizePenaltyAmount(getEvidence(task).penaltyAmount),
@@ -1682,11 +1750,17 @@ const DailyTasks = () => {
             const existingEvidence = editingTask ? getEvidence(editingTask) : {};
             const existingAssignment = existingAttachments.assignment || {};
             // Only administrators decide how a task is completed and whether a penalty applies.
-            const requiresEvidence = isAdmin ? Boolean(values.evidenceRequired) : Boolean(existingEvidence.required);
+            const requiresEvidence = taskCreateMode === 'linked'
+                ? false
+                : isAdmin ? Boolean(values.evidenceRequired) : Boolean(existingEvidence.required);
             const selectedAssignmentMode: 'fixed' | 'daily' = values.assignmentMode === 'daily' ? 'daily' : 'fixed';
             const rotationAssignees = Array.isArray(values.rotationAssignees) ? values.rotationAssignees : [];
             if (selectedAssignmentMode === 'fixed' && !values.assignee) {
                 message.error('Vui lòng chọn người thực hiện.');
+                return;
+            }
+            if (selectedAssignmentMode === 'daily' && rotationAssignees.length < 2) {
+                message.error('Chọn ít nhất 2 nhân viên cho lịch luân phiên.');
                 return;
             }
             const hasEvidenceAssignee = selectedAssignmentMode === 'daily'
@@ -1707,7 +1781,7 @@ const DailyTasks = () => {
                     ? values.assignee || ''
                     : selectedAssignmentMode === 'daily' ? rotationAssignees[0] || '' : '',
                 verifier: values.verifier || '',
-                area: values.area || '',
+                area: taskCreateMode === 'linked' ? values.area || '' : '',
                 dueDate: dueAt.toISOString(),
                 priority: values.priority,
                 status: values.status || 'pending',
@@ -1736,6 +1810,10 @@ const DailyTasks = () => {
                         minImages: isAdmin
                             ? Math.max(1, Math.min(MAX_EVIDENCE_IMAGES, Math.floor(Number(values.evidenceMinImages) || 1)))
                             : getRequiredEvidenceImageCount(existingEvidence),
+                    } : undefined,
+                    moduleLink: taskCreateMode === 'linked' ? {
+                        kind: 'module-link',
+                        module: values.area || '',
                     } : undefined,
                 }
             };
@@ -1857,6 +1935,14 @@ const DailyTasks = () => {
     const CompletionButton = ({ task, size = 22 }: { task: Task; size?: number }) => {
         const isCompleted = task.status === 'completed';
 
+        // Linked module tasks are completed by the linked module workflow,
+        // so they must not expose a standalone daily-task completion control.
+        if (isLinkedModuleTask(task)) {
+            return isCompleted
+                ? <CheckCircleFilled style={{ fontSize: size, color: '#52c41a' }} aria-label="Đã hoàn thành qua module" />
+                : <CheckCircleOutlined style={{ fontSize: size, color: '#64748b' }} aria-label="Chờ hoàn thành qua module" />;
+        }
+
         return (
             <button
                 type="button"
@@ -1876,15 +1962,25 @@ const DailyTasks = () => {
     };
 
     const handleSubmitEvidence = (task: Task) => {
+        if (isPrepackVerificationTask(task) && !isCurrentTaskAssignee(task)) {
+            message.error('Chỉ người đang được phân công kiểm tra Đóng gói sẵn mới được chụp ảnh.');
+            return;
+        }
         if (mobileEvidenceSession) {
             setMobileEvidenceOpen(true);
             return;
         }
         const targetUsername = isAdmin
-            ? getAssignmentRecipients(task)[0] || task.assignee
+            ? task.assignee || getAssignmentRecipients(task)[0]
             : isRolePreview ? user?.username : undefined;
         void startMobileEvidence(targetUsername);
     };
+
+    const openLinkedModule = (moduleName: string) => {
+        const detail = moduleName === PREPACK_AREA ? 'prepack' : moduleName === STOCK_CHECK_AREA ? 'stock-check' : '';
+        if (detail) window.dispatchEvent(new CustomEvent('app:navigate', { detail }));
+    };
+    const openPrepackTab = () => openLinkedModule(PREPACK_AREA);
 
     const submitEvidenceReview = async (task: Task, approved: boolean, evidenceOverride?: EvidenceMeta, rejectionReason?: string) => {
         try {
@@ -2424,7 +2520,7 @@ const DailyTasks = () => {
                         )}
                     />
                 )}
-                {canReviewEvidence && (evidence.status === 'approved' || evidence.status === 'submitted') && submittedImages.length > 0 && (
+                {canReviewEvidenceForTask(task) && (evidence.status === 'approved' || evidence.status === 'submitted') && submittedImages.length > 0 && (
                     <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 14, paddingTop: 12, borderTop: '1px solid #e2e8f0' }}>
                         <Tooltip title={loading ? 'Vui lòng chờ tải xong toàn bộ ảnh bằng chứng trước khi từ chối.' : undefined}>
                             <Button
@@ -2657,10 +2753,12 @@ const DailyTasks = () => {
                                 </div>
                                 <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 6, flexWrap: 'wrap', marginTop: 11, paddingTop: 10, borderTop: '1px solid #f1f5f9' }}>
                                     {evidence.status === 'submitted' && <Button size="small" icon={<EyeOutlined />} onClick={() => openEvidence(task)}>Xem bằng chứng</Button>}
-                                    {lane === 'evidence' && <Button size="small" type="primary" icon={<QrcodeOutlined />} onClick={() => handleSubmitEvidence(task)} style={{ background: '#16a34a', borderColor: '#16a34a' }}>Nộp qua điện thoại</Button>}
+                                    {isLinkedModuleTask(task)
+                                        ? <Button size="small" type="primary" onClick={() => openLinkedModule(getLinkedModule(task) || '')} style={{ background: '#16a34a', borderColor: '#16a34a' }}>Mở {getLinkedModule(task)}</Button>
+                                        : lane === 'evidence' && <Button size="small" type="primary" icon={<QrcodeOutlined />} onClick={() => handleSubmitEvidence(task)} style={{ background: '#16a34a', borderColor: '#16a34a' }}>Nộp qua điện thoại</Button>}
                                     {lane === 'review' && evidence.status !== 'submitted' && <Button size="small" icon={<QrcodeOutlined />} onClick={() => handleSubmitEvidence(task)}>Nộp bổ sung qua điện thoại</Button>}
-                                    {lane === 'review' && evidence.status === 'submitted' && canReviewEvidence && <Button size="small" type="primary" icon={<SafetyCertificateOutlined />} onClick={() => handleReviewEvidence(task, true)} style={{ background: '#16a34a', borderColor: '#16a34a' }}>Duyệt</Button>}
-                                    {lane === 'review' && evidence.status === 'submitted' && canReviewEvidence && <Button size="small" danger onClick={() => handleReviewEvidence(task, false)}>Từ chối</Button>}
+                                    {lane === 'review' && evidence.status === 'submitted' && canReviewEvidenceForTask(task) && <Button size="small" type="primary" icon={<SafetyCertificateOutlined />} onClick={() => handleReviewEvidence(task, true)} style={{ background: '#16a34a', borderColor: '#16a34a' }}>Duyệt</Button>}
+                                    {lane === 'review' && evidence.status === 'submitted' && canReviewEvidenceForTask(task) && <Button size="small" danger onClick={() => handleReviewEvidence(task, false)}>Từ chối</Button>}
                                     {isAdmin && <Button type="text" icon={<EditOutlined />} onClick={() => handleEditTask(task)} aria-label="Sửa công việc" />}
                                     {isAdmin && <Button type="text" danger icon={<DeleteOutlined />} onClick={() => handleDeleteTask(task.id)} aria-label="Xóa công việc" />}
                                 </div>
@@ -3251,7 +3349,10 @@ const DailyTasks = () => {
                         <div style={{ marginTop: 4, color: '#64748b', fontSize: 12, display: 'flex', gap: 6, alignItems: 'center' }}><UserOutlined /> {isAssignment ? getAssignmentRecipients(task).join(', ') : (task.assignee || 'Chưa phân công')}</div>
                     </div>
                 </div>
-                <Tag style={{ width: 'fit-content', margin: 0, color: isAssignment ? '#2563eb' : '#15803d', background: isAssignment ? '#eff6ff' : '#ecfdf5', borderColor: isAssignment ? '#bfdbfe' : '#bbf7d0', fontWeight: 700 }}>{sourceLabel}</Tag>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 5, flexWrap: 'wrap' }}>
+                    <Tag style={{ width: 'fit-content', margin: 0, color: isAssignment ? '#2563eb' : '#15803d', background: isAssignment ? '#eff6ff' : '#ecfdf5', borderColor: isAssignment ? '#bfdbfe' : '#bbf7d0', fontWeight: 700 }}>{sourceLabel}</Tag>
+                    {task.area && <Tag style={{ width: 'fit-content', margin: 0, color: '#166534', background: '#f0fdf4', borderColor: '#bbf7d0', fontWeight: 750 }}>{task.area}</Tag>}
+                </div>
                 <div className={`daily-task-evidence-summary${evidencePenaltyRecorded ? ' daily-task-evidence-escalation' : ''}`} style={{ color: evidence.required ? '#c2410c' : '#64748b' }}>
                     {evidencePenaltyRecorded ? <>
                         <span className="daily-task-evidence-penalty"><WarningOutlined /> {rejectionPenaltyCount > 0
@@ -3281,7 +3382,7 @@ const DailyTasks = () => {
                         {needsEvidence && !historicalEvidenceOverdue && canSubmitAssignmentEvidence && <Button size="small" type="primary" icon={<QrcodeOutlined />} onClick={() => handleSubmitEvidence(task)} className="daily-task-primary-action">Nộp qua điện thoại</Button>}
                         {historicalEvidenceOverdue && <span className="daily-task-expired-action"><LockOutlined /> Quá hạn nộp</span>}
                         {hasEvidence && <Button size="small" icon={<EyeOutlined />} onClick={() => openEvidence(task)}>Xem bằng chứng</Button>}
-                        {evidence.required && evidence.status === 'submitted' && canReviewEvidence && <Tooltip title="Duyệt bằng chứng"><Button type="text" size="small" icon={<SafetyCertificateOutlined />} onClick={() => handleReviewEvidence(task, true)} style={{ color: '#16a34a' }} /></Tooltip>}
+                        {evidence.required && evidence.status === 'submitted' && canReviewEvidenceForTask(task) && <Tooltip title="Duyệt bằng chứng"><Button type="text" size="small" icon={<SafetyCertificateOutlined />} onClick={() => handleReviewEvidence(task, true)} style={{ color: '#16a34a' }} /></Tooltip>}
                         <Button size="small" onClick={() => handleNoteAssignment(task)} style={{ borderRadius: 6 }}>Ghi chú</Button>
                         {completionRequest && (
                             <Tooltip title={isAdmin
@@ -3297,10 +3398,12 @@ const DailyTasks = () => {
                 ) : (
                     <Space size={6} className="daily-task-row-actions">
                         <span className={`daily-task-deadline-pill${color === '#dc2626' ? ' is-overdue' : ''}`}><ClockCircleOutlined /> {deadlineText}</span>
-                        {canCompleteDailyTask && needsEvidence && !historicalEvidenceOverdue && <Button size="small" type="primary" icon={<QrcodeOutlined />} onClick={() => handleSubmitEvidence(task)} className="daily-task-primary-action">Nộp qua điện thoại</Button>}
+                        {isLinkedModuleTask(task)
+                            ? <Button size="small" type="primary" onClick={() => openLinkedModule(getLinkedModule(task) || '')} className="daily-task-primary-action">Mở {getLinkedModule(task)}</Button>
+                            : canCompleteDailyTask && needsEvidence && !historicalEvidenceOverdue && <Button size="small" type="primary" icon={<QrcodeOutlined />} onClick={() => handleSubmitEvidence(task)} className="daily-task-primary-action">Nộp qua điện thoại</Button>}
                         {historicalEvidenceOverdue && <span className="daily-task-expired-action"><LockOutlined /> Quá hạn nộp</span>}
                         {hasEvidence && <Button size="small" icon={<EyeOutlined />} onClick={() => openEvidence(task)}>Xem bằng chứng</Button>}
-                        {canCompleteDailyTask && !evidence.required && <Button size="small" type="primary" icon={<CheckCircleOutlined />} onClick={() => handleToggleComplete(task.id)} className="daily-task-primary-action">Hoàn thành</Button>}
+                        {!isLinkedModuleTask(task) && canCompleteDailyTask && !evidence.required && <Button size="small" type="primary" icon={<CheckCircleOutlined />} onClick={() => handleToggleComplete(task.id)} className="daily-task-primary-action">Hoàn thành</Button>}
                         {adminActions}
                     </Space>
                 )}
@@ -4279,6 +4382,7 @@ const DailyTasks = () => {
 
             {/* Task Modal - SIMPLIFIED */}
             <Modal
+                className="daily-task-create-modal"
                 title={editingTask ? 'Sửa công việc' : '✨ Thêm công việc mới'}
                 open={taskModalVisible}
                 onOk={handleSaveTask}
@@ -4298,6 +4402,47 @@ const DailyTasks = () => {
                 cancelButtonProps={{ size: 'large', disabled: isSavingTask }}
             >
                 <Form form={taskForm} layout="vertical">
+                    <Tabs
+                        activeKey={taskCreateMode}
+                        onChange={(key) => {
+                            const nextMode = key === 'linked' ? 'linked' : 'regular';
+                            setTaskCreateMode(nextMode);
+                            if (nextMode === 'linked') {
+                                const currentTitle = String(taskForm.getFieldValue('title') || '').trim();
+                                taskForm.setFieldsValue({
+                                    area: PREPACK_AREA,
+                                    category: 'Kho hàng',
+                                    evidenceRequired: false,
+                                    ...(currentTitle ? {} : { title: 'Kiểm tra đóng gói sẵn' }),
+                                });
+                            } else {
+                                taskForm.setFieldsValue({ area: '' });
+                            }
+                        }}
+                        items={[
+                            { key: 'regular', label: 'Công việc thường' },
+                            { key: 'linked', label: 'Liên kết module' },
+                        ]}
+                        style={{ marginBottom: 8 }}
+                    />
+
+                    {taskCreateMode === 'linked' && (
+                        <div style={{ padding: '12px 14px', marginBottom: 16, border: '1px solid #bbf7d0', borderRadius: 8, background: '#f0fdf4' }}>
+                            <Form.Item
+                                name="area"
+                                label={<span style={{ fontSize: 14, fontWeight: 700 }}>Module liên kết</span>}
+                                rules={[{ required: true, message: 'Hãy chọn module liên kết.' }]}
+                                style={{ marginBottom: 6 }}
+                            >
+                                <Select
+                                    size="large"
+                                    options={LINKED_MODULE_OPTIONS}
+                                />
+                            </Form.Item>
+                            <div style={{ color: '#166534', fontSize: 12.5 }}>Task chỉ dẫn người thực hiện sang module. Nộp ảnh và thao tác nghiệp vụ được thực hiện trong module đó.</div>
+                        </div>
+                    )}
+
                     {/* Tên công việc - BẮT BUỘC */}
                     <Form.Item
                         name="title"
@@ -4323,41 +4468,44 @@ const DailyTasks = () => {
                         />
                     </Form.Item>
 
-                    {/* Người thực hiện - TÙY CHỌN (có thể nhận việc sau) */}
-                    <Form.Item
-                        name="evidenceRequired"
-                        label={<span style={{ fontSize: 14, fontWeight: 700 }}>Cách xác nhận hoàn thành</span>}
-                        rules={[{ required: true }]}
-                    >
-                        <Select
-                            size="large"
-                            disabled={!isAdmin}
-                            options={[
-                                { value: false, label: 'Việc thường - cần người xác nhận' },
-                                { value: true, label: 'Yêu cầu bằng chứng' },
-                            ]}
-                        />
-                    </Form.Item>
-                    {!isAdmin && <div style={{ marginTop: -12, marginBottom: 16, fontSize: 12, color: '#64748b' }}>Chỉ admin được đổi loại hoàn thành.</div>}
-                    <Form.Item noStyle shouldUpdate={(prev, current) => prev.evidenceRequired !== current.evidenceRequired}>
-                        {({ getFieldValue }) => getFieldValue('evidenceRequired') ? (
-                            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(130px, 1fr))', gap: 10, padding: 12, marginBottom: 16, border: '1px solid #fed7aa', borderRadius: 8, background: '#fffaf5' }}>
-                                <Form.Item name="evidenceDeadlineTime" label="Hạn chót" rules={[{ required: true }]} style={{ marginBottom: 0 }}>
-                                    <Select size="middle" disabled options={[{ value: DAILY_EVIDENCE_DEADLINE, label: '23:59 cuối ngày' }]} />
-                                </Form.Item>
-                                <Form.Item name="evidenceMinImages" label="Ảnh tối thiểu" rules={[{ required: true, message: 'Nhập số ảnh.' }]} style={{ marginBottom: 0 }}>
-                                    <InputNumber min={1} max={MAX_EVIDENCE_IMAGES} precision={0} controls disabled={!isAdmin} style={{ width: '100%' }} />
-                                </Form.Item>
-                                <Form.Item name="penaltyAmount" label="Phạt (đ)" style={{ marginBottom: 0 }}>
-                                    <InputNumber min={0} precision={0} controls={false} suffix="đ" disabled={!isAdmin} style={{ width: '100%' }} formatter={formatPenaltyAmount} parser={(value) => String(value || '').replace(/[^\d]/g, '')} />
-                                </Form.Item>
-                                <div style={{ gridColumn: '1 / -1', fontSize: 12, color: '#c2410c' }}>Mỗi công việc có thể yêu cầu từ 1 đến {MAX_EVIDENCE_IMAGES} ảnh. Hệ thống chỉ ghi nhận phạt từ 00:00 ngày kế tiếp.</div>
-                            </div>
-                        ) : null}
-                    </Form.Item>
+                    {taskCreateMode === 'regular' && <>
+                        <Form.Item
+                            name="evidenceRequired"
+                            label={<span style={{ fontSize: 14, fontWeight: 700 }}>Cách xác nhận hoàn thành</span>}
+                            rules={[{ required: true }]}
+                        >
+                            <Select
+                                size="large"
+                                disabled={!isAdmin}
+                                options={[
+                                    { value: false, label: 'Việc thường - cần người xác nhận' },
+                                    { value: true, label: 'Yêu cầu bằng chứng' },
+                                ]}
+                            />
+                        </Form.Item>
+                        {!isAdmin && <div style={{ marginTop: -12, marginBottom: 16, fontSize: 12, color: '#64748b' }}>Chỉ admin được đổi loại hoàn thành.</div>}
+                        <Form.Item noStyle shouldUpdate={(prev, current) => prev.evidenceRequired !== current.evidenceRequired}>
+                            {({ getFieldValue }) => getFieldValue('evidenceRequired') ? (
+                                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(130px, 1fr))', gap: 10, padding: 12, marginBottom: 16, border: '1px solid #fed7aa', borderRadius: 8, background: '#fffaf5' }}>
+                                    <Form.Item name="evidenceDeadlineTime" label="Hạn chót" rules={[{ required: true }]} style={{ marginBottom: 0 }}>
+                                        <Select size="middle" disabled options={[{ value: DAILY_EVIDENCE_DEADLINE, label: '23:59 cuối ngày' }]} />
+                                    </Form.Item>
+                                    <Form.Item name="evidenceMinImages" label="Ảnh tối thiểu" rules={[{ required: true, message: 'Nhập số ảnh.' }]} style={{ marginBottom: 0 }}>
+                                        <InputNumber min={1} max={MAX_EVIDENCE_IMAGES} precision={0} controls disabled={!isAdmin} style={{ width: '100%' }} />
+                                    </Form.Item>
+                                    <Form.Item name="penaltyAmount" label="Phạt (đ)" style={{ marginBottom: 0 }}>
+                                        <InputNumber min={0} precision={0} controls={false} suffix="đ" disabled={!isAdmin} style={{ width: '100%' }} formatter={formatPenaltyAmount} parser={(value) => String(value || '').replace(/[^\d]/g, '')} />
+                                    </Form.Item>
+                                    <div style={{ gridColumn: '1 / -1', fontSize: 12, color: '#c2410c' }}>Mỗi công việc có thể yêu cầu từ 1 đến {MAX_EVIDENCE_IMAGES} ảnh. Hệ thống chỉ ghi nhận phạt từ 00:00 ngày kế tiếp.</div>
+                                </div>
+                            ) : null}
+                        </Form.Item>
+                    </>}
 
                     <div style={{ marginBottom: 10, fontSize: 12, color: '#64748b' }}>
-                        {assignmentMode === 'fixed' ? 'Chỉ người được chọn có thể thực hiện công việc này.' : 'Hệ thống tự đổi người thực hiện theo danh sách luân phiên mỗi ngày.'}
+                        {assignmentMode === 'fixed'
+                            ? 'Chỉ người được chọn có thể thực hiện công việc này.'
+                            : 'Hệ thống tự đổi người thực hiện theo danh sách luân phiên mỗi ngày.'}
                     </div>
                     <Form.Item name="assignmentMode" style={{ marginBottom: 10 }}>
                         <Radio.Group
@@ -4463,7 +4611,7 @@ const DailyTasks = () => {
                     </Form.Item>
 
                     {/* Thêm người mới - Toggle inline Input */}
-                    {!showAddAssignee ? (
+                    {taskCreateMode === 'regular' && (!showAddAssignee ? (
                         <Button
                             type="dashed"
                             icon={<PlusOutlined />}
@@ -4546,7 +4694,7 @@ const DailyTasks = () => {
                                 </Button>
                             </div>
                         </div>
-                    )}
+                    ))}
                     </>}
 
                     {/* Hidden fields - auto-generated */}
@@ -4564,7 +4712,7 @@ const DailyTasks = () => {
                     </Form.Item>
 
                     {/* Info box */}
-                    <div style={{
+                    {taskCreateMode === 'regular' && <div style={{
                         background: 'linear-gradient(135deg, #e6f7ff 0%, #bae7ff 50%, #e6f7ff 100%)',
                         border: '1px solid #91d5ff',
                         borderRadius: 8,
@@ -4579,7 +4727,7 @@ const DailyTasks = () => {
                                 • 📂 Danh mục: <strong>{taskForm.getFieldValue('category') || 'Tự động'}</strong>
                             </div>
                         </div>
-                    </div>
+                    </div>}
                 </Form>
             </Modal>
 

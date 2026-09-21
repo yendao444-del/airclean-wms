@@ -2,7 +2,7 @@ const DEFAULT_ATTENDANCE_CONFIG = {
     graceMinutes: 5,
     officialFineLevel1: 30000,
     officialFineLevel2: 70000,
-    officialFineLevel3: 150000,
+    officialFineLevel3: 120000,
     seasonalFineLevel1: 10000,
     seasonalFineLevel2: 30000,
     seasonalFineLevel3: 60000,

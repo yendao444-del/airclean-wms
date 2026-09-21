@@ -19,20 +19,20 @@ import {
     TrophyOutlined,
     WarningFilled,
 } from '@ant-design/icons';
-import policyPackingHero from '../assets/packing/policy-packing-hero.png';
-import latePolicyHero from '../assets/policies/late-policy-hero.png';
-import latePolicyMild from '../assets/policies/late-policy-mild.png';
-import latePolicyMedium from '../assets/policies/late-policy-medium.png';
-import latePolicySevere from '../assets/policies/late-policy-severe.png';
-import weeklyRewardHero from '../assets/policies/weekly-reward-hero.png';
-import overtimeRewardHero from '../assets/policies/overtime-reward-hero.png';
-import wrongOrderFineHero from '../assets/policies/wrong-order-fine-hero.png';
-import vatInvoiceLateHero from '../assets/policies/vat-invoice-late-hero.png';
-import returnOverdueHero from '../assets/policies/return-overdue-hero.png';
-import refundOverdueHero from '../assets/policies/refund-overdue-hero.png';
-import taskDeadlineFineHero from '../assets/policies/task-deadline-fine-hero.png';
-import taskEvidenceFineHero from '../assets/policies/task-evidence-fine-hero.png';
-import stockCheckMissingHero from '../assets/policies/stock-check-missing-hero.png';
+import policyPackingHero from '../assets/packing/policy-packing-hero.webp';
+import latePolicyHero from '../assets/policies/late-policy-hero.webp';
+import latePolicyMild from '../assets/policies/late-policy-mild.webp';
+import latePolicyMedium from '../assets/policies/late-policy-medium.webp';
+import latePolicySevere from '../assets/policies/late-policy-severe.webp';
+import weeklyRewardHero from '../assets/policies/weekly-reward-hero.webp';
+import overtimeRewardHero from '../assets/policies/overtime-reward-hero.webp';
+import wrongOrderFineHero from '../assets/policies/wrong-order-fine-hero.webp';
+import vatInvoiceLateHero from '../assets/policies/vat-invoice-late-hero.webp';
+import returnOverdueHero from '../assets/policies/return-overdue-hero.webp';
+import refundOverdueHero from '../assets/policies/refund-overdue-hero.webp';
+import taskDeadlineFineHero from '../assets/policies/task-deadline-fine-hero.webp';
+import taskEvidenceFineHero from '../assets/policies/task-evidence-fine-hero.webp';
+import stockCheckMissingHero from '../assets/policies/stock-check-missing-hero.webp';
 
 interface PackingLevel {
     key: string;

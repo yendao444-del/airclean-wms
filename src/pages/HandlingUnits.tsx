@@ -92,6 +92,7 @@ type UnitRow = {
   note?: string;
   updatedAt?: string;
   hasWithdrawalHistory?: boolean;
+  returnReference?: string;
   qrPayload?: string;
   parentUnitCode?: string;
   childUnits?: Array<{ code: string; quantity: number }>;
@@ -294,6 +295,18 @@ const getPendingCheckConflict = (
 const pendingCheckBlockText = (unit: UnitRow, conflict: UnitRow, action: string) =>
   `Không thể ${action}. SKU [${unit.skuName}] đang có kiện [${conflict.id}] chờ kiểm thực tế (tồn theo sổ: ${conflict.currentPcs} ${conflict.unitName}). Vui lòng vào tab Chờ kiểm, nhập số lượng thực tế và chốt kiện này trước.`;
 
+const getReturnMergeConflict = (targetUnit: UnitRow, allUnits: UnitRow[]) =>
+  allUnits.find(
+    (unit) =>
+      unit.id?.toUpperCase() !== targetUnit.id?.toUpperCase() &&
+      unit.skuName?.toUpperCase() === targetUnit.skuName?.toUpperCase() &&
+      isReturnHandlingUnit(unit) &&
+      (unit.status === "Đang sử dụng" || unit.status === "opened"),
+  ) || null;
+
+const returnMergeBlockText = (unit: UnitRow, conflict: UnitRow, action: string) =>
+  `Không thể ${action}. SKU [${unit.skuName}] còn kiện hàng hoàn [${conflict.id}] chưa được gộp. Vui lòng gộp kiện hàng hoàn này vào kiện đang khui trước.`;
+
 const getConflictingOpenedUnit = (
   targetUnit: UnitRow,
   allUnits: UnitRow[],
@@ -306,6 +319,9 @@ const getConflictingOpenedUnit = (
   // Kiện đã về 0/chờ kiểm luôn khóa kiện mới cùng SKU, kể cả khác dạng bao bì.
   const pendingCheck = getPendingCheckConflict(targetUnit, allUnits);
   if (pendingCheck) return pendingCheck;
+
+  const returnConflict = getReturnMergeConflict(targetUnit, allUnits);
+  if (returnConflict) return returnConflict;
 
   // Riêng với hàng lẻ: không áp dụng quy tắc chỉ một kiện đang mở.
   if (cat === "LE") return null;
@@ -738,9 +754,6 @@ let handlingUnitsWorkspaceCache: Pick<
 export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
   const { user } = useAuth();
   const isAdmin = user?.role === "admin";
-  const hiddenStockLabel = "Đã ẩn";
-  const displayStock = (value: number, unitName?: string) =>
-    isAdmin ? `${fmt(value)} ${unitName || ""}`.trim() : hiddenStockLabel;
   const [workspace, setWorkspace] = useState(() =>
     handlingUnitsWorkspaceCache
       ? { ...emptyWorkspace, ...handlingUnitsWorkspaceCache }
@@ -1494,6 +1507,11 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
       message.warning(pendingCheckBlockText(unit, pendingConflict, "rút hàng"), 8);
       return;
     }
+    const returnConflict = getReturnMergeConflict(unit, workspace.register);
+    if (returnConflict) {
+      message.warning(returnMergeBlockText(unit, returnConflict, "rút hàng"), 8);
+      return;
+    }
     pickRequestIdRef.current = `HU-PICK-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     setPickingUnit(unit);
     pickForm.setFieldsValue({
@@ -1511,6 +1529,10 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
       const pendingConflict = getPendingCheckConflict(pickingUnit, workspace.register);
       if (pendingConflict) {
         throw new Error(pendingCheckBlockText(pickingUnit, pendingConflict, "rút hàng"));
+      }
+      const returnConflict = getReturnMergeConflict(pickingUnit, workspace.register);
+      if (returnConflict) {
+        throw new Error(returnMergeBlockText(pickingUnit, returnConflict, "rút hàng"));
       }
       const values = await pickForm.validateFields();
       const qty = Number(values.quantity || 0);
@@ -2063,6 +2085,8 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
       && candidate.status === "Chờ kiểm",
     );
     if (pendingConflict) return pendingConflict;
+    const returnConflict = getReturnMergeConflict(unit, workspace.register);
+    if (returnConflict) return returnConflict;
     const category = getPackageCategory(unit.packageType);
     if (category === "LE") return null;
     const conflict = openedUnitBySkuAndCategory.get(
@@ -3229,7 +3253,7 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
                                 </div>
                                 <div className="hu-sku-meta">
                                   <span className="hu-sku-stock">
-                                    <b>{isAdmin ? fmt(item.stock) : hiddenStockLabel}</b> {isAdmin && item.unitName} ·{" "}
+                                    <b>{fmt(item.stock)}</b> {item.unitName} ·{" "}
                                     {unitCount} kiện
                                   </span>
                                 </div>
@@ -3288,7 +3312,7 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
                         <div className="hu-metric-chip hu-chip-stock">
                           <span className="hu-chip-label">Tồn kiện:</span>
                           <span className="hu-chip-val">
-                            <strong>{displayStock(selectedAllocated, selected.unitName)}</strong>
+                            <strong>{fmt(selectedAllocated)} {selected.unitName}</strong>
                           </span>
                         </div>
                       </Tooltip>
@@ -3296,7 +3320,7 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
                         <div className="hu-metric-chip hu-chip-allocated">
                           <span className="hu-chip-label">Tồn phần mềm:</span>
                           <span className="hu-chip-val">
-                            <strong>{displayStock(selected.stock, selected.unitName)}</strong>
+                            <strong>{fmt(selected.stock)} {selected.unitName}</strong>
                           </span>
                         </div>
                       </Tooltip>
@@ -3306,7 +3330,7 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
                         >
                           <span className="hu-chip-label">Chênh lệch:</span>
                           <span className="hu-chip-val">
-                            <strong>{isAdmin ? `${fmtSigned(selectedDifference)} ${selected.unitName}` : hiddenStockLabel}</strong>
+                            <strong>{fmtSigned(selectedDifference)} {selected.unitName}</strong>
                           </span>
                         </div>
                       </Tooltip>
@@ -3431,6 +3455,9 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
                     const pendingPickConflict = unit.status === "Đang sử dụng"
                       ? getPendingCheckConflict(unit, workspace.register)
                       : null;
+                    const returnPickConflict = unit.status === "Đang sử dụng"
+                      ? getReturnMergeConflict(unit, workspace.register)
+                      : null;
                     return (
                     <button
                       type="button"
@@ -3444,6 +3471,11 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
                           <span className="hu-unit-spec-tag">
                             {unit.packageType}
                           </span>
+                          {isReturnHandlingUnit(unit) && unit.returnReference && (
+                            <span className="hu-return-reference" title={`Mã vận đơn: ${unit.returnReference}`}>
+                              Mã vận đơn: {unit.returnReference}
+                            </span>
+                          )}
                         </div>
                         <div className="hu-card-header-actions">
                           {statusFor(unit.status)}
@@ -3466,11 +3498,7 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
                       <img src={imageFor(unit)} alt={`Minh hoạ ${unit.id}`} />
                       <div className="hu-package-number">
                         <small>{unit.status === "Đã tách" ? "Đã chuyển sang kiện con" : `${unit.unitName} còn lại`}</small>
-                        <strong>{unit.status === "Đã tách"
-                          ? `${unit.childUnits?.length || 0} kiện`
-                          : unit.status === "Nguyên niêm phong"
-                            ? displayStock(unit.currentPcs, unit.unitName)
-                            : hiddenStockLabel}</strong>
+                        <strong>{unit.status === "Đã tách" ? `${unit.childUnits?.length || 0} kiện` : `${fmt(unit.currentPcs)} ${unit.unitName}`}</strong>
                       </div>
                       <div className="hu-package-meta">
                         <div className="hu-meta-row">
@@ -3514,9 +3542,11 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
                                       : "thùng";
                                   return (
                                     <Tooltip
-                                      title={conflict.status === "Chờ kiểm"
-                                        ? pendingCheckBlockText(unit, conflict, "khui kiện mới")
-                                        : `Đang có ${catLabel} [${conflict.id}] cùng SKU đang mở (còn ${fmt(conflict.currentPcs)} gói). Vui lòng rút hết kiện cũ trước khi khui ${catLabel} mới.`}
+                                      title={isReturnHandlingUnit(conflict)
+                                        ? returnMergeBlockText(unit, conflict, "khui kiện mới")
+                                        : conflict.status === "Chờ kiểm"
+                                          ? pendingCheckBlockText(unit, conflict, "khui kiện mới")
+                                          : `Đang có ${catLabel} [${conflict.id}] cùng SKU đang mở (còn ${fmt(conflict.currentPcs)} gói). Vui lòng rút hết kiện cũ trước khi khui ${catLabel} mới.`}
                                     >
                                       <button
                                         className="hu-action-btn unseal"
@@ -3529,9 +3559,11 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
                                         }}
                                          onClick={() =>
                                           message.warning(
-                                            conflict.status === "Chờ kiểm"
-                                              ? pendingCheckBlockText(unit, conflict, "khui kiện mới")
-                                              : `⚠️ SKU này đang có ${catLabel} [${conflict.id}] mở sẵn. Vui lòng rút hết kiện cũ trước khi khui thêm ${catLabel}!`,
+                                            isReturnHandlingUnit(conflict)
+                                              ? returnMergeBlockText(unit, conflict, "khui kiện mới")
+                                              : conflict.status === "Chờ kiểm"
+                                                ? pendingCheckBlockText(unit, conflict, "khui kiện mới")
+                                                : `⚠️ SKU này đang có ${catLabel} [${conflict.id}] mở sẵn. Vui lòng rút hết kiện cũ trước khi khui thêm ${catLabel}!`,
                                             8,
                                           )
                                         }
@@ -3566,6 +3598,16 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
                                     onClick={() => message.warning(pendingCheckBlockText(unit, pendingPickConflict, "rút hàng"), 8)}
                                   >
                                     <LockOutlined /> Chờ kiểm {pendingPickConflict.id}
+                                  </button>
+                                </Tooltip>
+                              ) : returnPickConflict ? (
+                                <Tooltip title={returnMergeBlockText(unit, returnPickConflict, "rút hàng")}>
+                                  <button
+                                    className="hu-action-btn final-check"
+                                    style={{ opacity: 0.72, cursor: "not-allowed", background: "#fff7e6", color: "#ad6800", borderColor: "#ffd591" }}
+                                    onClick={() => message.warning(returnMergeBlockText(unit, returnPickConflict, "rút hàng"), 8)}
+                                  >
+                                    <LockOutlined /> Chờ gộp {returnPickConflict.id}
                                   </button>
                                 </Tooltip>
                               ) : (
@@ -3766,6 +3808,9 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
                   {detail.skuName && (
                     <Tag color="purple">SKU: {detail.skuName}</Tag>
                   )}
+                  {isReturnHandlingUnit(detail) && detail.returnReference && (
+                    <Tag color="gold">Mã vận đơn: {detail.returnReference}</Tag>
+                  )}
                 </Flex>
                 <Typography.Title level={3} style={{ margin: "6px 0 2px" }}>
                   {detail.id}
@@ -3855,9 +3900,7 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
               <div>
                 <small>CÒN LẠI</small>
                 <b>
-                  {detail.status === "Nguyên niêm phong"
-                    ? displayStock(detail.currentPcs, detail.unitName)
-                    : hiddenStockLabel}
+                  {fmt(detail.currentPcs)} {detail.unitName}
                 </b>
               </div>
               <div>
@@ -5483,13 +5526,13 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
                   <div>
                     <small>TỒN QUẢN LÝ KIỆN</small>
                     <b>
-                      {displayStock(currentAllocAllocated, currentAllocProduct.unitName)}
+                      {fmt(currentAllocAllocated)} {currentAllocProduct.unitName}
                     </b>
                   </div>
                   <div>
                     <small>TỒN PHẦN MỀM THAM KHẢO</small>
                     <b>
-                      {displayStock(currentAllocProduct.stock, currentAllocProduct.unitName)}
+                      {fmt(currentAllocProduct.stock)} {currentAllocProduct.unitName}
                     </b>
                   </div>
                   <div
@@ -5499,9 +5542,7 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
                   >
                     <small>CHÊNH LỆCH ĐỐI CHIẾU</small>
                     <b>
-                      {isAdmin
-                        ? `${fmtSigned(currentAllocDifference)} ${currentAllocProduct.unitName}`
-                        : hiddenStockLabel}
+                      {fmtSigned(currentAllocDifference)} {currentAllocProduct.unitName}
                     </b>
                   </div>
                 </div>

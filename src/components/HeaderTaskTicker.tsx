@@ -1,6 +1,10 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import dayjs from 'dayjs';
 import { useAuth } from '../contexts/AuthContext';
+import {
+    invalidateAssignmentAlertTasks,
+    subscribeHeaderAlertData,
+} from '../lib/alertDataCache';
 
 interface TickerAlert {
     key: string;
@@ -24,6 +28,7 @@ export default function HeaderTaskTicker({ onNavigate }: HeaderTaskTickerProps) 
     const [alerts, setAlerts] = useState<TickerAlert[]>([]);
     const [currentIndex, setCurrentIndex] = useState(0);
     const [phase, setPhase] = useState<'scrolling' | 'pausing' | 'sleeping'>('scrolling');
+    const [documentVisible, setDocumentVisible] = useState(() => document.visibilityState === 'visible');
     const trackRef = useRef<HTMLDivElement>(null);
     const containerRef = useRef<HTMLDivElement>(null);
     const animRef = useRef<number>(0);
@@ -31,27 +36,24 @@ export default function HeaderTaskTicker({ onNavigate }: HeaderTaskTickerProps) 
     const pausedRef = useRef(false); // hover pause
     const textWidthRef = useRef<number>(0);
 
-    const loadData = useCallback(async () => {
+    useEffect(() => {
+        const onVisibilityChange = () => setDocumentVisible(document.visibilityState === 'visible');
+        document.addEventListener('visibilitychange', onVisibilityChange);
+        return () => document.removeEventListener('visibilitychange', onVisibilityChange);
+    }, []);
+
+    const applyData = useCallback((data: { tasks: { success: boolean; data?: any[] }; vat: { success: boolean; data?: any[] } }) => {
         const result: TickerAlert[] = [];
 
-        const [taskRequest, vatRequest] = await Promise.allSettled([
-            (window as any).electronAPI.dailyTasks.list({
-                type: 'assignment',
-                excludeCompleted: true,
-                summary: true,
-                viewerUsername: isRolePreview ? user?.username : undefined,
-            }),
-            (window as any).electronAPI.purchases.getVatAlertSummary(),
-        ]);
-
         try {
-            const taskRes = taskRequest.status === 'fulfilled' ? taskRequest.value : null;
+            const taskRes = data.tasks;
             if (taskRes.success && taskRes.data) {
                 const now = dayjs();
                 const urgent = taskRes.data
                     .filter((t: any) => t.type === 'assignment' && t.status !== 'completed')
                     .map((t: any) => ({ ...t, diff: dayjs(t.dueDate).diff(now, 'minute') }))
-                    .filter((t: any) => t.diff <= 60 && t.diff > -1440);
+                    .filter((t: any) => t.diff <= 60 && t.diff > -1440)
+                    .sort((a: any, b: any) => a.diff - b.diff);
 
                 if (urgent.length > 0) {
                     const overdue = urgent.filter((t: any) => t.diff < 0);
@@ -61,7 +63,7 @@ export default function HeaderTaskTicker({ onNavigate }: HeaderTaskTickerProps) 
                             key: 'task-overdue', icon: '⛔', navTo: 'daily-tasks', priority: 1,
                             color: '#ff4d4f',
                             text: `${overdue.length} bàn giao đã TRỄ`,
-                            badge: `trễ nhất ${Math.abs(overdue[overdue.length - 1].diff)} phút`,
+                            badge: `trễ nhất ${Math.abs(overdue[0].diff)} phút`,
                         });
                     }
                     if (upcoming.length > 0) {
@@ -77,35 +79,6 @@ export default function HeaderTaskTicker({ onNavigate }: HeaderTaskTickerProps) 
             }
         } catch { }
 
-        try {
-            const purRes = vatRequest.status === 'fulfilled' ? vatRequest.value : null;
-            if (purRes.success && purRes.data) {
-                const CUTOFF = dayjs('2026-03-19');
-                const now = dayjs();
-                const missing = purRes.data.filter((p: any) => {
-                    const vatStatus = p.vatInvoiceStatus;
-                    const companyVatEntries = Object.values(p.companyVatByGroup || {}) as Array<{ status?: string }>;
-                    const hasCompanyVat = companyVatEntries.length > 0 && companyVatEntries.every(vat => ['uploaded', 'verified', 'no_vat'].includes(String(vat?.status || '').toLowerCase()));
-                    const hasVat = hasCompanyVat || (p.vatGroupId ? !!p.vatGroupHasVat : ['uploaded', 'verified'].includes(String(vatStatus || '').toLowerCase()));
-                    const purchaseDate = dayjs(p.purchaseDate || p.invoiceDate || p.createdAt);
-                    return !hasVat &&
-                        vatStatus !== 'thht' &&
-                        vatStatus !== 'no_vat' &&
-                        now.diff(purchaseDate, 'day') >= 3 &&
-                        purchaseDate.isAfter(CUTOFF);
-                });
-                if (missing.length > 0) {
-                    const maxDays = Math.max(...missing.map((p: any) => now.diff(dayjs(p.purchaseDate || p.invoiceDate || p.createdAt), 'day')));
-                    result.push({
-                        key: 'vat', icon: '🧾', navTo: 'purchase', priority: 3,
-                        color: maxDays >= 7 ? '#ff4d4f' : maxDays >= 5 ? '#fa541c' : '#faad14',
-                        text: `${missing.length} phiếu chưa có HĐ VAT`,
-                        badge: `lâu nhất ${maxDays} ngày`,
-                    });
-                }
-            }
-        } catch { }
-
         // Không thông báo tồn kho thấp
 
         // Không thông báo module Xuất HĐĐT
@@ -116,25 +89,22 @@ export default function HeaderTaskTicker({ onNavigate }: HeaderTaskTickerProps) 
         setPhase('scrolling');
     }, [isRolePreview, user?.username]);
 
-    // ⚡ Delay 10s lần đầu để Dashboard load xong, sau đó poll mỗi 5 phút
+    // Source chung tự quản lý initial delay, polling và visibility cho cả ticker/popup.
     useEffect(() => {
-        const initDelay = setTimeout(loadData, 10000);
-        const interval = setInterval(loadData, 5 * 60 * 1000);
-        return () => {
-            clearTimeout(initDelay);
-            clearInterval(interval);
-        };
-    }, [loadData]);
+        return subscribeHeaderAlertData(isRolePreview ? user?.username : undefined, applyData);
+    }, [applyData, isRolePreview, user?.username]);
 
     useEffect(() => {
-        const onTaskChanged = () => loadData();
+        const onTaskChanged = () => {
+            invalidateAssignmentAlertTasks();
+        };
         window.addEventListener('task-changed', onTaskChanged);
         return () => window.removeEventListener('task-changed', onTaskChanged);
-    }, [loadData]);
+    }, []);
 
     // Scroll animation cho từng alert riêng biệt
     useEffect(() => {
-        if (alerts.length === 0 || phase !== 'scrolling') return;
+        if (!documentVisible || alerts.length === 0 || phase !== 'scrolling') return;
 
         const idx = currentIndex % alerts.length;
         const speed = 1.2; // px/frame
@@ -187,16 +157,16 @@ export default function HeaderTaskTicker({ onNavigate }: HeaderTaskTickerProps) 
             clearTimeout(startTimeout);
             if (animRef.current) cancelAnimationFrame(animRef.current);
         };
-    }, [alerts, currentIndex, phase]);
+    }, [alerts, currentIndex, phase, documentVisible]);
 
     // Sleep cycle: 20 phút rồi chạy lại
     useEffect(() => {
         if (phase !== 'sleeping') return;
         const timer = setTimeout(() => {
-            loadData(); // Reload data mới
+            if (alerts.length > 0) setPhase('scrolling');
         }, PAUSE_BETWEEN_CYCLES);
         return () => clearTimeout(timer);
-    }, [phase, loadData]);
+    }, [alerts.length, phase]);
 
     if (alerts.length === 0 || phase === 'sleeping') return null;
 

@@ -827,6 +827,12 @@ export default function BusinessReportPage() {
                 >
                     Làm mới dữ liệu
                 </Button>
+                <Button icon={<DownloadOutlined />} onClick={() => window.print()}>
+                    Xuất báo cáo
+                </Button>
+                <Button icon={<SettingOutlined />} onClick={openConfigModal}>
+                    Cấu hình
+                </Button>
             </Space>
         );
         return () => clearHeaderExtra();
@@ -1818,18 +1824,6 @@ export default function BusinessReportPage() {
             {activeTab === 'pnl' && <>
 
             <div className="pnl-redesign">
-            {/* === HEADER === */}
-            <div className="pnl-page-header">
-                <div>
-                    <Title level={2} style={{ margin: 0 }}>Báo cáo Kinh doanh (P&amp;L)</Title>
-                    <Text type="secondary">Theo dõi lợi nhuận và ưu tiên các khoản cần xử lý trong kỳ</Text>
-                </div>
-                <Space>
-                    <Button icon={<DownloadOutlined />} onClick={() => window.print()}>Xuất báo cáo</Button>
-                    <Button icon={<SettingOutlined />} onClick={openConfigModal}>Cấu hình</Button>
-                </Space>
-            </div>
-
             {/* === DATE CONTROLS === */}
             <div className="pnl-filter-bar">
                 <div className="pnl-filter-controls">
