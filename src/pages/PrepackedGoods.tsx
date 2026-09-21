@@ -312,25 +312,39 @@ export default function PrepackedGoods() {
     useEffect(() => {
         let cancelled = false;
         if (isUiTest) return;
-        void window.electronAPI?.dailyTasks?.list?.({
-            excludeCompleted: true,
-            viewerUsername: isRolePreview ? user?.username : undefined,
-        }).then(result => {
-            if (cancelled || !result?.success) return;
-            const ids = new Set<number>();
-            (result.data || []).forEach((task: any) => {
-                const attachments = typeof task.attachments === 'string'
-                    ? (() => { try { return JSON.parse(task.attachments); } catch { return {}; } })()
-                    : task.attachments || {};
-                if (String(task.area || '').trim() !== 'Đóng gói sẵn') return;
-                (attachments?.prepackReport?.batchIds || []).forEach((id: unknown) => {
-                    const batchId = Number(id);
-                    if (Number.isInteger(batchId) && batchId > 0) ids.add(batchId);
+        const loadLinkedCheckBatchIds = async () => {
+            try {
+                const result = await window.electronAPI?.dailyTasks?.list?.({
+                    excludeCompleted: true,
+                    viewerUsername: isRolePreview ? user?.username : undefined,
                 });
-            });
-            setLinkedCheckBatchIds(ids);
-        }).catch(() => undefined);
-        return () => { cancelled = true; };
+                if (cancelled) return;
+                if (!result?.success) {
+                    setLinkedCheckBatchIds(new Set());
+                    return;
+                }
+                const ids = new Set<number>();
+                (result.data || []).forEach((task: any) => {
+                    const attachments = typeof task.attachments === 'string'
+                        ? (() => { try { return JSON.parse(task.attachments); } catch { return {}; } })()
+                        : task.attachments || {};
+                    if (String(task.area || '').trim() !== 'Đóng gói sẵn') return;
+                    (attachments?.prepackReport?.batchIds || []).forEach((id: unknown) => {
+                        const batchId = Number(id);
+                        if (Number.isInteger(batchId) && batchId > 0) ids.add(batchId);
+                    });
+                });
+                setLinkedCheckBatchIds(ids);
+            } catch {
+                if (!cancelled) setLinkedCheckBatchIds(new Set());
+            }
+        };
+        void loadLinkedCheckBatchIds();
+        const refreshTimer = window.setInterval(() => void loadLinkedCheckBatchIds(), 15_000);
+        return () => {
+            cancelled = true;
+            window.clearInterval(refreshTimer);
+        };
     }, [isRolePreview, isUiTest, user?.username]);
     useEffect(() => {
         const api = window.electronAPI?.prepack;
