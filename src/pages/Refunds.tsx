@@ -1,5 +1,6 @@
 import { useState, useEffect, useMemo, useRef } from 'react';
 import { useAppData } from '../contexts/AppDataContext';
+import { usePageHeader } from '../contexts/PageHeaderContext';
 import {
     Card,
     Button,
@@ -21,7 +22,7 @@ import {
     Collapse,
     Alert,
 } from 'antd';
-import { PlusOutlined, EditOutlined, DeleteOutlined, ReloadOutlined, RollbackOutlined, FormOutlined, FileExcelOutlined, ScanOutlined, MoreOutlined, DownloadOutlined, BarcodeOutlined, FolderOpenOutlined, CheckCircleOutlined, WarningOutlined, SearchOutlined, StopOutlined, DollarOutlined } from '@ant-design/icons';
+import { PlusOutlined, EditOutlined, DeleteOutlined, ReloadOutlined, FormOutlined, FileExcelOutlined, ScanOutlined, MoreOutlined, DownloadOutlined, BarcodeOutlined, FolderOpenOutlined, CheckCircleOutlined, WarningOutlined, SearchOutlined, StopOutlined, DollarOutlined } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
 import dayjs from 'dayjs';
 import './Refunds.css';
@@ -98,6 +99,7 @@ function getRefundItemsForDisplay(items: string): RefundItem[] {
 }
 
 export default function RefundsPage() {
+    const { setHeaderExtra, clearHeaderExtra } = usePageHeader();
     const [refunds, setRefunds] = useState<Refund[]>([]);
     const { products } = useAppData();
     const [loading, setLoading] = useState(false);
@@ -1378,43 +1380,30 @@ export default function RefundsPage() {
     ] : columns;
 
 
+    useEffect(() => {
+        setHeaderExtra(
+            <Space wrap className="refunds-heading-actions">
+                {selectedRowKeys.length > 0 && (
+                    <Button danger icon={<DeleteOutlined />} onClick={handleBulkDelete}>
+                        Xóa đã chọn ({selectedRowKeys.length})
+                    </Button>
+                )}
+                <Button
+                    type="primary"
+                    icon={<DownloadOutlined />}
+                    style={{ background: '#722ed1', borderColor: '#722ed1' }}
+                    onClick={handleImportFromFolder}
+                >
+                    Nhập từ thư mục
+                </Button>
+            </Space>,
+        );
+        return () => clearHeaderExtra();
+    }, [clearHeaderExtra, selectedRowKeys, setHeaderExtra]);
+
     return (
         <Spin spinning={importLoading} tip="⏳ Đang import dữ liệu..." size="large">
             <div className="refunds-page">
-                <div className="refunds-page-heading">
-                    <div className="refunds-page-title">
-                        <span className="refunds-title-icon"><RollbackOutlined /></span>
-                        <div>
-                            <Title level={2}>Hàng hoàn</Title>
-                            <Text type="secondary">Nhận kiện, kiểm hàng và cộng lại tồn kho</Text>
-                        </div>
-                    </div>
-
-                    <div className="refunds-heading-actions">
-                        {selectedRowKeys.length > 0 && (
-                            <Button
-                                className="refunds-bulk-delete"
-                                danger
-                                icon={<DeleteOutlined />}
-                                onClick={handleBulkDelete}
-                                size="large"
-                            >
-                                Xóa đã chọn ({selectedRowKeys.length})
-                            </Button>
-                        )}
-                        <Button
-                            className="refunds-import-button"
-                            type="primary"
-                            icon={<DownloadOutlined />}
-                            size="large"
-                            style={{ background: '#722ed1', borderColor: '#722ed1' }}
-                            onClick={handleImportFromFolder}
-                        >
-                            Nhập từ thư mục
-                        </Button>
-                    </div>
-                </div>
-
                 {/* 🎥 ĐƠN CẦN QUAY VIDEO — Thu gọn mặc định */}
                 <Collapse
                     className="refunds-video-panel"

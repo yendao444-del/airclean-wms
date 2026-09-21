@@ -1,6 +1,6 @@
 {
   "name": "quan-ly-ban-hang-desktop",
-  "version": "1.0.452",
+  "version": "1.0.453",
   "description": "Hệ thống quản lý bán hàng - Desktop App",
   "main": "electron/main.js",
   "scripts": {
@@ -10,10 +10,11 @@
     "embed:google-oauth": "node scripts/prepare-google-oauth-config.js",
     "prepare:runtime-db": "node scripts/prepare-runtime-db-config.cjs",
     "prepare:r2-daily-evidence": "node scripts/prepare-r2-daily-evidence-config.js",
+    "verify:packaged-footprint": "node scripts/verify-packaged-footprint.cjs",
     "db:migrate:deploy": "prisma migrate deploy",
     "electron:dev": "node scripts/start-electron-dev.js",
-    "electron:build": "npm run embed:wms-token && npm run embed:google-oauth && npm run prepare:r2-daily-evidence && npm run prepare:runtime-db && npx prisma generate && npm run build && electron-builder",
-    "electron:installer": "npm run embed:wms-token && npm run embed:google-oauth && npm run prepare:r2-daily-evidence && npm run prepare:runtime-db && npx prisma generate && npm run build && electron-builder --win nsis --config.directories.output=release-installer && node scripts/installer-runtime-smoke.cjs"
+    "electron:build": "npm run embed:wms-token && npm run embed:google-oauth && npm run prepare:r2-daily-evidence && npm run prepare:runtime-db && npx prisma generate && npm run build && electron-builder && node scripts/verify-packaged-footprint.cjs release4/win-unpacked/resources/app",
+    "electron:installer": "npm run embed:wms-token && npm run embed:google-oauth && npm run prepare:r2-daily-evidence && npm run prepare:runtime-db && npx prisma generate && npm run build && electron-builder --win nsis --config.directories.output=release-installer && node scripts/verify-packaged-footprint.cjs release-installer/win-unpacked/resources/app && node scripts/installer-runtime-smoke.cjs"
   },
   "keywords": [
     "pos",
@@ -24,6 +25,7 @@
   "license": "ISC",
   "devDependencies": {
     "@ant-design/icons": "^6.1.0",
+    "@phosphor-icons/react": "^2.1.10",
     "@types/react": "^19.2.10",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^5.1.3",
@@ -32,8 +34,12 @@
     "electron": "^43.4.1",
     "electron-builder": "^26.15.3",
     "electron-is-dev": "^3.0.1",
+    "html2canvas": "^1.4.1",
+    "jspdf": "^4.2.1",
     "nodemon": "^3.1.14",
+    "pdfjs-dist": "^6.2.108",
     "prisma": "5.22.0",
+    "qrcode.react": "^4.2.0",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
     "react-hook-form": "^7.71.1",
@@ -130,7 +136,6 @@
     "buildDependenciesFromSource": false
   },
   "dependencies": {
-    "@phosphor-icons/react": "^2.1.10",
     "@prisma/client": "5.22.0",
     "@supabase/supabase-js": "^2.110.8",
     "@zxing/browser": "^0.2.1",
@@ -141,11 +146,7 @@
     "dotenv": "^17.2.3",
     "glob": "^13.0.1",
     "googleapis": "^171.4.0",
-    "html2canvas": "^1.4.1",
-    "jspdf": "^4.2.1",
     "nodemailer": "^7.0.6",
-    "pdfjs-dist": "^6.2.108",
-    "qrcode.react": "^4.2.0",
     "uuid": "^11.1.0",
     "winax": "^3.6.8",
     "ws": "^8.21.3",

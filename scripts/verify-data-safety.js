@@ -14,6 +14,7 @@ const preload = read('electron/preload.js');
 const packageJson = read('package.json');
 const offlineQueue = read('electron/offline-queue.js');
 const appPage = read('src/App.tsx');
+const appContentPage = readOptional('src/AppContent.tsx');
 const ecommerce = read('src/pages/EcommerceExport.tsx');
 const stockBalance = read('src/pages/StockBalance.tsx');
 const returnsPage = read('src/pages/Returns.tsx');
@@ -360,7 +361,9 @@ if (!mapMatch) {
   }
 }
 
-requireText(ipc, '\nstartTelegramWmsPolling();', 'Transactional Telegram WMS polling must remain enabled');
+if (!ipc.includes('startTelegramWmsPolling();') || !ipc.includes('TELEGRAM_WMS_BOT_TOKEN')) {
+  failures.push('Transactional Telegram WMS polling must remain enabled');
+}
 rejectText(ipc, 'Telegram WMS mutation polling is disabled', 'Telegram WMS polling is still disabled');
 requireText(ipc, 'handling-unit-code:${normalizedCode}', 'Telegram handling-unit mutations must serialize by unit code');
 requireText(ipc, 'lockHandlingConfigKeys(tx, [HANDLING_QR_LABELS_KEY])', 'QR registry updates must hold the shared registry lock');
@@ -514,8 +517,9 @@ requireText(
   'const revisionTimer = window.setInterval(() => { void checkRevision(); }, 15000);',
   'Packing revision polling interval must remain bounded at 15 seconds',
 );
-requireText(appPage, "const GlobalTaskAlerts = lazy(() => import('./components/GlobalTaskAlerts'))", 'Global task alerts must remain outside the startup bundle');
-requireText(appPage, 'void loadAttendancePage();', 'Attendance chunk must remain eligible for idle warming');
+const appShellPages = `${appPage}\n${appContentPage}`;
+requireText(appShellPages, "const GlobalTaskAlerts = lazy(() => import('./components/GlobalTaskAlerts'))", 'Global task alerts must remain outside the startup bundle');
+requireText(appShellPages, 'void loadAttendancePage();', 'Attendance chunk must remain eligible for idle warming');
 requireText(packageJson, '!node_modules/.prisma/**/*.tmp*', 'Packaged app must exclude stale Prisma temp binaries');
 requireText(releaseLite, 'release-preflight.cjs renderer', 'Lite release must enforce renderer-only scope');
 requireText(releaseQuick, 'release-preflight.cjs quick', 'Quick release must reject Prisma and Python changes');

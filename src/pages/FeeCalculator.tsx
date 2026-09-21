@@ -20,7 +20,6 @@ import {
 } from 'antd';
 import {
     AppstoreOutlined,
-    CalculatorOutlined,
     DeleteOutlined,
     DollarOutlined,
     EditOutlined,
@@ -30,9 +29,10 @@ import {
     SettingOutlined,
     ShopOutlined,
 } from '@ant-design/icons';
+import { usePageHeader } from '../contexts/PageHeaderContext';
 import './FeeCalculator.css';
 
-const { Title, Text } = Typography;
+const { Text } = Typography;
 
 type Platform = 'shopee' | 'tiktok';
 type Fee = {
@@ -143,6 +143,7 @@ const applyCategoryRate = (fees: Fee[], platform: Platform, categoryId: string) 
 };
 
 export default function FeeCalculator() {
+    const { setHeaderExtra, clearHeaderExtra } = usePageHeader();
     const [loaded, setLoaded] = useState(false);
     const [platform, setPlatform] = useState<Platform>('shopee');
     const [shopeeFees, setShopeeFees] = useState<Fee[]>(DEFAULT_SHOPEE_FEES);
@@ -323,20 +324,19 @@ export default function FeeCalculator() {
     const platformTitle = platform === 'shopee' ? 'Shopee' : 'TikTok Shop';
     const platformColor = platform === 'shopee' ? '#ee4d2d' : '#151515';
 
+    useEffect(() => {
+        setHeaderExtra(
+            <Segmented
+                value={platform}
+                onChange={(value) => setPlatform(value as Platform)}
+                options={[{ value: 'shopee', label: 'Shopee' }, { value: 'tiktok', label: 'TikTok Shop' }]}
+            />,
+        );
+        return () => clearHeaderExtra();
+    }, [clearHeaderExtra, platform, setHeaderExtra]);
+
     return (
         <main ref={pageRef} className="fee-calculator-page">
-            <section className="fee-calculator-header">
-                <div>
-                    <div className="fee-header-title"><span className="fee-header-icon"><CalculatorOutlined /></span><Title level={2}>Tính phí sàn</Title></div>
-                    <Text className="fee-header-subtitle" type="secondary">Ước tính chi phí, lợi nhuận và biên lợi nhuận cho từng đơn hàng.</Text>
-                </div>
-                <Segmented
-                    value={platform}
-                    onChange={(value) => setPlatform(value as Platform)}
-                    options={[{ value: 'shopee', label: 'Shopee' }, { value: 'tiktok', label: 'TikTok Shop' }]}
-                />
-            </section>
-
             <Card className="fee-context-card" bordered={false}>
                 <Row gutter={[16, 16]} align="bottom">
                     <Col xs={24} md={10} lg={8}>

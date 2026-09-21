@@ -2,6 +2,11 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import dayjs from 'dayjs';
 import AlertPopup, { AlertPopupItem } from './AlertPopup';
 import { useAuth } from '../contexts/AuthContext';
+import {
+    invalidateAssignmentAlertTasks,
+    subscribeAssignmentAlertTasks,
+    subscribeMyVatPenaltyAlerts,
+} from '../lib/alertDataCache';
 
 /**
  * GlobalTaskAlerts - Component chạy TOÀN CỤC ở App.tsx
@@ -183,87 +188,76 @@ export default function GlobalTaskAlerts() {
         });
     }, [addAlertPopup, user?.username]);
 
-    // === Load tasks từ DB ===
-    const loadTasks = useCallback(async () => {
-        try {
-            const result = await (window as any).electronAPI.dailyTasks.list({
-                type: 'assignment',
-                excludeCompleted: true,
-                summary: true,
-            });
-            if (result.success && result.data) {
-                const assignmentTasks = result.data
-                    .filter((t: any) => (t.type === 'assignment') && t.status !== 'completed' && isCurrentUserRecipient(t))
-                    .map((t: any) => ({
-                        id: t.id,
-                        title: t.title,
-                        assignee: t.assignee,
-                        dueDate: dayjs(t.dueDate).format('YYYY-MM-DD'),
-                        dueTime: dayjs(t.dueDate).format('HH:mm'),
-                        status: t.status,
-                        type: t.type,
-                        attachments: t.attachments,
-                    }));
-                setTasks(assignmentTasks);
-                notifyNewAssignments(assignmentTasks);
-            }
-        } catch (err) {
-            console.log('[GlobalAlerts] Load tasks error:', err);
+    const applyTasks = useCallback((result: { success: boolean; data?: any[]; error?: string }) => {
+        if (!result.success || !result.data) {
+            if (result.error) console.log('[GlobalAlerts] Load tasks error:', result.error);
+            return;
         }
+        const assignmentTasks = result.data
+            .filter((t: any) => (t.type === 'assignment') && t.status !== 'completed' && isCurrentUserRecipient(t))
+            .map((t: any) => ({
+                id: t.id,
+                title: t.title,
+                assignee: t.assignee,
+                dueDate: dayjs(t.dueDate).format('YYYY-MM-DD'),
+                dueTime: dayjs(t.dueDate).format('HH:mm'),
+                status: t.status,
+                type: t.type,
+                attachments: t.attachments,
+            }));
+        setTasks(assignmentTasks);
+        notifyNewAssignments(assignmentTasks);
     }, [isCurrentUserRecipient, notifyNewAssignments]);
 
-    const loadVatPenaltyAlerts = useCallback(async () => {
+    const applyVatPenaltyAlerts = useCallback((result: { success: boolean; data?: any[]; error?: string }) => {
         const username = String(user?.username || '').trim().toLocaleLowerCase('vi-VN');
         if (!username) return;
-        try {
-            const result = await (window as any).electronAPI.purchases.getMyVatPenaltyAlerts();
-            if (!result?.success || !Array.isArray(result.data) || result.data.length === 0) return;
-
-            const storageKey = `purchases.vatPenaltyNotified.${username}`;
-            let notifiedIds = new Set<string>();
-            try {
-                const stored = JSON.parse(window.localStorage.getItem(storageKey) || '[]');
-                if (Array.isArray(stored)) notifiedIds = new Set(stored.map(String));
-            } catch { }
-
-            const newPenalties = result.data.filter((item: any) => !notifiedIds.has(String(item.id)));
-            if (!newPenalties.length) return;
-            newPenalties.forEach((item: any) => notifiedIds.add(String(item.id)));
-            window.localStorage.setItem(storageKey, JSON.stringify([...notifiedIds].slice(-500)));
-
-            const first = newPenalties[0];
-            const totalFine = newPenalties.reduce((sum: number, item: any) => sum + Number(item.fineAmount || 0), 0);
-            playWarningBeeps(3);
-            addAlertPopup({
-                level: 'overdue',
-                taskName: newPenalties.length === 1
-                    ? `Đã ghi nhận phạt HĐ VAT lần ${first.fineStage || 1}: ${first.poNumber}`
-                    : `Đã ghi nhận ${newPenalties.length} khoản phạt HĐ VAT`,
-                assignee: user?.fullName || user?.username || '',
-                deadline: dayjs(first.fineDate).format('DD/MM/YYYY'),
-                timeNum: totalFine.toLocaleString('vi-VN'),
-                timeUnit: 'đ tiền phạt đã ghi nhận',
-                actionLabel: 'Xem bảng công',
-                onAction: () => window.dispatchEvent(new CustomEvent('navigate', { detail: 'attendance' })),
-            });
-        } catch (error) {
-            console.log('[GlobalAlerts] Load VAT penalty alerts error:', error);
+        if (!result?.success || !Array.isArray(result.data) || result.data.length === 0) {
+            if (result.error) console.log('[GlobalAlerts] Load VAT penalty alerts error:', result.error);
+            return;
         }
+
+        const storageKey = `purchases.vatPenaltyNotified.${username}`;
+        let notifiedIds = new Set<string>();
+        try {
+            const stored = JSON.parse(window.localStorage.getItem(storageKey) || '[]');
+            if (Array.isArray(stored)) notifiedIds = new Set(stored.map(String));
+        } catch { }
+
+        const newPenalties = result.data.filter((item: any) => !notifiedIds.has(String(item.id)));
+        if (!newPenalties.length) return;
+        newPenalties.forEach((item: any) => notifiedIds.add(String(item.id)));
+        window.localStorage.setItem(storageKey, JSON.stringify([...notifiedIds].slice(-500)));
+
+        const first = newPenalties[0];
+        const totalFine = newPenalties.reduce((sum: number, item: any) => sum + Number(item.fineAmount || 0), 0);
+        playWarningBeeps(3);
+        addAlertPopup({
+            level: 'overdue',
+            taskName: newPenalties.length === 1
+                ? `Đã ghi nhận phạt HĐ VAT lần ${first.fineStage || 1}: ${first.poNumber}`
+                : `Đã ghi nhận ${newPenalties.length} khoản phạt HĐ VAT`,
+            assignee: user?.fullName || user?.username || '',
+            deadline: dayjs(first.fineDate).format('DD/MM/YYYY'),
+            timeNum: totalFine.toLocaleString('vi-VN'),
+            timeUnit: 'đ tiền phạt đã ghi nhận',
+            actionLabel: 'Xem bảng công',
+            onAction: () => window.dispatchEvent(new CustomEvent('navigate', { detail: 'attendance' })),
+        });
     }, [addAlertPopup, user?.fullName, user?.username]);
 
-    // ⚡ Delay 15s lần đầu (Dashboard đã load tasks), sau đó poll mỗi 2 phút
+    // Một polling source dùng chung cho popup và ticker, tránh tạo timer/IPC trùng.
     useEffect(() => {
-        const loadAlerts = () => {
-            loadTasks();
-            loadVatPenaltyAlerts();
-        };
-        const initDelay = setTimeout(loadAlerts, 15000);
-        const interval = setInterval(loadAlerts, 120000);
+        const unsubscribeTasks = subscribeAssignmentAlertTasks(undefined, applyTasks);
+        const username = String(user?.username || '').trim();
+        const unsubscribeVat = username
+            ? subscribeMyVatPenaltyAlerts(username, applyVatPenaltyAlerts)
+            : () => undefined;
         return () => {
-            clearTimeout(initDelay);
-            clearInterval(interval);
+            unsubscribeTasks();
+            unsubscribeVat();
         };
-    }, [loadTasks, loadVatPenaltyAlerts]);
+    }, [applyTasks, applyVatPenaltyAlerts, user?.username]);
 
     // === Lắng nghe events từ DailyTasks ===
     useEffect(() => {
@@ -282,7 +276,7 @@ export default function GlobalTaskAlerts() {
         };
         // Khi xóa/hoàn thành/cập nhật task → reload ngay
         const onTaskChanged = () => {
-            loadTasks();
+            invalidateAssignmentAlertTasks();
             // Clear all popups vì data đã thay đổi
             setAlertPopups([]);
         };
@@ -293,11 +287,12 @@ export default function GlobalTaskAlerts() {
             window.removeEventListener('task-acknowledged', onAcknowledged);
             window.removeEventListener('task-changed', onTaskChanged);
         };
-    }, [loadTasks]);
+    }, []);
 
     // Kiểm tra deadline mỗi 30 giây → popup + âm thanh
     useEffect(() => {
         const interval = setInterval(() => {
+            if (document.visibilityState !== 'visible') return;
             const now = dayjs();
 
             tasks.forEach(task => {
@@ -393,6 +388,7 @@ export default function GlobalTaskAlerts() {
     // Alarm liên tục mỗi 5 giây khi ≤ 10 phút
     useEffect(() => {
         const alarmInterval = setInterval(() => {
+            if (document.visibilityState !== 'visible') return;
             const now = dayjs();
             const urgentTasks = tasks.filter(t => {
                 if (t.status === 'completed') return false;

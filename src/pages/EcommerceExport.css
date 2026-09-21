@@ -43,6 +43,36 @@
     box-shadow: 0 4px 18px rgba(25, 46, 35, 0.04);
 }
 
+/* The page-level toolbar now lives in the shared application header. */
+.ecommerce-toolbar--legacy-hidden {
+    display: none !important;
+}
+
+.ecommerce-header-toolbar {
+    display: grid;
+    /* Keep the search compact so export/import/settings actions remain visible. */
+    grid-template-columns: minmax(0, 1fr) minmax(170px, 240px) max-content;
+    align-items: center;
+    gap: 6px;
+    width: 100%;
+    min-width: 0;
+}
+
+.ecommerce-header-toolbar .ecommerce-status-group {
+    min-width: 0;
+}
+
+.ecommerce-header-toolbar .ecommerce-search {
+    min-width: 170px;
+    width: 100%;
+}
+
+.ecommerce-header-toolbar .ecommerce-app-header-actions {
+    min-width: max-content;
+    flex-wrap: nowrap;
+    gap: 6px !important;
+}
+
 .ecommerce-status-group,
 .ecommerce-toolbar-actions {
     min-width: 0;

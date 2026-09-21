@@ -73,6 +73,8 @@ echo [5/5] Packaging the NSIS setup wizard...
 set CSC_IDENTITY_AUTO_DISCOVERY=false
 call npx electron-builder --win nsis --config.directories.output=release-installer
 if errorlevel 1 goto build_failed
+call node scripts\verify-packaged-footprint.cjs release-installer\win-unpacked\resources\app
+if errorlevel 1 goto build_failed
 
 set INSTALLER=release-installer\DBYPOS-v%APP_VERSION%-setup.exe
 if not exist "%INSTALLER%" (

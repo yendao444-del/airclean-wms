@@ -1125,6 +1125,17 @@
   color: #fff;
   background: #c2410c;
 }
+
+.hu-return-reference {
+  display: block;
+  max-width: 150px;
+  overflow: hidden;
+  color: #a16207;
+  font-size: 10px;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .hu-action-btn.split {
   color: #0369a1;
   background: #f0f9ff;

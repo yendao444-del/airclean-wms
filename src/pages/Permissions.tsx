@@ -19,9 +19,10 @@ import {
 import { UserAddOutlined, EditOutlined, DeleteOutlined, LockOutlined, UnlockOutlined, KeyOutlined } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
 import { useAuth } from '../contexts/AuthContext';
+import { usePageHeader } from '../contexts/PageHeaderContext';
 import PayrollEmployeesManager from '../components/PayrollEmployeesManager';
 
-const { Title, Text } = Typography;
+const { Text } = Typography;
 
 interface User {
     id: number;
@@ -69,6 +70,7 @@ const ROLES = {
 
 export default function PermissionsPage() {
     const { user: currentUser } = useAuth(); // Get current logged-in user
+    const { setHeaderExtra, clearHeaderExtra } = usePageHeader();
     const [users, setUsers] = useState<User[]>([]);
     const [loading, setLoading] = useState(false);
     const [modalVisible, setModalVisible] = useState(false);
@@ -210,6 +212,15 @@ export default function PermissionsPage() {
             },
         });
     };
+
+    useEffect(() => {
+        setHeaderExtra(
+            <Button type="primary" icon={<UserAddOutlined />} onClick={handleAdd}>
+                Thêm người dùng
+            </Button>,
+        );
+        return () => clearHeaderExtra();
+    }, [clearHeaderExtra, setHeaderExtra]);
 
     const handleToggleActive = async (user: User) => {
         if (user.role === 'admin' && users.filter(u => u.role === 'admin' && u.isActive).length === 1) {
@@ -475,17 +486,6 @@ export default function PermissionsPage() {
 
     return (
         <div>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 24 }}>
-                <Title level={2} style={{ color: '#262626', margin: 0 }}>
-                    👥 Quản lý người dùng & Phân quyền
-                </Title>
-                <Space>
-                    <Button type="primary" icon={<UserAddOutlined />} size="large" onClick={handleAdd}>
-                        Thêm người dùng
-                    </Button>
-                </Space>
-            </div>
-
             <PayrollEmployeesManager
                 users={users}
                 usersLoading={loading}

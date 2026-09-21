@@ -24,6 +24,7 @@ import { PlusOutlined, EditOutlined, DeleteOutlined, ReloadOutlined, EyeOutlined
 import type { ColumnsType } from 'antd/es/table';
 import { useCurrentUser } from '../lib/hooks/useCurrentUser';
 import { useAuth } from '../contexts/AuthContext';
+import { usePageHeader } from '../contexts/PageHeaderContext';
 import { compressImportReceiptJpeg } from '../lib/importReceiptImage';
 import dayjs from 'dayjs';
 
@@ -232,6 +233,7 @@ async function compressImageToBase64(file: File, maxWidth = 1600, quality = 0.75
 export default function PurchasePage() {
     const currentUser = useCurrentUser();
     const { user } = useAuth();
+    const { setHeaderExtra, clearHeaderExtra } = usePageHeader();
     const isAdmin = user?.role === 'admin';
     const [purchases, setPurchases] = useState<Purchase[]>([]);
     const [suppliers, setSuppliers] = useState<Supplier[]>([]);
@@ -2333,6 +2335,29 @@ export default function PurchasePage() {
         return [...latestByPurchase.values()];
     }, [personalVatPenaltyAlerts]);
 
+    useEffect(() => {
+        setHeaderExtra(
+            <Space wrap className="purchase-page-actions">
+                {isAdmin && selectedRowKeys.length > 0 && (
+                    <Button danger icon={<DeleteOutlined />} onClick={handleBulkDelete}>
+                        Xóa đã chọn ({selectedRowKeys.length})
+                    </Button>
+                )}
+                <Button
+                    icon={<HistoryOutlined />}
+                    onClick={() => setActiveTab(activeTab === 'history' ? 'list' : 'history')}
+                    type={activeTab === 'history' ? 'primary' : 'default'}
+                >
+                    Lịch sử ({historyLogs.length})
+                </Button>
+                <Button type="primary" icon={<PlusOutlined />} onClick={handleAdd} loading={loadingData}>
+                    Tạo phiếu nhập
+                </Button>
+            </Space>,
+        );
+        return () => clearHeaderExtra();
+    }, [activeTab, clearHeaderExtra, historyLogs.length, isAdmin, loadingData, selectedRowKeys, setHeaderExtra]);
+
     return (
         <div>
             <style>{`
@@ -2341,11 +2366,7 @@ export default function PurchasePage() {
             `}</style>
             {renderDetailModal()}
             {/* ===== HEADER + TOOLBAR (tích hợp tìm kiếm) ===== */}
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, marginBottom: 16, flexWrap: 'wrap' }}>
-                <Title level={2} style={{ color: '#262626', margin: 0, whiteSpace: 'nowrap' }}>
-                    📦 Nhập hàng
-                </Title>
-
+            <div style={{ display: 'flex', justifyContent: 'flex-start', alignItems: 'center', gap: 12, marginBottom: 16, flexWrap: 'wrap' }}>
                 {/* Thanh tìm kiếm - chỉ hiện khi ở tab list */}
                 {activeTab === 'list' && (
                     <Space style={{ flex: 1, maxWidth: 600 }}>
@@ -2380,33 +2401,6 @@ export default function PurchasePage() {
                     </Space>
                 )}
 
-                <Space>
-                    {isAdmin && selectedRowKeys.length > 0 && (
-                        <Button
-                            danger
-                            icon={<DeleteOutlined />}
-                            onClick={handleBulkDelete}
-                        >
-                            Xóa đã chọn ({selectedRowKeys.length})
-                        </Button>
-                    )}
-                    <Button
-                        icon={<HistoryOutlined />}
-                        onClick={() => setActiveTab(activeTab === 'history' ? 'list' : 'history')}
-                        type={activeTab === 'history' ? 'primary' : 'default'}
-                    >
-                        Lịch sử ({historyLogs.length})
-                    </Button>
-                    <Button
-                        type="primary"
-                        icon={<PlusOutlined />}
-                        size="large"
-                        onClick={handleAdd}
-                        loading={loadingData}
-                    >
-                        Tạo phiếu nhập
-                    </Button>
-                </Space>
             </div>
 
             {/* ===== DANH SÁCH PHIẾU NHẬP ===== */}

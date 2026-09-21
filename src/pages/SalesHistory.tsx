@@ -1,6 +1,8 @@
 import { useState, useEffect, useMemo } from 'react';
 import { Modal, DatePicker, Select, message } from 'antd';
+import { Space } from 'antd';
 import dayjs from 'dayjs';
+import { usePageHeader } from '../contexts/PageHeaderContext';
 import './SalesHistory.css';
 
 const { RangePicker } = DatePicker;
@@ -16,6 +18,7 @@ const METHOD_CLASS: Record<string, string> = {
 };
 
 export default function SalesHistoryPage() {
+    const { setHeaderExtra, clearHeaderExtra } = usePageHeader();
     const [orders, setOrders] = useState<any[]>([]);
     const [loading, setLoading] = useState(true);
     const [dateRange, setDateRange] = useState<[dayjs.Dayjs, dayjs.Dayjs] | null>(null);
@@ -56,6 +59,34 @@ export default function SalesHistoryPage() {
 
     useEffect(() => { handleFilter(); }, [dateRange, filterMethod]);
 
+    useEffect(() => {
+        setHeaderExtra(
+            <Space className="sales-filters" wrap>
+                <RangePicker
+                    value={dateRange}
+                    onChange={(dates) => setDateRange(dates as any)}
+                    placeholder={['Từ ngày', 'Đến ngày']}
+                    style={{ width: 260 }}
+                    allowClear
+                />
+                <Select
+                    placeholder="Phương thức TT"
+                    allowClear
+                    style={{ width: 160 }}
+                    value={filterMethod}
+                    onChange={v => setFilterMethod(v || null)}
+                    options={[
+                        { value: 'cash', label: '💵 Tiền mặt' },
+                        { value: 'bank', label: '🏦 Chuyển khoản' },
+                        { value: 'card', label: '💳 Thẻ' },
+                        { value: 'momo', label: '📱 MoMo' },
+                    ]}
+                />
+            </Space>,
+        );
+        return () => clearHeaderExtra();
+    }, [clearHeaderExtra, dateRange, filterMethod, setHeaderExtra]);
+
     // Stats
     const stats = useMemo(() => {
         const totalRevenue = orders.reduce((s, o) => s + (o.total || 0), 0);
@@ -77,31 +108,6 @@ export default function SalesHistoryPage() {
 
     return (
         <div className="sales-history">
-            <div className="sales-header">
-                <h2 className="sales-title">📋 Lịch sử bán hàng</h2>
-                <div className="sales-filters">
-                    <RangePicker
-                        value={dateRange}
-                        onChange={(dates) => setDateRange(dates as any)}
-                        placeholder={['Từ ngày', 'Đến ngày']}
-                        style={{ width: 260 }}
-                        allowClear
-                    />
-                    <Select
-                        placeholder="Phương thức TT"
-                        allowClear style={{ width: 160 }}
-                        value={filterMethod}
-                        onChange={v => setFilterMethod(v || null)}
-                        options={[
-                            { value: 'cash', label: '💵 Tiền mặt' },
-                            { value: 'bank', label: '🏦 Chuyển khoản' },
-                            { value: 'card', label: '💳 Thẻ' },
-                            { value: 'momo', label: '📱 MoMo' },
-                        ]}
-                    />
-                </div>
-            </div>
-
             {/* Stats */}
             <div className="sales-stats">
                 <div className="sales-stat-card">

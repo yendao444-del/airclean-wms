@@ -328,6 +328,7 @@ export interface ElectronAPI {
     create: (data: any) => Promise<{ success: boolean; data?: any; createdCount?: number; skippedCount?: number; error?: string }>;
     updateTarget: (data: any) => Promise<{ success: boolean; data?: any; error?: string }>;
     deleteTarget: (batchId: number) => Promise<{ success: boolean; error?: string }>;
+    reportActual: (data: { reports: Array<{ batchId: number; reportedQty: number }> }) => Promise<{ success: boolean; data?: any; error?: string }>;
     submitEvidence: (data: any) => Promise<{ success: boolean; data?: any; error?: string }>;
     accept: (data: any) => Promise<{ success: boolean; data?: any; error?: string }>;
     issue: (data: any) => Promise<{ success: boolean; data?: any; error?: string }>;
@@ -335,10 +336,10 @@ export interface ElectronAPI {
       batchId: number,
       evidenceId: number,
     ) => Promise<{ success: boolean; data?: { url: string }; error?: string }>;
-    startMobileEvidence: (batchId: number) => Promise<{ success: boolean; url?: string; secure?: boolean; connecting?: boolean; employee?: string; productName?: string; expiresAt?: number; address?: string; error?: string }>;
+    startMobileEvidence: (batchId?: number) => Promise<{ success: boolean; url?: string; secure?: boolean; connecting?: boolean; employee?: string; productName?: string; expiresAt?: number; address?: string; error?: string }>;
     stopMobileEvidence: () => Promise<{ success: boolean; error?: string }>;
     onMobileEvidenceUpdated: (callback: (data: { batchId: number; submittedAt: string }) => void) => () => void;
-    onMobileEvidenceUrlUpdated: (callback: (data: { url: string; secure: boolean; connecting: boolean }) => void) => () => void;
+    onMobileEvidenceUrlUpdated: (callback: (data: { url: string; secure: boolean; connecting: boolean; error?: string }) => void) => () => void;
   };
   categories: {
     getAll: () => Promise<{
@@ -1215,7 +1216,11 @@ export interface ElectronAPI {
     ) => Promise<{ success: boolean; data?: any[]; error?: string }>;
   };
   returns: {
-    getAll: () => Promise<{ success: boolean; data?: any[]; error?: string }>;
+    getAll: (filters?: {
+      since?: string;
+      sinceField?: 'createdAt' | 'returnDate';
+      compact?: boolean;
+    }) => Promise<{ success: boolean; data?: any[]; error?: string }>;
     create: (
       data: any,
     ) => Promise<{ success: boolean; data?: any; error?: string }>;
@@ -1253,7 +1258,9 @@ export interface ElectronAPI {
   refunds: {
     getAll: (filters?: {
       since?: string;
+      sinceField?: 'createdAt' | 'refundDate';
       limit?: number;
+      compact?: boolean;
     }) => Promise<{ success: boolean; data?: any[]; error?: string }>;
     create: (
       data: any,
@@ -1502,7 +1509,26 @@ export interface ElectronAPI {
       };
       error?: string;
     }>;
+    createFine: (data: {
+      fine: any;
+      audit?: any;
+    }) => Promise<{
+      success: boolean;
+      data?: { extraFines: any[]; fineOverrides: Record<string, any>; fineAuditLog: any[] };
+      error?: string;
+    }>;
     deleteFine: (data: {
+      kind: "manual" | "system";
+      fine: any;
+      fineId?: string;
+      overrideKey?: string;
+      audit?: any;
+    }) => Promise<{
+      success: boolean;
+      data?: { extraFines: any[]; fineOverrides: Record<string, any>; fineAuditLog: any[] };
+      error?: string;
+    }>;
+    updateFine: (data: {
       kind: "manual" | "system";
       fine: any;
       fineId?: string;

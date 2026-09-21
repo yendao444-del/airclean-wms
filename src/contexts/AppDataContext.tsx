@@ -69,13 +69,21 @@ function fetchResource<T>(key: keyof AppDataSnapshot, loader: () => Promise<ApiL
 async function fetchAppDataSnapshot(requirements: Required<AppDataRequirements>): Promise<AppDataSnapshot> {
     const api = (window as any).electronAPI;
     if (!api) throw new Error('electronAPI is not available');
-    const since90 = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString();
+    // StockBalance only ranks sales from the last 30 days. Keep the shared
+    // snapshot aligned with that window instead of loading an unused quarter.
+    const since30 = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
     const untilNow = new Date().toISOString();
     const productsRequest = requirements.products
         ? fetchResource<Product>('products', () => safeListCall<Product>('products:getCatalogForSale', (api.products.getCatalogForSale?.() || api.products.getAll())))
         : Promise.resolve({ success: true, data: [] } as ApiListResult<Product>);
     const ecomExportsRequest = requirements.ecomExports
-        ? fetchResource<EcommerceExport>('ecomExports', () => safeListCall<EcommerceExport>('ecommerceExports:getAll', api.ecommerceExports.getAll({ since: since90, until: untilNow, limit: 2000 })))
+        ? fetchResource<EcommerceExport>('ecomExports', () => safeListCall<EcommerceExport>('ecommerceExports:getAll', api.ecommerceExports.getAll({
+            since: since30,
+            until: untilNow,
+            limit: 2000,
+            statusIn: ['completed'],
+            compact: true,
+        })))
         : Promise.resolve({ success: true, data: [] } as ApiListResult<EcommerceExport>);
     const combosRequest = requirements.combos
         ? fetchResource<Combo>('combos', () => safeListCall<Combo>('combos:getAll', api.combos.getAll()))

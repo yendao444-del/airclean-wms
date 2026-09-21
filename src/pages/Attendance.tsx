@@ -309,7 +309,18 @@ const normalizeReturnFineDates = async (api: any, extraFines: FineRecord[]) => {
         return { fines: extraFines || [], changed: false };
     }
 
-    const returnsRes = await api.returns.getAll();
+    const earliestFineAt = (extraFines || [])
+        .filter(fine => fine.source === 'returns' && dayjs(fine.date).isValid())
+        .map(fine => dayjs(fine.date).valueOf())
+        .sort((a, b) => a - b)[0];
+    const since = Number.isFinite(earliestFineAt)
+        ? dayjs(earliestFineAt).subtract(366, 'day').startOf('day').toISOString()
+        : undefined;
+    const returnsRes = await api.returns.getAll({
+        compact: true,
+        since,
+        sinceField: 'returnDate',
+    });
     if (!returnsRes?.success || !Array.isArray(returnsRes.data)) {
         return { fines: extraFines || [], changed: false };
     }
@@ -4024,7 +4035,7 @@ export default function Attendance() {
         // NV Chính thức theo Plan mục 3
         officialFineLevel1: 30000,   // 6-15p
         officialFineLevel2: 70000,   // 16-30p
-        officialFineLevel3: 150000,  // >30p
+        officialFineLevel3: 120000,  // >30p
         // NV Thời vụ theo Plan mục 3
         seasonalFineLevel1: 10000,
         seasonalFineLevel2: 30000,
@@ -4282,8 +4293,9 @@ export default function Attendance() {
                     return;
                 }
 
-                // Hai nguồn độc lập được tải song song để rút ngắn thời gian mở trang.
-                let knownUsernames: string[] = [];
+                // Start both reads together, but only the attendance snapshot
+                // gates the first paint. The account roster is auxiliary data
+                // used by fines/face registration and can arrive afterwards.
                 const measurePrimary = async (label: string, request: Promise<any>) => {
                     const requestedAt = performance.now();
                     try {
@@ -4292,40 +4304,14 @@ export default function Attendance() {
                         console.info(`[Attendance:load] ${label} ms:`, Math.round(performance.now() - requestedAt));
                     }
                 };
-                const [usersRes, rs] = await Promise.all([
-                    measurePrimary('users', api.users.getAll()).catch(() => null),
-                    measurePrimary(
-                        'attendanceData',
-                        api.attendance?.getInitialData
-                            ? api.attendance.getInitialData()
-                            : api.appConfig.get('attendanceData')
-                    ),
-                ]);
-                try {
-                    if (usersRes?.success && usersRes.data) {
-                        setSystemUsers(usersRes.data);
-                        knownUsernames = usersRes.data
-                            .filter((u: any) => u?.username && u.username.toLowerCase() !== 'admin')
-                            .map((u: any) => u.username);
-                        const sysUsernames = usersRes.data
-                            .filter((u: any) =>
-                                u?.username &&
-                                u.username.toLowerCase() !== 'admin' &&
-                                u.isActive !== false &&
-                                u.operationalAssignee !== false
-                            )
-                            .map((u: any) => u.username);
-                        setSystemUsernames(sysUsernames);
-                    }
-                } catch (_) { }
-
-                // Hàm migrate username cũ (toan → nguyendinhtoan) sang username Quản trị
-                const migrateUsername = (uname: string): string => {
-                    if (!uname) return uname;
-                    if (knownUsernames.includes(uname)) return uname; // đã đúng
-                    const matched = knownUsernames.find(su => su.endsWith(uname));
-                    return matched || uname;
-                };
+                const usersPromise = measurePrimary('users', api.users.getAll()).catch(() => null);
+                const attendancePromise = measurePrimary(
+                    'attendanceData',
+                    api.attendance?.getInitialData
+                        ? api.attendance.getInitialData()
+                        : api.appConfig.get('attendanceData')
+                );
+                const rs = await attendancePromise;
 
                 if (rs && rs.success && rs.data) {
                     const d = rs.data;
@@ -4339,9 +4325,7 @@ export default function Attendance() {
                     }
                     if (d.employees && Array.isArray(d.employees) && d.employees.length > 0) {
                         const merged = d.employees.map((emp: any) => {
-                            const username = emp.username
-                                ? migrateUsername(emp.username)
-                                : (initialEmployees.find(ie => ie.id === emp.id)?.username || '');
+                            const username = emp.username || (initialEmployees.find(ie => ie.id === emp.id)?.username || '');
                             return { ...emp, username };
                         });
                         setEmployees(merged);
@@ -4367,11 +4351,40 @@ export default function Attendance() {
                 } else {
                     setEmployees(initialEmployees);
                 }
+
+                // The account roster is auxiliary to the first Attendance
+                // render. Apply it when ready and repair legacy usernames
+                // without holding the initial page gate.
+                void usersPromise.then((usersRes) => {
+                    try {
+                        if (!usersRes?.success || !Array.isArray(usersRes.data)) return;
+                        const users = usersRes.data;
+                        setSystemUsers(users);
+                        const knownUsernames = users
+                            .filter((u: any) => u?.username && u.username.toLowerCase() !== 'admin')
+                            .map((u: any) => u.username);
+                        const sysUsernames = users
+                            .filter((u: any) =>
+                                u?.username &&
+                                u.username.toLowerCase() !== 'admin' &&
+                                u.isActive !== false &&
+                                u.operationalAssignee !== false
+                            )
+                            .map((u: any) => u.username);
+                        setSystemUsernames(sysUsernames);
+                        setEmployees(current => current.map((emp: any) => {
+                            if (!emp?.username) return emp;
+                            if (knownUsernames.includes(emp.username)) return emp;
+                            const matched = knownUsernames.find((name: string) => name.endsWith(emp.username));
+                            return matched ? { ...emp, username: matched } : emp;
+                        }));
+                    } catch (_) { }
+                });
             } catch (err) {
                 console.error('Lỗi tải dữ liệu chấm công từ DB:', err);
             } finally {
                 setIsDbLoaded(true);
-                console.info('[Attendance:load] primary ms:', Math.round(performance.now() - startedAt));
+                console.info('[Attendance:load] interactive core ms:', Math.round(performance.now() - startedAt));
             }
         };
         void loadData();
@@ -4815,6 +4828,8 @@ export default function Attendance() {
     const [packingOrderLogsData, setPackingOrderLogsData] = useState<PackingOrderLog[]>([]);
     const [packingRewardNow, setPackingRewardNow] = useState(() => dayjs());
     const fineSourcesRangeKeyRef = useRef('');
+    const fineSourcePromisesRef = useRef<Map<string, Promise<void>>>(new Map());
+    const dailyTaskTrackingPromiseRef = useRef<{ key: string; promise: Promise<void> } | null>(null);
 
     const packingOrderLogsRef = useRef<PackingOrderLog[]>([]);
     const packingOrderCacheRef = useRef<Map<string, PackingOrderLog[]>>(new Map());
@@ -5134,48 +5149,80 @@ export default function Attendance() {
     };
 
     // === State cho điểm danh online ===
-    const loadPurchaseVatTracking = async (since?: string, requestKey?: string) => {
+    const runFineSource = (key: string, loader: () => Promise<void>) => {
+        const existing = fineSourcePromisesRef.current.get(key);
+        if (existing) return existing;
+        const promise = loader().finally(() => {
+            if (fineSourcePromisesRef.current.get(key) === promise) fineSourcePromisesRef.current.delete(key);
+        });
+        fineSourcePromisesRef.current.set(key, promise);
+        return promise;
+    };
+
+    const loadPurchaseVatTracking = (since?: string, requestKey?: string) => runFineSource(`vat:${requestKey || fineSourcesRangeKeyRef.current || 'current'}`, async () => {
         try {
             const api = (window as any).electronAPI;
             const result = api.purchases.getVatPenaltyReadModel
                 ? await api.purchases.getVatPenaltyReadModel({ since })
                 : await api.purchases.getAll({ since, limit: 10000 });
             if (!requestKey || fineSourcesRangeKeyRef.current === requestKey) {
-                startBackgroundTransition(() => setPurchaseVatTracking(result?.success && Array.isArray(result.data) ? result.data : []));
+                if (result?.success && Array.isArray(result.data)) {
+                    startBackgroundTransition(() => setPurchaseVatTracking(result.data));
+                } else {
+                    console.warn('[Attendance] VAT source returned no usable data; keeping last snapshot.');
+                }
             }
         } catch (error) {
             console.error('Lỗi tải dữ liệu VAT nhập hàng:', error);
-            if (!requestKey || fineSourcesRangeKeyRef.current === requestKey) setPurchaseVatTracking([]);
         }
-    };
+    });
 
-    const loadReturnOverdueTracking = async (requestKey?: string) => {
+    const loadReturnOverdueTracking = (requestKey?: string) => runFineSource(`returns:${requestKey || fineSourcesRangeKeyRef.current || 'current'}`, async () => {
         try {
             const api = (window as any).electronAPI;
-            const result = await api.returns.getAll({ compact: true });
+            // A return can generate up to 366 historical fine stages. Load
+            // only records that could still contribute to the selected
+            // period instead of scanning the latest 500 rows globally.
+            const since = overviewDateRange[0].subtract(366, 'day').startOf('day').toISOString();
+            const result = await api.returns.getAll({ compact: true, since, sinceField: 'returnDate' });
             if (!requestKey || fineSourcesRangeKeyRef.current === requestKey) {
-                startBackgroundTransition(() => setReturnOverdueTracking(result?.success && Array.isArray(result.data) ? result.data : []));
+                if (result?.success && Array.isArray(result.data)) {
+                    startBackgroundTransition(() => setReturnOverdueTracking(result.data));
+                } else {
+                    console.warn('[Attendance] Return source returned no usable data; keeping last snapshot.');
+                }
             }
         } catch (error) {
             console.error('Lỗi tải dữ liệu trả hàng quá hạn:', error);
-            if (!requestKey || fineSourcesRangeKeyRef.current === requestKey) setReturnOverdueTracking([]);
         }
-    };
+    });
 
-    const loadRefundOverdueTracking = async (requestKey?: string) => {
+    const loadRefundOverdueTracking = (requestKey?: string) => runFineSource(`refunds:${requestKey || fineSourcesRangeKeyRef.current || 'current'}`, async () => {
         try {
             const api = (window as any).electronAPI;
-            const result = await api.refunds.getAll({ compact: true });
+            // Keep the same policy window as returns so old completed rows do
+            // not occupy the IPC payload when computing current fines.
+            const since = overviewDateRange[0].subtract(366, 'day').startOf('day').toISOString();
+            const result = await api.refunds.getAll({ compact: true, since, sinceField: 'refundDate' });
             if (!requestKey || fineSourcesRangeKeyRef.current === requestKey) {
-                startBackgroundTransition(() => setRefundOverdueTracking(result?.success && Array.isArray(result.data) ? result.data : []));
+                if (result?.success && Array.isArray(result.data)) {
+                    startBackgroundTransition(() => setRefundOverdueTracking(result.data));
+                } else {
+                    console.warn('[Attendance] Refund source returned no usable data; keeping last snapshot.');
+                }
             }
         } catch (error) {
             console.error('Lỗi tải dữ liệu hàng hoàn quá hạn:', error);
-            if (!requestKey || fineSourcesRangeKeyRef.current === requestKey) setRefundOverdueTracking([]);
         }
-    };
+    });
 
     const loadDailyTaskTracking = async (requestKey?: string) => {
+        const dedupeKey = requestKey || fineSourcesRangeKeyRef.current || 'current';
+        if (dailyTaskTrackingPromiseRef.current?.key === dedupeKey) {
+            return dailyTaskTrackingPromiseRef.current.promise;
+        }
+
+        const task = (async () => {
         const isCurrentRequest = () => !requestKey || fineSourcesRangeKeyRef.current === requestKey;
         try {
             const api = (window as any).electronAPI;
@@ -5185,25 +5232,29 @@ export default function Attendance() {
                     startDate: overviewDateRange[0].format('YYYY-MM-DD'),
                     endDate: overviewDateRange[1].format('YYYY-MM-DD'),
                 }),
-                Promise.resolve(api.stockBalance?.getAll?.({ limit: 500 })).catch(() => null),
+                isAdmin ? Promise.resolve(api.stockBalance?.getAll?.({ limit: 500 })).catch(() => null) : Promise.resolve(null),
                 isAdmin ? Promise.resolve(api.stockCheck.getSessions({ maintenance: false })).catch(() => null) : Promise.resolve(null),
             ]);
             if (!isCurrentRequest()) return;
             startBackgroundTransition(() => {
-                setDailyTaskTracking(result?.success && Array.isArray(result.data) ? result.data : []);
-                setEvidencePenaltyRecords(penaltyResult?.success && Array.isArray(penaltyResult.data) ? penaltyResult.data : []);
-                setStockBalanceRecords(balanceResult?.success && Array.isArray(balanceResult.data) ? balanceResult.data : []);
-                setStockCheckSessions(isAdmin && stockCheckResult?.success && Array.isArray(stockCheckResult.data)
-                    ? stockCheckResult.data
-                    : []);
+                if (result?.success && Array.isArray(result.data)) setDailyTaskTracking(result.data);
+                if (penaltyResult?.success && Array.isArray(penaltyResult.data)) setEvidencePenaltyRecords(penaltyResult.data);
+                if (balanceResult?.success && Array.isArray(balanceResult.data)) setStockBalanceRecords(balanceResult.data);
+                if (isAdmin && stockCheckResult?.success && Array.isArray(stockCheckResult.data)) {
+                    setStockCheckSessions(stockCheckResult.data);
+                }
             });
         } catch (error) {
             console.error('Lỗi tải dữ liệu deadline công việc:', error);
-            if (isCurrentRequest()) {
-                setDailyTaskTracking([]);
-                setEvidencePenaltyRecords([]);
-                setStockBalanceRecords([]);
-                setStockCheckSessions([]);
+        }
+        })();
+
+        dailyTaskTrackingPromiseRef.current = { key: dedupeKey, promise: task };
+        try {
+            return await task;
+        } finally {
+            if (dailyTaskTrackingPromiseRef.current?.promise === task) {
+                dailyTaskTrackingPromiseRef.current = null;
             }
         }
     };
@@ -5809,6 +5860,37 @@ export default function Attendance() {
             if (!isPastStockCheckWorkingDay(date)) continue;
 
             const dateKey = date.format('YYYY-MM-DD');
+            const isSaturdayFullCheck = date.day() === 6;
+            if (isSaturdayFullCheck) {
+                const weekendSession = stockCheckSessions.find((s: any) =>
+                    s.date === dateKey && s.type === 'full'
+                );
+                const completedWeekendCheck = Boolean(
+                    weekendSession?.status === 'completed' && weekendSession?.completedAt
+                );
+                if (completedWeekendCheck) continue;
+
+                // Saturday's full-warehouse count is a shared obligation. If
+                // it is missing, split the same fine across every active
+                // official employee instead of blaming the rotated assignee.
+                employees
+                    .filter(emp => emp.type === 'Official')
+                    .filter(emp => !systemUsers.some((account: any) =>
+                        account?.employmentStatus === 'resigned'
+                        && (normalizeAttendanceText(account.username) === normalizeAttendanceText(emp.username)
+                            || normalizeAttendanceText(account.fullName) === normalizeAttendanceText(emp.name))
+                    ))
+                    .forEach(employee => fines.push({
+                        empId: employee.id,
+                        type: 'Thiếu kiểm hàng toàn bộ cuối tuần',
+                        detail: `Không kiểm toàn bộ kho thứ 7 ${date.format('DD/MM/YYYY')}`,
+                        amount: STOCK_CHECK_MISSING_FINE,
+                        date: date.hour(20).minute(0).second(0).millisecond(0).toISOString(),
+                        source: 'stock_check_missing' as any,
+                    }));
+                continue;
+            }
+
             // A daily session is exempt when it is submitted, or when every SKU
             // assigned for that day was already balanced in a full-stock check.
             const dailySession = stockCheckSessions.find((s: any) =>
@@ -6851,37 +6933,50 @@ const openConfigModal = () => {
                     after: savedFine,
                     note: 'Sửa khoản phạt: ' + (employees.find(e => e.id === values.empId)?.name || '') + ' — ' + fmt(values.amount) + ' — "' + values.detail + '"',
                 }];
-                const saved = await persistAttendanceSnapshotNow({ extraFines: nextExtraFines, fineOverrides: nextFineOverrides, fineAuditLog: nextFineAuditLog });
-                if (!saved) {
-                    message.error('Chưa lưu được khoản phạt vào DB. Vui lòng thử lại trước khi reload app.');
+                const updateFine = (window as any).electronAPI?.attendance?.updateFine;
+                if (typeof updateFine !== 'function') {
+                    message.error('Ứng dụng chưa hỗ trợ cập nhật khoản phạt. Vui lòng cập nhật phiên bản.');
+                    return;
+                }
+                const result = await updateFine({
+                    kind: editingFine.isManual ? 'manual' : 'system',
+                    fine: savedFine,
+                    fineId: editingFine.isManual ? editingFine.fine.id : undefined,
+                    overrideKey: editingFine.isManual ? undefined : editingFine.overrideKey,
+                    audit: {
+                        note: 'Sửa khoản phạt: ' + (employees.find(e => e.id === values.empId)?.name || '') + ' — ' + fmt(values.amount) + ' — "' + values.detail + '"',
+                    },
+                });
+                if (!result?.success || !result.data) {
+                    message.error(result?.error || 'Chưa lưu được khoản phạt vào DB. Vui lòng thử lại.');
                     return;
                 }
 
-                setExtraFines(nextExtraFines);
-                setFineOverrides(nextFineOverrides);
-                setFineAuditLog(nextFineAuditLog);
+                setExtraFines((result.data.extraFines || []).map((item: FineRecord, index: number) => ensureFineId(item, index)));
+                setFineOverrides(result.data.fineOverrides || {});
+                setFineAuditLog(result.data.fineAuditLog || []);
                 setEditingFine(null);
                 message.success('Đã cập nhật khoản phạt.');
             } else {
-                nextExtraFines = [...extraFines, nextFine];
-
-                nextFineAuditLog = [...fineAuditLog, {
-                    id: 'flog-' + Date.now(),
-                    action: 'create',
-                    timestamp: now,
-                    changedBy: fineAuditActor.username,
-                    changedByName: fineAuditActor.displayName,
-                    after: nextFine,
-                    note: 'Thêm phạt: ' + (employees.find(e => e.id === values.empId)?.name || '') + ' — ' + fmt(values.amount) + ' — "' + values.detail + '"',
-                }];
-                const saved = await persistAttendanceSnapshotNow({ extraFines: nextExtraFines, fineAuditLog: nextFineAuditLog });
-                if (!saved) {
-                    message.error('Chưa lưu được khoản phạt vào DB. Vui lòng thử lại trước khi reload app.');
+                const createFine = (window as any).electronAPI?.attendance?.createFine;
+                if (typeof createFine !== 'function') {
+                    message.error('Ứng dụng chưa hỗ trợ thêm khoản phạt. Vui lòng cập nhật phiên bản.');
+                    return;
+                }
+                const result = await createFine({
+                    fine: nextFine,
+                    audit: {
+                        note: 'Thêm phạt: ' + (employees.find(e => e.id === values.empId)?.name || '') + ' — ' + fmt(values.amount) + ' — "' + values.detail + '"',
+                    },
+                });
+                if (!result?.success || !result.data) {
+                    message.error(result?.error || 'Chưa lưu được khoản phạt vào DB. Vui lòng thử lại.');
                     return;
                 }
 
-                setExtraFines(nextExtraFines);
-                setFineAuditLog(nextFineAuditLog);
+                setExtraFines((result.data.extraFines || []).map((item: FineRecord, index: number) => ensureFineId(item, index)));
+                setFineOverrides(result.data.fineOverrides || {});
+                setFineAuditLog(result.data.fineAuditLog || []);
                 message.success(`Đã thêm phạt ${fmt(values.amount)} cho ${employees.find(e => e.id === values.empId)?.name} (Đã lưu lịch sử)`);
             }
 
@@ -6897,7 +6992,7 @@ const openConfigModal = () => {
             fineSubmitLockRef.current = false;
             setFineSubmitting(false);
         }
-    }, [fineForm, employees, fineAuditActor, editingFine, extraFines, fineOverrides, fineAuditLog, persistAttendanceSnapshotNow]);
+    }, [fineForm, employees, fineAuditActor, editingFine, extraFines, fineOverrides, fineAuditLog]);
 
     // === Xóa Phạt Thủ Công handler ===
     const handleDeleteFine = useCallback((fineIndex: number, fineId?: string) => {

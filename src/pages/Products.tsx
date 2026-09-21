@@ -20,6 +20,7 @@ import type { Product, Category } from '../types/electron';
 import type { MenuProps } from 'antd';
 import { useCurrentUser } from '../lib/hooks/useCurrentUser';
 import { useAuth } from '../contexts/AuthContext';
+import { usePageHeader } from '../contexts/PageHeaderContext';
 import './Products.css';
 
 const { Title } = Typography;
@@ -33,6 +34,7 @@ interface GoodsCompany {
 export default function ProductsPage() {
     const currentUser = useCurrentUser();
     const { user } = useAuth();
+    const { setHeaderExtra, clearHeaderExtra } = usePageHeader();
     const canViewInventoryStock = user?.role === 'admin';
     const [products, setProducts] = useState<Product[]>([]);
     const [categories, setCategories] = useState<Category[]>([]);
@@ -1072,52 +1074,28 @@ export default function ProductsPage() {
         );
     }, [products, searchText]);
 
+    useEffect(() => {
+        setHeaderExtra(
+            <Space wrap className="products-page-actions">
+                {selectedRowKeys.length > 0 && (
+                    <Button danger icon={<DeleteOutlined />} onClick={handleBulkDelete}>
+                        Xóa đã chọn ({selectedRowKeys.length})
+                    </Button>
+                )}
+                <Button icon={<ReloadOutlined />} onClick={loadProducts} loading={loading}>
+                    Tải lại
+                </Button>
+                <Button type="primary" icon={<PlusOutlined />} onClick={handleAdd}>
+                    Thêm sản phẩm
+                </Button>
+            </Space>,
+        );
+        return () => clearHeaderExtra();
+    }, [clearHeaderExtra, loading, selectedRowKeys, setHeaderExtra]);
+
 
     return (
         <div>
-            <div style={{
-                display: 'flex',
-                justifyContent: 'space-between',
-                alignItems: 'flex-start',
-                marginBottom: 24,
-                flexWrap: 'wrap',
-                gap: 16
-            }}>
-                <Title level={2} style={{ color: '#262626', margin: 0, flex: '1 1 auto', minWidth: 250 }}>
-                    📦 Danh sách sản phẩm
-                    {selectedRowKeys.length > 0 && (
-                        <span style={{ fontSize: 14, fontWeight: 400, color: '#00ab56', marginLeft: 12 }}>
-                            ({selectedRowKeys.length} đã chọn)
-                        </span>
-                    )}
-                </Title>
-                <Space wrap style={{ flex: '0 1 auto' }}>
-                    {selectedRowKeys.length > 0 && (
-                        <Button
-                            danger
-                            icon={<DeleteOutlined />}
-                            onClick={handleBulkDelete}
-                            size="large"
-                        >
-                            <span className="hide-on-small">Xóa đã chọn ({selectedRowKeys.length})</span>
-                            <span className="show-on-small">Xóa ({selectedRowKeys.length})</span>
-                        </Button>
-                    )}
-                    <Button
-                        icon={<ReloadOutlined />}
-                        onClick={loadProducts}
-                        loading={loading}
-                        size="large"
-                    >
-                        <span className="hide-on-small">Tải lại</span>
-                    </Button>
-                    <Button type="primary" icon={<PlusOutlined />} size="large" onClick={handleAdd}>
-                        <span className="hide-on-small">Thêm sản phẩm</span>
-                        <span className="show-on-small">Thêm</span>
-                    </Button>
-                </Space>
-            </div>
-
             {/* Search Bar - Responsive */}
             <div style={{ marginBottom: 16 }}>
                 <Input.Search

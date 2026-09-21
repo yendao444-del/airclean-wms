@@ -60,7 +60,9 @@ const DATA_SAFETY_ALLOWED_CHANNELS = new Set([
   "attendance:updatePayrollOverride",
   "attendance:updatePayrollLock",
   "attendance:updatePackingCommission",
+  "attendance:createFine",
   "attendance:deleteFine",
+  "attendance:updateFine",
   // Combo deletion is an isolated, audited row delete used to remove
   // redundant one-component combo records without touching base products.
   "combos:delete",
@@ -123,6 +125,7 @@ const DATA_SAFETY_ALLOWED_CHANNELS = new Set([
   "prepack:create",
   "prepack:updateTarget",
   "prepack:deleteTarget",
+  "prepack:reportActual",
   "prepack:submitEvidence",
   "prepack:accept",
   "prepack:issue",
@@ -258,6 +261,7 @@ const {
   normalizeConfig: normalizeAttendanceRewardConfig,
   resolveEmployeeId,
 } = require("./attendance-rewards");
+const { reconcileEcommerceOrderFines } = require("./ecommerce-order-fines");
 
 // 📦 Offline Queue — lưu scan khi mất mạng, sync lại khi có mạng
 const offlineQueue = require("./offline-queue");
@@ -502,6 +506,45 @@ async function deleteDailyEvidenceFromR2(objectKey) {
   dailyEvidenceR2ImageCache.delete(objectKey);
   return { preserved: false };
 }
+
+function isRetainedDailyEvidenceKey(objectKey) {
+  const match = String(objectKey || "").match(/^daily-tasks\/\d+\/(\d{4}-\d{2}-\d{2})\/[a-f0-9]{64}\.(?:jpg|png|webp)$/);
+  if (!match) return false;
+  const objectDate = new Date(`${match[1]}T00:00:00Z`);
+  const cutoff = new Date();
+  cutoff.setUTCHours(0, 0, 0, 0);
+  cutoff.setUTCDate(cutoff.getUTCDate() - 1);
+  return objectDate >= cutoff;
+}
+
+async function cleanupExpiredPrepackEvidence() {
+  if (!prisma?.prepackEvidence) return { deleted: 0 };
+  const cutoff = new Date();
+  cutoff.setHours(0, 0, 0, 0);
+  cutoff.setDate(cutoff.getDate() - 1);
+  const stale = await prisma.prepackEvidence.findMany({
+    where: { createdAt: { lt: cutoff } },
+    select: { id: true, objectKey: true },
+    orderBy: { createdAt: "asc" },
+    take: 300,
+  });
+  let deleted = 0;
+  for (const evidence of stale) {
+    const key = String(evidence.objectKey || "");
+    if (isRetainedDailyEvidenceKey(key)) continue;
+    try {
+      if (!key.startsWith("prepack/")) await requestDailyEvidenceR2(key, { method: "DELETE" });
+      await prisma.prepackEvidence.delete({ where: { id: evidence.id } });
+      deleted += 1;
+    } catch (error) {
+      console.warn(`[PrepackEvidence] Could not expire ${key}:`, error?.message || error);
+    }
+  }
+  return { deleted };
+}
+
+setTimeout(() => void cleanupExpiredPrepackEvidence().catch((error) => console.warn("Prepack evidence cleanup error:", error?.message || error)), 60_000);
+setInterval(() => void cleanupExpiredPrepackEvidence().catch((error) => console.warn("Prepack evidence cleanup error:", error?.message || error)), 24 * 60 * 60 * 1000);
 
 // Compensation is limited to exact object keys uploaded by the current IPC
 // call. It cannot delete pre-existing evidence and is safe in data-safety mode.
@@ -2760,7 +2803,6 @@ ipcMain.handle("dashboard:getSummary", async (event, params = {}) => {
         return [];
       }
     };
-    const dateIn = (date, start, end) => date >= start && date <= end;
     let queryPromise = dashboardSummaryInFlight.get(cacheKey);
     if (!queryPromise) {
       queryPromise = prisma.$queryRaw`
@@ -2838,6 +2880,18 @@ ipcMain.handle("dashboard:getSummary", async (event, params = {}) => {
             ) days
           ), '[]'::jsonb) AS "chartRows",
           COALESCE((
+            SELECT jsonb_build_object(
+              'count', COUNT(*)::int,
+              'total', COALESCE(SUM(purchase."total"), 0)::float
+            )
+            FROM "PurchaseOrder" purchase
+            WHERE purchase."status" <> 'cancelled'
+              AND purchase."createdAt" >= ${from}
+              AND purchase."createdAt" <= ${to}
+              AND COALESCE(purchase."receivedAt", purchase."createdAt") >= ${from}
+              AND COALESCE(purchase."receivedAt", purchase."createdAt") <= ${to}
+          ), '{"count":0,"total":0}'::jsonb) AS "purchaseStats",
+          COALESCE((
             SELECT jsonb_agg(to_jsonb(purchases))
             FROM (
               SELECT purchase."id", purchase."total",
@@ -2850,7 +2904,10 @@ ipcMain.handle("dashboard:getSummary", async (event, params = {}) => {
               WHERE purchase."status" <> 'cancelled'
                 AND purchase."createdAt" >= ${from}
                 AND purchase."createdAt" <= ${to}
+                AND COALESCE(purchase."receivedAt", purchase."createdAt") >= ${from}
+                AND COALESCE(purchase."receivedAt", purchase."createdAt") <= ${to}
               ORDER BY purchase."createdAt" DESC
+              LIMIT 4
             ) purchases
           ), '[]'::jsonb) AS "purchases",
           COALESCE((
@@ -2886,6 +2943,7 @@ ipcMain.handle("dashboard:getSummary", async (event, params = {}) => {
     const previousSales = salesSummary.previousSales || [];
     const itemTotals = salesSummary.itemTotals || [];
     const chartRows = salesSummary.chartRows || [];
+    const purchaseStats = salesSummary.purchaseStats || {};
     const purchases = salesSummary.purchases || [];
     const recentPurchases = salesSummary.recentPurchases || [];
 
@@ -2974,13 +3032,8 @@ ipcMain.handle("dashboard:getSummary", async (event, params = {}) => {
           (dailyRevenueByDate[key] || 0) + Number(row.revenue || 0);
     }
 
-    const rangePurchases = purchases.filter((p) =>
-      dateIn(new Date(p.receivedAt || p.createdAt), from, to),
-    );
-    const purchaseAmount = rangePurchases.reduce(
-      (sum, p) => sum + Number(p.total || 0),
-      0,
-    );
+    const purchaseCount = Number(purchaseStats.count || 0);
+    const purchaseAmount = Number(purchaseStats.total || 0);
     const formatPurchase = (p) => ({
       id: p.id,
       supplierName: p.supplierName || "",
@@ -3002,9 +3055,9 @@ ipcMain.handle("dashboard:getSummary", async (event, params = {}) => {
       totalStock,
       productCount: products.length,
       lowStockCount,
-      purchaseCount: rangePurchases.length,
+      purchaseCount,
       purchaseAmount,
-      purchases: rangePurchases.slice(0, 4).map(formatPurchase),
+      purchases: purchases.map(formatPurchase),
       recentPurchases: recentPurchases.map(formatPurchase),
       dailyRevenueByDate,
       topProducts: Array.from(topMap.values())
@@ -7310,6 +7363,15 @@ ipcMain.handle("handlingUnits:getWorkspace", async (_event, options = {}) => {
     } catch (txErr) {
       console.warn("Load transactions error:", txErr.message);
     }
+    const returnReferenceByUnit = new Map(
+      (Array.isArray(recentTransactions) ? recentTransactions : [])
+        .filter((item) => /tạo kiện hàng hoàn/i.test(String(item?.type || "")) && item?.unitId && item?.reference)
+        .map((item) => [String(item.unitId).trim().toUpperCase(), String(item.reference).trim()]),
+    );
+    register = register.map((unit) => ({
+      ...unit,
+      returnReference: returnReferenceByUnit.get(String(unit.id).trim().toUpperCase()) || undefined,
+    }));
     const persistedWithdrawalCodes = new Set(
       (Array.isArray(withdrawalMarkers) ? withdrawalMarkers : []).map((row) =>
         String(row.key || "").slice("handlingUnitWithdrawal:".length).trim().toUpperCase(),
@@ -9000,6 +9062,7 @@ let telegramWmsLeaseOwnerLabel = "";
 let telegramWmsLastUpdateId = 0;
 let telegramWmsPollRequest = null;
 let telegramWmsPollTimer = null;
+let telegramWmsStartTimer = null;
 let telegramWmsLastPollAt = null;
 let telegramWmsLastError = null;
 let telegramWmsOffsetLoaded = false;
@@ -9805,6 +9868,19 @@ async function executeKhuiKien(
         if (pendingConflict) {
           throw new Error(buildPendingHandlingUnitBlockMessage(unit.sku, pendingConflict, "khui kiện mới"));
         }
+        const returnConflict = await tx.handlingUnit.findFirst({
+          where: {
+            sku: unit.sku,
+            code: { not: normalizedCode },
+            status: "opened",
+            remainingQuantity: { gt: 0 },
+            packagingName: { contains: "Hàng hoàn", mode: "insensitive" },
+          },
+          select: { code: true, remainingQuantity: true, baseUnit: true, packagingName: true },
+        });
+        if (returnConflict) {
+          throw new Error(buildReturnHandlingUnitBlockMessage(unit.sku, returnConflict, "khui kiện mới"));
+        }
         if (packageCategory !== "LE") {
           const conflict = await tx.handlingUnit.findFirst({
             where: {
@@ -9868,7 +9944,8 @@ async function executeKhuiKien(
       if (
         dbErr.message.includes("đang mở") ||
         dbErr.message.includes("đã hết") ||
-        dbErr.message.includes("chờ kiểm")
+        dbErr.message.includes("chờ kiểm") ||
+        dbErr.message.includes("hàng hoàn")
       )
         throw dbErr;
       if (dbErr?.code === "P2002" && operationKey) {
@@ -9906,6 +9983,18 @@ async function executeKhuiKien(
     throw new Error(buildPendingHandlingUnitBlockMessage(
       target.sku || target.skuName,
       pendingConflict,
+      "khui kiện mới",
+    ));
+  }
+  const returnConflict = sameSkuUnits.find((candidate) =>
+    (candidate.status === "opened" || candidate.status === "Đang sử dụng")
+    && Number(candidate.remainingQuantity ?? candidate.currentPcs ?? 0) > 0
+    && isReturnHandlingUnitPackage(candidate.packagingName || candidate.packageType),
+  );
+  if (returnConflict) {
+    throw new Error(buildReturnHandlingUnitBlockMessage(
+      target.sku || target.skuName,
+      returnConflict,
       "khui kiện mới",
     ));
   }
@@ -9992,6 +10081,14 @@ function getHandlingUnitPackageCategory(value) {
   return "LE";
 }
 
+function isReturnHandlingUnitPackage(value) {
+  return String(value || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .includes("hang hoan");
+}
+
 function buildPendingHandlingUnitBlockMessage(sku, pendingUnit, action) {
   const code = pendingUnit?.code || pendingUnit?.id || "không xác định";
   const remaining = Number(
@@ -9999,6 +10096,11 @@ function buildPendingHandlingUnitBlockMessage(sku, pendingUnit, action) {
   );
   const baseUnit = pendingUnit?.baseUnit || pendingUnit?.unitName || "đơn vị";
   return `Chưa thể ${action}. SKU ${sku} có kiện ${code} đang ở trạng thái Chờ kiểm (tồn theo sổ: ${remaining} ${baseUnit}). Bạn cần vào Quản lý kiện hàng > Chờ kiểm, nhập số lượng thực tế và chốt kiện này trước; sau đó mới khui được kiện mới cùng SKU.`;
+}
+
+function buildReturnHandlingUnitBlockMessage(sku, returnUnit, action) {
+  const code = returnUnit?.code || returnUnit?.id || "không xác định";
+  return `Chưa thể ${action}. SKU ${sku} còn kiện hàng hoàn [${code}] chưa được gộp. Vui lòng gộp kiện hàng hoàn này vào kiện đang khui trước khi tiếp tục rút hoặc khui kiện cùng SKU.`;
 }
 
 async function getHandlingUnitWithdrawalCodes(tx) {
@@ -10149,6 +10251,19 @@ async function executeRutHang(
         if (pendingConflict) {
           throw new Error(buildPendingHandlingUnitBlockMessage(unit.sku, pendingConflict, "rút hàng"));
         }
+        const returnConflict = await tx.handlingUnit.findFirst({
+          where: {
+            sku: unit.sku,
+            code: { not: normalizedCode },
+            status: "opened",
+            remainingQuantity: { gt: 0 },
+            packagingName: { contains: "Hàng hoàn", mode: "insensitive" },
+          },
+          select: { code: true, remainingQuantity: true, baseUnit: true, packagingName: true },
+        });
+        if (returnConflict) {
+          throw new Error(buildReturnHandlingUnitBlockMessage(unit.sku, returnConflict, "rút hàng"));
+        }
         if (unit.status === "pending_check") {
           throw new Error(buildPendingHandlingUnitBlockMessage(unit.sku, unit, "rút hàng"));
         }
@@ -10290,6 +10405,16 @@ async function executeRutHang(
   );
   if (pendingConflict) {
     throw new Error(buildPendingHandlingUnitBlockMessage(targetSku, pendingConflict, "rút hàng"));
+  }
+  const returnConflict = list.find((candidate) =>
+    String(candidate.code || candidate.id || "").trim().toUpperCase() !== normalizedCode
+    && String(candidate.sku || candidate.skuName || "").trim().toUpperCase() === targetSku.toUpperCase()
+    && (candidate.status === "opened" || candidate.status === "Đang sử dụng")
+    && Number(candidate.remainingQuantity ?? candidate.currentPcs ?? 0) > 0
+    && isReturnHandlingUnitPackage(candidate.packagingName || candidate.packageType),
+  );
+  if (returnConflict) {
+    throw new Error(buildReturnHandlingUnitBlockMessage(targetSku, returnConflict, "rút hàng"));
   }
   if (currentStatus === "pending_check" || currentStatus === "Chờ kiểm") {
     throw new Error(buildPendingHandlingUnitBlockMessage(targetSku, target, "rút hàng"));
@@ -11926,7 +12051,10 @@ function startTelegramWmsPolling() {
               telegramWmsLastError = e.message;
               console.warn("[TelegramWMS] Parse update error:", e.message);
             }
-            scheduleNextPoll(telegramWmsLastError ? 3000 : 300);
+            // Avoid a tight request loop when Telegram returns no updates.
+            // The long-poll itself waits up to 8s, so 1s is still responsive
+            // while reducing idle wakeups and network churn.
+            scheduleNextPoll(telegramWmsLastError ? 3000 : 1000);
           });
         },
       );
@@ -11954,6 +12082,8 @@ function startTelegramWmsPolling() {
 
 function stopTelegramWmsPolling() {
   telegramWmsBotRunning = false;
+  clearTimeout(telegramWmsStartTimer);
+  telegramWmsStartTimer = null;
   clearTimeout(telegramWmsPollTimer);
   telegramWmsPollTimer = null;
   if (telegramWmsPollRequest) {
@@ -11967,8 +12097,15 @@ function stopTelegramWmsPolling() {
 
 // Telegram mutations use database transactions, idempotency keys, and
 // database-wide locks. Context authorization still limits the bot to the
-// configured warehouse group.
-startTelegramWmsPolling();
+// configured warehouse group. Delay startup until after the shell has had
+// time to paint; this service is not needed for first paint.
+if (TELEGRAM_WMS_BOT_TOKEN) {
+  telegramWmsStartTimer = setTimeout(() => {
+    telegramWmsStartTimer = null;
+    startTelegramWmsPolling();
+  }, 5000);
+  telegramWmsStartTimer.unref?.();
+}
 
 ipcMain.handle("handlingUnits:unsealUnit", async (_event, payload = {}) => {
   try {
@@ -17509,6 +17646,74 @@ function getDailyRotationAssignee(attachments, date = new Date()) {
   return assignees[index];
 }
 
+function withEffectiveModuleAssignee(task, date = new Date()) {
+  const attachments = parseTaskAttachments(task?.attachments);
+  if (!attachments?.moduleLink?.kind || !attachments?.moduleLink?.module) return task;
+  const resolvedAssignee = getDailyRotationAssignee(attachments, date) || task.assignee;
+  return resolvedAssignee && resolvedAssignee !== task.assignee
+    ? { ...task, assignee: resolvedAssignee }
+    : task;
+}
+
+function isLinkedModuleTaskTemplate(task, moduleName) {
+  const attachments = parseTaskAttachments(task?.attachments);
+  const linkedModule = attachments?.moduleLink?.module || task?.area;
+  return normalizeActorName(linkedModule) === normalizeActorName(moduleName)
+    && (attachments?.moduleLink?.kind === "module-link" || Boolean(task?.area))
+    && !attachments?.archive?.archivedAt
+    && !attachments?.prepackReport;
+}
+
+async function resolveLinkedModuleAssignment(moduleName, date = new Date(), db = prisma) {
+  const templates = await db.dailyTask.findMany({
+    where: {
+      area: moduleName,
+      status: { not: "completed" },
+    },
+    select: { id: true, assignee: true, attachments: true, createdAt: true },
+    orderBy: { createdAt: "desc" },
+    take: 100,
+  });
+  const template = templates.find((task) => isLinkedModuleTaskTemplate(task, moduleName));
+  if (template) {
+    const attachments = parseTaskAttachments(template.attachments);
+    const resolvedName = getDailyRotationAssignee(attachments, date) || template.assignee;
+    const resolved = await db.user.findFirst({
+      where: {
+        status: "active",
+        OR: [{ username: resolvedName }, { fullName: resolvedName }],
+      },
+      select: { id: true, username: true, fullName: true, role: true },
+    });
+    if (resolved) {
+      return {
+        taskId: template.id,
+        assignee: resolved.username,
+        assigneeName: resolved.fullName || resolved.username,
+        assignment: attachments.assignment || {},
+      };
+    }
+  }
+
+  // Preserve existing prepack tasks until an administrator configures a
+  // linked task. New module links never need this fallback.
+  if (normalizeActorName(moduleName) === normalizeActorName("Đóng gói sẵn")) {
+    const legacyChecker = await db.user.findUnique({
+      where: { username: "nguyendinhtoan" },
+      select: { id: true, username: true, fullName: true, role: true, status: true },
+    });
+    if (legacyChecker?.status === "active") {
+      return {
+        taskId: null,
+        assignee: legacyChecker.username,
+        assigneeName: legacyChecker.fullName || legacyChecker.username,
+        assignment: { fixedAssignee: true },
+      };
+    }
+  }
+  return null;
+}
+
 function clearEvidenceSubmission(attachments) {
   const evidence = attachments?.evidence;
   if (!evidence?.required) return attachments;
@@ -19284,6 +19489,21 @@ function stopMobileDailyEvidenceSession() {
   }
 }
 
+function isPrepackVerificationTaskRecord(task) {
+  const attachments = parseTaskAttachments(task?.attachments);
+  if (attachments?.prepackReport && Array.isArray(attachments.prepackReport.batchIds)) return true;
+  const searchText = [task?.title, task?.description, task?.category, task?.area, task?.tags]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+  return /đóng gói|dong goi|prepack/.test(searchText);
+}
+
+function isDesignatedPrepackChecker(actor) {
+  return [actor?.username, actor?.fullName]
+    .some((value) => ["nguyendinhtoan", "nguyễn đình toàn"].includes(String(value || "").trim().toLowerCase()));
+}
+
 ipcMain.handle("dailyTasks:startMobileEvidence", async (event, options = {}) => {
   try {
     const actor = await getCurrentActor();
@@ -19310,6 +19530,9 @@ ipcMain.handle("dailyTasks:startMobileEvidence", async (event, options = {}) => 
     const tasks = await listMobileDailyEvidenceTasks(targetActor);
     if (tasks.length === 0) {
       throw new Error(`${targetActor.fullName} chưa có công việc nào đang chờ nộp ảnh bằng chứng.`);
+    }
+    if (tasks.some(isPrepackVerificationTaskRecord) && actor.role !== "admin" && !tasks.every((task) => actorOwnsTask(actor, task))) {
+      throw new Error("Chỉ người đang được phân công kiểm tra Đóng gói sẵn mới được chụp ảnh.");
     }
     ensureMobileDailyEvidenceServer();
     stopMobileDailyEvidenceSession();
@@ -19477,13 +19700,16 @@ ipcMain.handle(
   async (_event, taskId, approved, reviewContext = {}) => {
     try {
       const actor = await getCurrentActor();
-      if (!["admin", "manager"].includes(actor.role))
+      if (!["admin", "manager"].includes(actor.role) && !isDesignatedPrepackChecker(actor))
         throw new Error("Chỉ quản lý hoặc admin được duyệt bằng chứng.");
 
       const task = await prisma.dailyTask.findUnique({
         where: { id: Number(taskId) },
       });
       if (!task) throw new Error("Không tìm thấy công việc.");
+      if (isPrepackVerificationTaskRecord(task) && actor.role !== "admin" && !actorOwnsTask(actor, task)) {
+        throw new Error("Chỉ người đang được phân công kiểm tra Đóng gói sẵn mới được kiểm tra ảnh.");
+      }
       const attachments = parseTaskAttachments(task.attachments);
       const currentEvidence = attachments.evidence || {};
       const requestedSubmittedAt = String(
@@ -19626,6 +19852,39 @@ ipcMain.handle(
               verifier: approved ? actor.fullName : "",
             },
           });
+          const prepackReport = attachments.prepackReport;
+          const prepackBatchIds = Array.isArray(prepackReport?.batchIds)
+            ? prepackReport.batchIds.map(Number).filter((id) => Number.isInteger(id) && id > 0)
+            : [];
+          if (approved && prepackBatchIds.length && tx.prepackBatch) {
+            const prepackBatches = await tx.prepackBatch.findMany({ where: { id: { in: prepackBatchIds } } });
+            for (const batch of prepackBatches) {
+              if (batch.status !== "waiting_acceptance") continue;
+              await tx.prepackBatch.update({
+                where: { id: batch.id },
+                data: {
+                  acceptedQty: batch.reportedQty,
+                  issuedQty: 0,
+                  status: batch.reportedQty > 0 ? "ready" : "rejected",
+                  acceptorId: actor.id,
+                  acceptorUsername: actor.username,
+                  acceptorName: actor.fullName,
+                  acceptedAt: new Date(),
+                },
+              });
+              await tx.prepackMovement.create({
+                data: {
+                  batchId: batch.id,
+                  type: "accepted",
+                  quantity: batch.reportedQty,
+                  balanceAfter: batch.reportedQty,
+                  note: "Đã kiểm tra qua Công việc hàng ngày.",
+                  createdById: actor.id,
+                  createdByName: actor.fullName,
+                },
+              });
+            }
+          }
         }
         if (rejectedPenalties.length > 0) {
           await tx.appConfig.createMany({
@@ -20273,9 +20532,10 @@ ipcMain.handle("dailyTasks:list", async (event, filters = {}) => {
       orderBy: [{ status: "asc" }, { dueDate: "asc" }],
     });
 
+    const effectiveTasks = tasks.map((task) => withEffectiveModuleAssignee(task));
     const visibleTasks = (includeArchived
-      ? tasks
-      : tasks.filter(
+      ? effectiveTasks
+      : effectiveTasks.filter(
           (task) => {
             const archive = parseTaskAttachments(task.attachments)?.archive;
             return !archive?.archivedAt && !archive?.archived;
@@ -24401,6 +24661,9 @@ ipcMain.handle("ecommerceExports:completePickup", async (event, id, data = {}) =
   const pickupStartedAt = Date.now();
   try {
     requireRole("admin", "manager");
+    // Capture a mismatch that crossed midnight before pickup clears its
+    // mismatchAt marker during the completion transaction.
+    await reconcileEcommerceOrderFines(prisma, { now: new Date() });
     const result = await execEcommerceExportUpdate(id, data, {
       snapshotPickup: true,
     });
@@ -24441,6 +24704,9 @@ ipcMain.handle("ecommerceExports:completePickup", async (event, id, data = {}) =
 ipcMain.handle("ecommerceExports:resolveMismatch", async (event, id, data = {}) => {
   try {
     requireRole("admin", "manager");
+    // Resolve any overnight mismatch fine before this action changes the
+    // record to completed/cancelled and removes its active mismatch marker.
+    await reconcileEcommerceOrderFines(prisma, { now: new Date() });
     const action = String(data?.action || "").trim().toLowerCase();
     if (action === "pickup") {
       return await (async () => {
@@ -26374,12 +26640,13 @@ ipcMain.handle("exportOrders:delete", async (event, id, options = {}) => {
 // RETURNS HANDLERS (TRẢ HÀNG)
 // ========================================
 
-ipcMain.handle("returns:getAll", async (event, { since, compact } = {}) => {
+ipcMain.handle("returns:getAll", async (event, { since, sinceField, compact } = {}) => {
   try {
     requireRole("admin", "manager");
     if (!prisma) throw new Error("Prisma not available");
+    const dateField = sinceField === "returnDate" ? "returnDate" : "createdAt";
     const returns = await prisma.return.findMany({
-      where: since ? { createdAt: { gte: new Date(since) } } : undefined,
+      where: since ? { [dateField]: { gte: new Date(since) } } : undefined,
       ...(compact
         ? {
             select: {
@@ -26724,12 +26991,13 @@ ipcMain.handle("returns:bulkCreate", async (event, records) => {
 // REFUNDS HANDLERS (HÀNG HOÀN)
 // ========================================
 
-ipcMain.handle("refunds:getAll", async (event, { since, limit, compact } = {}) => {
+ipcMain.handle("refunds:getAll", async (event, { since, sinceField, limit, compact } = {}) => {
   try {
     requireRole("admin", "manager");
     if (!prisma) throw new Error("Prisma not available");
+    const dateField = sinceField === "refundDate" ? "refundDate" : "createdAt";
     const refunds = await prisma.refund.findMany({
-      where: since ? { createdAt: { gte: new Date(since) } } : undefined,
+      where: since ? { [dateField]: { gte: new Date(since) } } : undefined,
       ...(compact
         ? {
             select: {
@@ -27062,8 +27330,13 @@ function prepackAvailableQuantity(batch) {
 }
 
 function mapPrepackBatch(batch) {
+  let components = [];
+  try {
+    components = batch.componentsJson ? JSON.parse(batch.componentsJson) : [];
+  } catch {}
   return {
     ...batch,
+    components: Array.isArray(components) ? components : [],
     readyQty: prepackAvailableQuantity(batch),
     evidences: Array.isArray(batch.evidences)
       ? batch.evidences.map((evidence) => ({
@@ -27077,8 +27350,35 @@ function mapPrepackBatch(batch) {
   };
 }
 
+function normalizePrepackComponents(rawComponents) {
+  if (!Array.isArray(rawComponents)) return [];
+  const merged = new Map();
+  for (const item of rawComponents) {
+    const sku = String(item?.sku || "").trim();
+    const quantity = Number(item?.quantity);
+    if (!sku || !Number.isInteger(quantity) || quantity <= 0 || quantity > 1000) continue;
+    merged.set(sku, (merged.get(sku) || 0) + quantity);
+  }
+  return Array.from(merged.entries())
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([sku, quantity]) => ({ sku, quantity }));
+}
+
+function prepackPackagingKey(productSku, components) {
+  const normalized = normalizePrepackComponents(components);
+  return normalized.length
+    ? `${productSku}::${normalized.map((item) => `${item.sku}x${item.quantity}`).join("+")}`
+    : productSku;
+}
+
 function getPrepackErrorMessage(error) {
   const raw = String(error?.message || error || "");
+  if (
+    /column [\"'`]?PrepackBatch\.(?:packagingType|packagingKey|packagingLabel|packSize|componentsJson)[\"'`]? does not exist/i.test(raw)
+    || /column [\"'`]?(?:packagingType|packagingKey|packagingLabel|packSize|componentsJson)[\"'`]? of relation [\"'`]?PrepackBatch/i.test(raw)
+  ) {
+    return "Database chưa có các cột combo/mix của Đóng gói sẵn. Hãy chạy file prisma/migrations/20260918100000_add_prepack_packaging_composition/migration.sql trong Supabase SQL Editor bằng tài khoản owner, rồi tải lại màn hình.";
+  }
   if (
     error?.code === "P2021" ||
     /(?:relation|table).*Prepack(?:Batch|Evidence|Movement).*does not exist/i.test(raw)
@@ -27131,7 +27431,7 @@ ipcMain.handle("prepack:list", async (_event, filters = {}) => {
     const requestedStatus = String(filters?.status || "").trim();
     const where = {};
     if (requestedStatus && requestedStatus !== "all") where.status = requestedStatus;
-    if (actor.role === "staff") where.packerUsername = actor.username;
+    if (!["admin", "manager"].includes(actor.role)) where.packerUsername = actor.username;
     const rows = await prisma.prepackBatch.findMany({
       where,
       include: {
@@ -27154,15 +27454,33 @@ ipcMain.handle("prepack:create", async (_event, payload = {}) => {
     if (!prisma.prepackBatch) throw new Error("Cần cập nhật Prisma Client cho Đóng gói sẵn.");
     const actor = await getCurrentActor();
     const requestedQty = parsePositivePrepackQuantity(payload.requestedQty, "Số lượng yêu cầu");
+    const packagingType = String(payload.packagingType || "single") === "combo" ? "combo" : "single";
     const requestedSkus = [...new Set(
       (Array.isArray(payload.productSkus) ? payload.productSkus : [payload.productSku])
         .map((sku) => String(sku || "").trim())
         .filter(Boolean),
     )];
-    if (!requestedSkus.length) throw new Error("Hãy chọn ít nhất một phân loại sản phẩm.");
-    const products = await Promise.all(
-      requestedSkus.map((productSku) => resolvePrepackProduct({ ...payload, productSku })),
-    );
+    if (packagingType === "single" && !requestedSkus.length) throw new Error("Hãy chọn ít nhất một phân loại sản phẩm.");
+    const products = packagingType === "single"
+      ? await Promise.all(requestedSkus.map((productSku) => resolvePrepackProduct({ ...payload, productSku })))
+      : [];
+    let comboTarget = null;
+    if (packagingType === "combo") {
+      const rawComponents = normalizePrepackComponents(payload.components);
+      if (!rawComponents.length) throw new Error("Combo phải có ít nhất một thành phần.");
+      const parent = await resolvePrepackProduct({ productId: payload.productId });
+      const components = await Promise.all(rawComponents.map(async (component) => {
+        const resolved = await resolvePrepackProduct({ ...payload, productSku: component.sku });
+        if (resolved.id !== parent.id) throw new Error("Các thành phần combo phải thuộc cùng một sản phẩm.");
+        return { sku: resolved.sku, name: resolved.name, quantity: component.quantity, unit: resolved.unit };
+      }));
+      comboTarget = {
+        product: parent,
+        components,
+        packagingKey: prepackPackagingKey(parent.sku, components),
+        packagingLabel: components.map((component) => `${component.name.replace(`${parent.name} - `, "")} x${component.quantity}`).join(" + "),
+      };
+    }
     const requestedPackerIds = Array.isArray(payload.packerIds) ? payload.packerIds : [payload.packerId];
     const packerIds = [...new Set(requestedPackerIds.map(Number).filter((id) => Number.isInteger(id) && id > 0))];
     if (!packerIds.length) throw new Error("Hãy chọn ít nhất một nhân viên đóng gói.");
@@ -27171,30 +27489,43 @@ ipcMain.handle("prepack:create", async (_event, payload = {}) => {
       select: { id: true, username: true, fullName: true, status: true, role: true },
     });
     if (packers.length !== packerIds.length) throw new Error("Không thể giao chỉ tiêu cho Admin hoặc tài khoản không còn hoạt động.");
+    const targets = comboTarget
+      ? [comboTarget]
+      : products.map((product) => ({
+          product,
+          components: [],
+          packagingKey: prepackPackagingKey(product.sku, []),
+          packagingLabel: product.name,
+        }));
     const existingTargets = await prisma.prepackBatch.findMany({
       where: {
-        productSku: { in: products.map((product) => product.sku) },
+        packagingKey: { in: targets.map((target) => target.packagingKey) },
         packerUsername: { in: packers.map((packer) => packer.username) },
         status: { in: ["active", "pending"] },
       },
-      select: { productSku: true, packerUsername: true },
+      select: { packagingKey: true, packerUsername: true },
     });
     const existingPairs = new Set(
-      existingTargets.map((target) => `${target.productSku}::${target.packerUsername}`),
+      existingTargets.map((target) => `${target.packagingKey}::${target.packerUsername}`),
     );
-    const assignments = products.flatMap((product) => packers
-      .filter((packer) => !existingPairs.has(`${product.sku}::${packer.username}`))
-      .map((packer) => ({ product, packer })));
+    const assignments = targets.flatMap((target) => packers
+      .filter((packer) => !existingPairs.has(`${target.packagingKey}::${packer.username}`))
+      .map((packer) => ({ ...target, packer })));
     if (!assignments.length) throw new Error("Các nhân viên đã có đủ chỉ tiêu cho những phân loại đã chọn.");
     const stamp = new Date().toISOString().replace(/\D/g, "").slice(2, 14);
     const note = String(payload.note || "").trim().slice(0, 1000) || null;
-    const created = await prisma.$transaction(assignments.map(({ product, packer }, index) => prisma.prepackBatch.create({
+    const created = await prisma.$transaction(assignments.map(({ product, packer, components, packagingKey, packagingLabel }, index) => prisma.prepackBatch.create({
       data: {
         code: `DG-${stamp}-${index + 1}-${crypto.randomBytes(2).toString("hex").toUpperCase()}`,
         productId: product.id,
         productSku: product.sku,
         productName: product.name,
-        unit: String(payload.unit || product.unit || "gói").trim().slice(0, 40) || "gói",
+        unit: String(payload.unit || (packagingType === "combo" ? "combo" : product.unit) || "gói").trim().slice(0, 40) || "gói",
+        packagingType,
+        packagingKey,
+        packagingLabel,
+        packSize: components.reduce((sum, component) => sum + component.quantity, 0) || 1,
+        componentsJson: components.length ? JSON.stringify(components) : null,
         requestedQty,
         packerId: packer.id,
         packerUsername: packer.username,
@@ -27210,7 +27541,7 @@ ipcMain.handle("prepack:create", async (_event, payload = {}) => {
       success: true,
       data: created.map(mapPrepackBatch),
       createdCount: created.length,
-      skippedCount: products.length * packers.length - created.length,
+      skippedCount: targets.length * packers.length - created.length,
     };
   } catch (error) {
     console.error("Prepack create error:", error);
@@ -27246,7 +27577,7 @@ ipcMain.handle("prepack:updateTarget", async (_event, payload = {}) => {
     const duplicate = await prisma.prepackBatch.findFirst({
       where: {
         id: { not: batch.id },
-        productSku: batch.productSku,
+        packagingKey: batch.packagingKey || batch.productSku,
         packerUsername: packer.username,
         status: { in: ["active", "pending"] },
       },
@@ -27294,6 +27625,80 @@ ipcMain.handle("prepack:deleteTarget", async (_event, batchIdValue) => {
   }
 });
 
+ipcMain.handle("prepack:reportActual", async (_event, payload = {}) => {
+  try {
+    if (!prisma.prepackBatch || !prisma.dailyTask) throw new Error("Cần cập nhật Prisma Client cho Đóng gói sẵn và Công việc hàng ngày.");
+    const actor = await getCurrentActor();
+    const reports = Array.isArray(payload.reports) ? payload.reports : [];
+    if (!reports.length || reports.length > 300) throw new Error("Báo cáo đóng gói không hợp lệ.");
+    const normalizedReports = reports.map((report) => ({
+      batchId: Number(report?.batchId),
+      reportedQty: parsePositivePrepackQuantity(report?.reportedQty, "Số lượng thực tế"),
+    }));
+    const batchIds = [...new Set(normalizedReports.map((report) => report.batchId))];
+    if (batchIds.some((id) => !Number.isInteger(id) || id <= 0) || batchIds.length !== normalizedReports.length) {
+      throw new Error("Danh sách lô đóng gói không hợp lệ.");
+    }
+    const now = new Date();
+    const moduleAssignment = await resolveLinkedModuleAssignment("Đóng gói sẵn", now);
+    if (!moduleAssignment) throw new Error("Chưa cấu hình người kiểm tra cho module Đóng gói sẵn.");
+    const dateLabel = now.toLocaleDateString("vi-VN");
+    const title = `Kiểm tra đóng gói sẵn · ${actor.fullName} · ${dateLabel}`;
+    const taskAttachments = {
+      assignment: moduleAssignment.assignment,
+      moduleLink: {
+        kind: "module-link",
+        module: "Đóng gói sẵn",
+        templateTaskId: moduleAssignment.taskId,
+      },
+      evidence: { required: true, method: "image", status: "pending", minImages: 1, penaltyAmount: 0 },
+      prepackReport: {
+        batchIds,
+        employeeUsername: actor.username,
+        employeeName: actor.fullName,
+        reportedAt: now.toISOString(),
+      },
+    };
+    const result = await prisma.$transaction(async (tx) => {
+      const batches = await tx.prepackBatch.findMany({ where: { id: { in: batchIds } } });
+      if (batches.length !== batchIds.length) throw new Error("Không tìm thấy đủ lô đóng gói.");
+      for (const batch of batches) {
+        const ownsBatch = actor.id === batch.packerId || actor.username === batch.packerUsername;
+        if (!ownsBatch && !["admin", "manager"].includes(actor.role)) throw new Error("Bạn chỉ được báo cáo lô do mình phụ trách.");
+        if (!['active', 'pending'].includes(batch.status) || batch.reportedAt) throw new Error(`Lô ${batch.code} đã được báo cáo hoặc không còn hoạt động.`);
+      }
+      for (const report of normalizedReports) {
+        await tx.prepackBatch.update({
+          where: { id: report.batchId },
+          data: { reportedQty: report.reportedQty, acceptedQty: 0, reportedAt: now, status: "waiting_acceptance" },
+        });
+      }
+      const task = await tx.dailyTask.create({
+        data: {
+          title,
+          description: `Kiểm tra ảnh thực tế và số lượng của ${batchIds.length} lô đóng gói sẵn do ${actor.fullName} báo cáo.`,
+          assignee: moduleAssignment.assignee,
+          verifier: moduleAssignment.assigneeName,
+          area: "Đóng gói sẵn",
+          dueDate: getDailyTaskEndOfDay(now),
+          status: "pending",
+          priority: "normal",
+          type: "daily",
+          category: "Kho hàng",
+          tags: JSON.stringify(["prepack", "evidence"]),
+          attachments: JSON.stringify(taskAttachments),
+          createdBy: actor.fullName,
+        },
+      });
+      return { task, batchIds };
+    });
+    return { success: true, data: result };
+  } catch (error) {
+    console.error("Prepack actual report error:", error);
+    return { success: false, error: getPrepackErrorMessage(error) };
+  }
+});
+
 async function submitPrepackEvidenceForActor(actor, payload = {}) {
   const uploadedKeys = [];
   try {
@@ -27301,11 +27706,28 @@ async function submitPrepackEvidenceForActor(actor, payload = {}) {
     const batchId = Number(payload.batchId);
     const batch = await prisma.prepackBatch.findUnique({ where: { id: batchId } });
     if (!batch) throw new Error("Không tìm thấy lệnh đóng gói.");
-    if (!["active", "pending"].includes(batch.status)) {
+    if (!["active", "pending", "waiting_acceptance"].includes(batch.status)) {
       throw new Error("Chỉ tiêu này không còn hoạt động.");
     }
     const ownsBatch = actor.id === batch.packerId || actor.username === batch.packerUsername;
-    if (!ownsBatch) throw new Error("Chỉ người được giao mới được báo đã đóng.");
+    let linkedCheckTask = null;
+    if (!ownsBatch && actor.role !== "admin") {
+      const candidateTasks = await prisma.dailyTask.findMany({
+        where: { status: { not: "completed" }, area: "Đóng gói sẵn" },
+        orderBy: { createdAt: "desc" },
+        take: 100,
+      });
+      linkedCheckTask = candidateTasks.find((task) => {
+        const attachments = parseTaskAttachments(task.attachments);
+        const batchIds = Array.isArray(attachments?.prepackReport?.batchIds)
+          ? attachments.prepackReport.batchIds.map(Number)
+          : [];
+        return batchIds.includes(batch.id);
+      });
+    }
+    if (!ownsBatch && actor.role !== "admin" && (linkedCheckTask ? !actorOwnsTask(actor, linkedCheckTask) : !isDesignatedPrepackChecker(actor))) {
+      throw new Error("Chỉ người được phân công kiểm tra mới được nộp bằng chứng kiểm tra.");
+    }
     const reportedQty = Number.isFinite(Number(payload.reportedQty))
       ? parsePositivePrepackQuantity(payload.reportedQty, "Số lượng hiện có")
       : batch.requestedQty;
@@ -27337,7 +27759,9 @@ async function submitPrepackEvidenceForActor(actor, payload = {}) {
       });
       if (reusedEvidence) throw new Error("Ảnh này đã được dùng làm bằng chứng trước đó. Hãy chụp ảnh mới.");
       const ext = mimeType === "image/png" ? "png" : mimeType === "image/webp" ? "webp" : "jpg";
-      const objectKey = `prepack/${batch.id}/${new Date().toISOString().slice(0, 10)}/${hash}.${ext}`;
+      // The deployed evidence worker accepts the daily-tasks namespace for
+      // all camera evidence, including pre-packed goods.
+      const objectKey = `daily-tasks/${batch.id}/${new Date().toISOString().slice(0, 10)}/${hash}.${ext}`;
       const uploaded = await uploadDailyEvidenceToR2(objectKey, buffer, mimeType, hash);
       if (!uploaded?.ok || uploaded.key !== objectKey) throw new Error(`Không thể tải ảnh ${index + 1} lên kho bằng chứng.`);
       uploadedKeys.push(objectKey);
@@ -27354,18 +27778,82 @@ async function submitPrepackEvidenceForActor(actor, payload = {}) {
     const reportedAt = new Date();
     const updated = await prisma.$transaction(async (tx) => {
       const stateUpdate = await tx.prepackBatch.updateMany({
-        where: { id: batch.id, updatedAt: batch.updatedAt, status: { in: ["active", "pending"] } },
+        where: { id: batch.id, updatedAt: batch.updatedAt, status: { in: ["active", "pending", "waiting_acceptance"] } },
         data: {
-          reportedQty,
-          status: "active",
-          reportedAt,
-          acceptedQty: reportedQty,
+          reportedQty: batch.reportedAt ? batch.reportedQty : reportedQty,
+          status: "waiting_acceptance",
+          reportedAt: batch.reportedAt || reportedAt,
+          acceptedQty: 0,
           discrepancyReason: null,
         },
       });
       if (stateUpdate.count !== 1) throw new Error("Lệnh đã thay đổi trên máy khác. Hãy tải lại.");
       for (const evidence of preparedImages) {
         await tx.prepackEvidence.create({ data: { batchId: batch.id, ...evidence } });
+      }
+      if (tx.dailyTask) {
+        const candidateTasks = await tx.dailyTask.findMany({
+          where: { status: { not: "completed" }, area: "Đóng gói sẵn" },
+          orderBy: { createdAt: "desc" },
+          take: 100,
+        });
+        for (const task of candidateTasks) {
+          const attachments = parseTaskAttachments(task.attachments);
+          const linkedBatchIds = Array.isArray(attachments?.prepackReport?.batchIds)
+            ? attachments.prepackReport.batchIds.map(Number)
+            : [];
+          if (!linkedBatchIds.includes(batch.id)) continue;
+          const allLinkedBatches = await tx.prepackBatch.findMany({
+            where: { id: { in: linkedBatchIds } },
+            select: {
+              id: true,
+              productId: true,
+              productSku: true,
+              productName: true,
+              packagingType: true,
+              packagingKey: true,
+              packerId: true,
+              packerUsername: true,
+              packerName: true,
+              evidences: { select: { id: true }, take: 1 },
+            },
+          });
+          const coveredBatchIds = new Set(
+            (Array.isArray(payload.coverageBatchIds) ? payload.coverageBatchIds : [batch.id])
+              .map(Number)
+              .filter((id) => Number.isInteger(id) && id > 0),
+          );
+          const productKey = (item) => {
+            const base = String(item.productId || item.productName || item.productSku || item.id).trim().toUpperCase();
+            return item.packagingType === "combo" ? `${base}::COMBO::${String(item.packagingKey || item.productSku || "").trim().toUpperCase()}` : `${base}::SINGLE`;
+          };
+          const employeeKey = (item) => String(item.packerUsername || item.packerId || item.packerName || "employee").trim().toUpperCase();
+          const coverageKey = (item) => `${employeeKey(item)}::${productKey(item)}`;
+          const groups = new Map();
+          for (const item of allLinkedBatches) {
+            const key = coverageKey(item);
+            const group = groups.get(key) || [];
+            group.push(item);
+            groups.set(key, group);
+          }
+          const requiredGroups = [...groups.values()];
+          const coveredGroups = requiredGroups.filter((group) => group.every((item) => (
+            coveredBatchIds.has(item.id) || item.evidences.length > 0
+          )));
+          if (allLinkedBatches.length === linkedBatchIds.length && requiredGroups.length > 0 && coveredGroups.length === requiredGroups.length) {
+            await tx.dailyTask.update({
+              where: { id: task.id },
+              data: {
+                status: "completed",
+                completedAt: reportedAt,
+                attachments: JSON.stringify({
+                  ...attachments,
+                  evidence: { ...(attachments.evidence || {}), status: "approved", submittedAt: reportedAt.toISOString(), reviewedAt: reportedAt.toISOString(), reviewedBy: actor.fullName },
+                }),
+              },
+            });
+          }
+        }
       }
       return tx.prepackBatch.findUnique({
         where: { id: batch.id },
@@ -27383,7 +27871,7 @@ async function submitPrepackEvidenceForActor(actor, payload = {}) {
 ipcMain.handle("prepack:submitEvidence", async (_event, payload = {}) => {
   return {
     success: false,
-    error: "Bằng chứng Đóng gói sẵn chỉ được nộp qua phiên QR bằng camera điện thoại.",
+    error: "Ảnh Đóng gói sẵn chỉ được chụp và tải lên trong Công việc hàng ngày bởi người được phân công.",
   };
 });
 
@@ -27517,10 +28005,12 @@ let mobilePrepackEvidenceServer = null;
 let mobilePrepackEvidenceSession = null;
 let mobilePrepackEvidenceTunnel = null;
 let mobilePrepackEvidenceSender = null;
+let mobilePrepackEvidencePublicUrl = null;
 
 function stopMobilePrepackEvidenceSession() {
   mobilePrepackEvidenceSession = null;
   mobilePrepackEvidenceSender = null;
+  mobilePrepackEvidencePublicUrl = null;
   if (mobilePrepackEvidenceTunnel) {
     mobilePrepackEvidenceTunnel.kill();
     mobilePrepackEvidenceTunnel = null;
@@ -27533,6 +28023,86 @@ function getMobilePrepackEvidenceSession(requestUrl) {
     throw new Error("Phiên QR không hợp lệ hoặc đã hết hạn.");
   }
   return mobilePrepackEvidenceSession;
+}
+
+function isPrepackEvidenceFromToday(value) {
+  if (!value) return false;
+  const date = new Date(value);
+  const now = new Date();
+  return date.getFullYear() === now.getFullYear()
+    && date.getMonth() === now.getMonth()
+    && date.getDate() === now.getDate();
+}
+
+function mapMobilePrepackTarget(batch) {
+  let components = [];
+  try { components = batch.componentsJson ? JSON.parse(batch.componentsJson) : []; } catch {}
+  const productName = String(batch.productName || batch.productSku || "").replace(/\s+-\s+[^-]+$/, "").trim();
+  const item = {
+    id: batch.id,
+    name: batch.packagingType === "combo" ? `Combo · ${productName}` : batch.productName,
+    sku: batch.productSku,
+    requestedQty: Number(batch.requestedQty) || 0,
+    unit: batch.unit,
+    packagingType: batch.packagingType,
+    composition: Array.isArray(components)
+      ? components.map((component) => `${component.name || component.sku} x${component.quantity}`).join(" + ")
+      : "",
+  };
+  return {
+    id: batch.id,
+    batchIds: [batch.id],
+    productName,
+    productSku: batch.productSku,
+    requestedQty: batch.requestedQty,
+    unit: batch.unit,
+    packagingType: batch.packagingType,
+    packagingLabel: batch.packagingLabel,
+    packSize: batch.packSize,
+    components: Array.isArray(components) ? components : [],
+    employee: batch.packerName,
+    employeeNames: [batch.packerName].filter(Boolean),
+    items: [item],
+    reportedAt: batch.reportedAt,
+    completedToday: Array.isArray(batch.evidences) && batch.evidences.some((evidence) => isPrepackEvidenceFromToday(evidence.createdAt)),
+  };
+}
+
+async function listMobilePrepackEvidenceTargets(session) {
+  const batchIds = Array.isArray(session?.batchIds)
+    ? session.batchIds.map(Number).filter(Number.isInteger)
+    : [Number(session?.batchId)].filter(Number.isInteger);
+  if (!batchIds.length) return [];
+  const batches = await prisma.prepackBatch.findMany({
+    where: { id: { in: batchIds }, status: { in: ["active", "pending", "waiting_acceptance"] } },
+    include: { evidences: { select: { createdAt: true }, orderBy: { createdAt: "desc" }, take: 3 } },
+    orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+    take: 300,
+  });
+  const grouped = new Map();
+  for (const batch of batches) {
+    const baseProductName = String(batch.productName || batch.productSku || batch.id).replace(/\s+-\s+[^-]+$/, "").trim();
+    const productKey = String(batch.productId || baseProductName || batch.productSku || batch.id).trim().toUpperCase();
+    const groupedProductKey = batch.packagingType === "combo"
+      ? `${productKey}::COMBO::${String(batch.packagingKey || batch.productSku || "").trim().toUpperCase()}`
+      : `${productKey}::SINGLE`;
+    const employeeKey = String(batch.packerUsername || batch.packerId || batch.packerName || "employee").trim().toUpperCase();
+    const groupKey = `${employeeKey}::${groupedProductKey}`;
+    const current = grouped.get(groupKey);
+    if (!current) {
+      const target = mapMobilePrepackTarget(batch);
+      target.batchIds = [batch.id];
+      target.requestedQty = Number(target.requestedQty) || 0;
+      grouped.set(groupKey, target);
+      continue;
+    }
+    current.batchIds.push(batch.id);
+    current.requestedQty = (Number(current.requestedQty) || 0) + (Number(batch.requestedQty) || 0);
+    current.items.push(mapMobilePrepackTarget(batch).items[0]);
+    if (batch.packerName && !current.employeeNames.includes(batch.packerName)) current.employeeNames.push(batch.packerName);
+    current.completedToday = current.completedToday || (Array.isArray(batch.evidences) && batch.evidences.some((evidence) => isPrepackEvidenceFromToday(evidence.createdAt)));
+  }
+  return [...grouped.values()];
 }
 
 function ensureMobilePrepackEvidenceServer() {
@@ -27552,36 +28122,30 @@ function ensureMobilePrepackEvidenceServer() {
 
       const session = getMobilePrepackEvidenceSession(requestUrl);
       const actor = await getMobileDailyEvidenceActor(session);
-      const targetActor = await getMobileDailyEvidenceTargetActor(session);
-      const batch = await prisma.prepackBatch.findUnique({ where: { id: session.batchId } });
-      if (!batch || !["active", "pending"].includes(batch.status)) throw new Error("Chỉ tiêu không còn hoạt động.");
-      if (targetActor.id !== batch.packerId && targetActor.username !== batch.packerUsername) {
-        throw new Error("Tài khoản không được giao chỉ tiêu này.");
-      }
+      const targets = await listMobilePrepackEvidenceTargets(session);
+      if (!targets.length) throw new Error("Không còn chỉ tiêu đóng gói nào đang hoạt động.");
 
       if (request.method === "GET" && requestUrl.pathname === "/prepack-evidence/session") {
         writeMobileDailyEvidenceJson(response, 200, {
           success: true,
-          target: {
-            id: batch.id,
-            productName: batch.productName,
-            productSku: batch.productSku,
-            requestedQty: batch.requestedQty,
-            unit: batch.unit,
-            employee: batch.packerName,
-            reportedAt: batch.reportedAt,
-          },
+          targets,
+          employee: "Toàn bộ nhân viên",
           expiresAt: session.expiresAt,
         });
         return;
       }
 
       if (request.method === "POST" && requestUrl.pathname === "/prepack-evidence/submit") {
+        const batchId = Number(requestUrl.searchParams.get("batch") || requestUrl.searchParams.get("batchId"));
+        const target = targets.find((item) => item.id === batchId);
+        if (!target) throw new Error("Hạng mục không thuộc phiên chụp hoặc đã hoàn tất.");
+        const batch = await prisma.prepackBatch.findUnique({ where: { id: batchId } });
+        if (!batch || !["active", "pending", "waiting_acceptance"].includes(batch.status)) throw new Error("Chỉ tiêu không còn hoạt động.");
         const mimeType = String(request.headers["content-type"] || "").split(";")[0].trim().toLowerCase();
         if (!new Set(["image/jpeg", "image/png", "image/webp"]).has(mimeType)) {
           throw new Error("Chỉ nhận ảnh JPG, PNG hoặc WebP.");
         }
-        if (String(request.headers["x-camera-capture"] || "") !== "getusermedia") {
+        if (String(request.headers["x-camera-capture"] || "") !== "camera-input") {
           throw new Error("Ảnh phải được chụp trực tiếp bằng camera điện thoại.");
         }
         const declaredSha256 = String(request.headers["x-content-sha256"] || "").trim().toLowerCase();
@@ -27592,8 +28156,9 @@ function ensureMobilePrepackEvidenceServer() {
         if (!source.length || !isValidEvidenceImage(source, mimeType)) throw new Error("Ảnh chụp không hợp lệ.");
         let fileName = "anh-dong-goi-hom-nay.jpg";
         try { fileName = decodeURIComponent(String(request.headers["x-file-name"] || fileName)); } catch {}
-        const result = await submitPrepackEvidenceForActor(targetActor, {
+        const result = await submitPrepackEvidenceForActor(actor, {
           batchId: batch.id,
+          coverageBatchIds: target.batchIds,
           images: [{ name: fileName, mimeType, sha256: declaredSha256, data: `data:${mimeType};base64,${source.toString("base64")}` }],
         });
         if (result.success && mobilePrepackEvidenceSender && !mobilePrepackEvidenceSender.isDestroyed()) {
@@ -27615,56 +28180,161 @@ function ensureMobilePrepackEvidenceServer() {
 ipcMain.handle("prepack:startMobileEvidence", async (event, batchId) => {
   try {
     const actor = await getCurrentActor();
-    const batch = await prisma.prepackBatch.findUnique({ where: { id: Number(batchId) } });
-    if (!batch || !["active", "pending"].includes(batch.status)) throw new Error("Không tìm thấy chỉ tiêu đang hoạt động.");
-    const canOperateForEmployee = actor.id === batch.packerId || actor.username === batch.packerUsername || ["admin", "manager"].includes(actor.role);
-    if (!canOperateForEmployee) throw new Error("Chỉ nhân viên được giao hoặc quản lý mới được mở phiên chụp ảnh.");
+    const candidateTasks = await prisma.dailyTask.findMany({
+      where: { status: { not: "completed" }, area: "Đóng gói sẵn" },
+      orderBy: { createdAt: "desc" },
+      take: 100,
+    });
+    const assignedTasks = candidateTasks.filter((task) => actor.role === "admin" || actorOwnsTask(actor, task));
+    const assignedBatchIds = [...new Set(assignedTasks.flatMap((task) => {
+      const ids = parseTaskAttachments(task.attachments)?.prepackReport?.batchIds;
+      return Array.isArray(ids) ? ids.map(Number).filter((id) => Number.isInteger(id) && id > 0) : [];
+    }))];
+    let batches = await prisma.prepackBatch.findMany({
+      where: { id: { in: assignedBatchIds }, status: { in: ["active", "pending", "waiting_acceptance"] } },
+      select: { id: true, packerName: true },
+      orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+      take: 300,
+    });
+    if (!batches.length && actor.role === "admin") {
+      batches = await prisma.prepackBatch.findMany({
+        where: { status: { in: ["active", "pending", "waiting_acceptance"] } },
+        select: { id: true, packerName: true },
+        orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+        take: 300,
+      });
+    }
+    if (!batches.length) throw new Error("Bạn chưa được phân công công việc kiểm tra Đóng gói sẵn đang chờ nộp ảnh.");
+    if (
+      mobilePrepackEvidenceSession
+      && mobilePrepackEvidenceSession.expiresAt > Date.now()
+      && mobilePrepackEvidencePublicUrl
+    ) {
+      mobilePrepackEvidenceSender = event.sender;
+      return {
+        success: true,
+        url: mobilePrepackEvidencePublicUrl.url,
+        secure: mobilePrepackEvidencePublicUrl.secure,
+        connecting: false,
+        employee: "Toàn bộ nhân viên",
+        taskCount: mobilePrepackEvidenceSession.batchIds.length,
+        expiresAt: mobilePrepackEvidenceSession.expiresAt,
+      };
+    }
     ensureMobilePrepackEvidenceServer();
     stopMobilePrepackEvidenceSession();
     mobilePrepackEvidenceSender = event.sender;
     mobilePrepackEvidenceSession = {
       token: crypto.randomBytes(32).toString("base64url"),
       ownerUserId: actor.id,
-      targetUserId: batch.packerId,
-      batchId: batch.id,
+      batchIds: batches.map((item) => item.id),
       expiresAt: Date.now() + MOBILE_DAILY_EVIDENCE_TTL_MS,
     };
     const token = mobilePrepackEvidenceSession.token;
     const pagePath = `/prepack-evidence?session=${encodeURIComponent(token)}`;
-    const lanAddress = getMobileDailyEvidenceLanAddress();
-    const localOrigin = `http://${lanAddress}:${MOBILE_PREPACK_EVIDENCE_PORT}`;
-    const info = { employee: batch.packerName, productName: batch.productName, expiresAt: mobilePrepackEvidenceSession.expiresAt, address: lanAddress };
-    const cloudflaredPath = path.join(__dirname, "..", "node_modules", "cloudflared", "bin", process.platform === "win32" ? "cloudflared.exe" : "cloudflared");
-    if (!fs.existsSync(cloudflaredPath)) return { success: true, url: `${localOrigin}${pagePath}`, secure: false, connecting: false, ...info };
+    const info = { employee: "Toàn bộ nhân viên", taskCount: batches.length, expiresAt: mobilePrepackEvidenceSession.expiresAt };
+    const cloudflaredPath = path.join(
+      __dirname,
+      "..",
+      "node_modules",
+      "cloudflared",
+      "bin",
+      process.platform === "win32" ? "cloudflared.exe" : "cloudflared",
+    );
+    if (!fs.existsSync(cloudflaredPath)) {
+      throw new Error("Thiếu thành phần kết nối điện thoại. Vui lòng cập nhật lại ứng dụng.");
+    }
 
+    // Do not publish the local URL: it requires firewall/Wi-Fi setup that
+    // employees cannot be expected to configure. Publish only a live HTTPS
+    // tunnel URL after cloudflared has confirmed it.
     setImmediate(() => {
       if (mobilePrepackEvidenceSession?.token !== token) return;
       let tunnel;
       try {
-        tunnel = spawn(cloudflaredPath, ["tunnel", "--protocol", "http2", "--url", `http://127.0.0.1:${MOBILE_PREPACK_EVIDENCE_PORT}`, "--no-autoupdate"], { windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
-      } catch {
-        mobilePrepackEvidenceSender?.send("prepack:mobileEvidenceUrlUpdated", { url: `${localOrigin}${pagePath}`, secure: false, connecting: false });
+        tunnel = spawn(
+          cloudflaredPath,
+          ["tunnel", "--protocol", "http2", "--url", `http://127.0.0.1:${MOBILE_PREPACK_EVIDENCE_PORT}`, "--no-autoupdate"],
+          { windowsHide: true, stdio: ["ignore", "pipe", "pipe"] },
+        );
+      } catch (error) {
+        mobilePrepackEvidenceSender?.send("prepack:mobileEvidenceUrlUpdated", {
+          url: "",
+          secure: false,
+          connecting: false,
+          error: error?.message || "Không thể khởi động kết nối điện thoại.",
+        });
         return;
       }
       mobilePrepackEvidenceTunnel = tunnel;
       let published = false;
-      const publish = (url, secure) => {
-        if (published || mobilePrepackEvidenceSession?.token !== token) return;
-        published = true;
-        mobilePrepackEvidenceSender?.send("prepack:mobileEvidenceUrlUpdated", { url, secure, connecting: false });
+      let pendingUrl = "";
+      let tunnelRegistered = false;
+      let settled = false;
+      const sessionIsActive = () => mobilePrepackEvidenceSession?.token === token && mobilePrepackEvidenceTunnel === tunnel;
+      const notifyError = (error) => {
+        if (!sessionIsActive()) return;
+        mobilePrepackEvidenceSender?.send("prepack:mobileEvidenceUrlUpdated", {
+          url: "",
+          secure: false,
+          connecting: false,
+          error,
+        });
+      };
+      const publish = (url, secure, error) => {
+        if (settled || !sessionIsActive()) return;
+        settled = true;
+        published = Boolean(url);
+        if (url) mobilePrepackEvidencePublicUrl = { url, secure };
+        mobilePrepackEvidenceSender?.send("prepack:mobileEvidenceUrlUpdated", {
+          url: url || "",
+          secure: Boolean(secure),
+          connecting: false,
+          ...(error ? { error } : {}),
+        });
       };
       const inspect = (chunk) => {
         const match = String(chunk).match(/https:\/\/[-a-z0-9]+\.trycloudflare\.com/i);
-        if (match) publish(`${match[0]}${pagePath}`, true);
+        if (match && !pendingUrl) {
+          pendingUrl = `${match[0]}${pagePath}`;
+          if (tunnelRegistered && !published) {
+            setTimeout(() => {
+              if (sessionIsActive() && tunnelRegistered && !published) publish(pendingUrl, true);
+            }, 1_500);
+          }
+        }
+        if (/Registered tunnel connection/i.test(String(chunk))) {
+          tunnelRegistered = true;
+          if (pendingUrl && !published) {
+            // The registered event is the reliable readiness signal. A short
+            // grace period lets the public DNS record reach mobile networks.
+            setTimeout(() => {
+              if (sessionIsActive() && tunnelRegistered && !published) publish(pendingUrl, true);
+            }, 1_500);
+          }
+        }
       };
       tunnel.stdout.on("data", inspect);
       tunnel.stderr.on("data", inspect);
-      const fallback = () => publish(`${localOrigin}${pagePath}`, false);
-      tunnel.on("error", fallback);
-      tunnel.on("exit", fallback);
-      setTimeout(() => { if (!published) { fallback(); tunnel.kill(); } }, 20000);
+      tunnel.on("error", (error) => publish(null, false, error?.message || "Kết nối điện thoại bị lỗi."));
+      tunnel.on("exit", (code) => {
+        if (!published) {
+          publish(null, false, `Không thể tạo kết nối điện thoại (mã ${code ?? "không xác định"}).`);
+        } else {
+          mobilePrepackEvidencePublicUrl = null;
+          notifyError("Kết nối điện thoại đã bị ngắt. Vui lòng tạo lại mã QR.");
+        }
+      });
+      setTimeout(() => {
+        if (!published && sessionIsActive()) {
+          publish(null, false, tunnelRegistered
+            ? "Kết nối Cloudflare chưa sẵn sàng. Vui lòng bấm tạo QR mới."
+            : "Không thể kết nối Cloudflare trên máy này. Vui lòng thử lại.");
+          tunnel.kill();
+        }
+      }, 30000);
     });
-    return { success: true, url: `${localOrigin}${pagePath}`, secure: false, connecting: true, ...info };
+    return { success: true, url: "", secure: false, connecting: true, ...info };
   } catch (error) {
     stopMobilePrepackEvidenceSession();
     return { success: false, error: getPrepackErrorMessage(error) };
@@ -28782,7 +29452,7 @@ ipcMain.handle("policies:getCurrent", async () => {
       official: [
         Number(config.officialFineLevel1 ?? 30000),
         Number(config.officialFineLevel2 ?? 70000),
-        Number(config.officialFineLevel3 ?? 150000),
+        Number(config.officialFineLevel3 ?? 120000),
       ],
       seasonal: [
         Number(config.seasonalFineLevel1 ?? 10000),
@@ -28871,6 +29541,12 @@ ipcMain.handle("policies:getCurrent", async () => {
             configurablePerTask: true,
             escalatesByCycle: true,
           },
+          ecommerceOrderFine: {
+            overdueAmountPerOrder: 10000,
+            overdueSplitBetweenOfficialEmployees: 2,
+            mismatchNextDayAmountPerOrder: 10000,
+            mismatchNextDaySplitBetweenOfficialEmployees: 2,
+          },
           stockCheckMissingFine: {
             enabled: true,
             amount: 50000,
@@ -28889,12 +29565,26 @@ ipcMain.handle("policies:getCurrent", async () => {
 });
 
 ipcMain.handle("attendance:getInitialData", async () => {
+  const startedAt = Date.now();
   try {
     requireRole("admin", "manager", "staff");
     if (!prisma) throw new Error("Prisma not available");
-    await reconcileMissingSeasonalScheduleFines(prisma, { now: new Date() })
-      .catch((error) => console.warn("[Attendance Schedule] Không đối soát được phạt thiếu khai báo:", error.message));
+    // Reconcile TMDT SLA/checking fines before returning the attendance
+    // snapshot so the current payroll view includes newly detected charges.
+    await reconcileEcommerceOrderFines(prisma, { now: new Date() })
+      .catch((error) => {
+        console.warn("[Ecommerce Fines] Không đối soát được phạt đơn TMDT:", error.message);
+        return null;
+      });
     const snapshot = await getAttendanceCoreSnapshot();
+    // Seasonal absence reconciliation scans historical attendance logs and
+    // may rewrite the large attendanceData JSON document. It is maintenance
+    // work, so do not make the first Attendance paint wait for it. The
+    // renderer's background sync performs the late-fine reconciliation after
+    // the page is interactive, while this task keeps the legacy safety net.
+    void reconcileMissingSeasonalScheduleFines(prisma, { now: new Date() })
+      .catch((error) => console.warn("[Attendance Schedule] Không đối soát được phạt thiếu khai báo:", error.message));
+    console.log(`[Perf] attendance:getInitialData ms=${Date.now() - startedAt} cached=${snapshot.cached}`);
     return {
       success: true,
       data: snapshot.data,
@@ -29448,6 +30138,92 @@ ipcMain.handle("attendance:updatePackingCommission", async (event, payload = {})
   }
 });
 
+ipcMain.handle("attendance:createFine", async (event, payload = {}) => {
+  try {
+    requireRole("admin");
+    if (!prisma) throw new Error("Prisma not available");
+
+    const sourceFine = payload.fine && typeof payload.fine === "object" ? payload.fine : {};
+    const empId = Number(sourceFine.empId);
+    const amount = Number(sourceFine.amount);
+    const date = sourceFine.date ? String(sourceFine.date).slice(0, 100) : new Date().toISOString();
+    if (!Number.isInteger(empId) || empId <= 0 || !Number.isFinite(amount) || amount < 0) {
+      throw new Error("Thông tin khoản phạt không hợp lệ.");
+    }
+    if (!String(sourceFine.type || "").trim() || !String(sourceFine.detail || "").trim()) {
+      throw new Error("Thông tin khoản phạt không hợp lệ.");
+    }
+    if (Number.isNaN(new Date(date).getTime())) throw new Error("Ngày phạt không hợp lệ.");
+
+    const fine = {
+      id: String(sourceFine.id || `fine-manual-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`).slice(0, 200),
+      empId,
+      type: String(sourceFine.type).trim().slice(0, 200),
+      detail: String(sourceFine.detail).trim().slice(0, 1000),
+      amount,
+      date,
+    };
+    const normalizeText = (value) => String(value || "").trim().replace(/\s+/g, " ").toLocaleLowerCase("vi-VN");
+    const fingerprint = (item) => [
+      Number(item?.empId || 0),
+      normalizeText(item?.type),
+      normalizeText(item?.detail),
+      Math.round(Number(item?.amount || 0)),
+      item?.date && !Number.isNaN(new Date(item.date).getTime()) ? getBangkokDateKey(item.date) : "",
+    ].join("|");
+
+    const result = await enqueueAttendanceDataWrite(async () => getPrismaDirectTx().$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('attendanceData'))`;
+      const row = await tx.appConfig.findUnique({ where: { key: "attendanceData" } });
+      let attendanceData = {};
+      try { attendanceData = JSON.parse(row?.value || "{}"); } catch {}
+      const extraFines = Array.isArray(attendanceData.extraFines) ? [...attendanceData.extraFines] : [];
+      const fineOverrides = attendanceData.fineOverrides && typeof attendanceData.fineOverrides === "object"
+        ? { ...attendanceData.fineOverrides }
+        : {};
+      const fineAuditLog = Array.isArray(attendanceData.fineAuditLog) ? [...attendanceData.fineAuditLog] : [];
+      if (extraFines.some((item) => String(item?.id || "") === fine.id)) {
+        throw new Error("Khoản phạt này đã tồn tại.");
+      }
+      if (extraFines.some((item) => fingerprint(item) === fingerprint(fine))) {
+        throw new Error("Khoản phạt này đã tồn tại. Hệ thống đã chặn ghi nhận trùng lặp.");
+      }
+
+      extraFines.push(fine);
+      fineAuditLog.push({
+        id: `flog-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        action: "create",
+        timestamp: new Date().toLocaleString("vi-VN", { timeZone: "Asia/Bangkok" }),
+        changedBy: currentSession.username,
+        changedByName: currentSession.fullName || currentSession.username,
+        after: fine,
+        note: String(payload?.audit?.note || `Thêm khoản phạt: ${fine.type} — ${fine.amount}`).slice(0, 2000),
+      });
+
+      const nextAttendanceData = { ...attendanceData, extraFines, fineOverrides, fineAuditLog };
+      await tx.appConfig.upsert({
+        where: { key: "attendanceData" },
+        update: { value: JSON.stringify(nextAttendanceData) },
+        create: { key: "attendanceData", value: JSON.stringify(nextAttendanceData) },
+      });
+      return { extraFines, fineOverrides, fineAuditLog };
+    }, { isolationLevel: "Serializable", timeout: 15000, maxWait: 10000 }));
+
+    void logActivity({
+      module: "attendance",
+      action: "CREATE_FINE",
+      description: `Thêm khoản phạt ${fine.type} cho nhân viên ${fine.empId}`,
+      recordName: fine.id,
+      userName: currentSession.username,
+      severity: "WARNING",
+    }).catch((error) => console.warn("Không thể ghi audit thêm phạt:", error.message));
+    return { success: true, data: result };
+  } catch (error) {
+    console.error("❌ attendance:createFine error:", error);
+    return { success: false, error: error.message };
+  }
+});
+
 ipcMain.handle("attendance:deleteFine", async (event, payload = {}) => {
   try {
     requireRole("admin");
@@ -29536,6 +30312,86 @@ ipcMain.handle("attendance:deleteFine", async (event, payload = {}) => {
     return { success: true, data: result };
   } catch (error) {
     console.error("❌ attendance:deleteFine error:", error);
+    return { success: false, error: error.message };
+  }
+});
+
+// Fine edits must update only the fine fields under the attendance row lock.
+// The renderer's whole-document appConfig:set path is intentionally blocked
+// by data-safety mode and can also race with automatic fine reconciliation.
+ipcMain.handle("attendance:updateFine", async (event, payload = {}) => {
+  try {
+    requireRole("admin");
+    if (!prisma) throw new Error("Prisma not available");
+    const kind = String(payload.kind || "");
+    if (!["manual", "system"].includes(kind)) throw new Error("Loại khoản phạt không hợp lệ.");
+    const sourceFine = payload.fine && typeof payload.fine === "object" ? payload.fine : {};
+    const fineId = String(payload.fineId || sourceFine.id || "").trim().slice(0, 200);
+    const overrideKey = String(payload.overrideKey || "").trim().slice(0, 2000);
+    const amount = Number(sourceFine.amount);
+    const empId = Number(sourceFine.empId);
+    if (!Number.isInteger(empId) || empId <= 0 || !Number.isFinite(amount) || amount < 0) {
+      throw new Error("Thông tin khoản phạt không hợp lệ.");
+    }
+    if (kind === "manual" && !fineId) throw new Error("Thiếu mã khoản phạt thủ công.");
+    if (kind === "system" && !overrideKey) throw new Error("Thiếu khóa khoản phạt hệ thống.");
+
+    const result = await enqueueAttendanceDataWrite(async () => getPrismaDirectTx().$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('attendanceData'))`;
+      const row = await tx.appConfig.findUnique({ where: { key: "attendanceData" } });
+      let attendanceData = {};
+      try { attendanceData = JSON.parse(row?.value || "{}"); } catch {}
+      let extraFines = Array.isArray(attendanceData.extraFines) ? [...attendanceData.extraFines] : [];
+      const fineOverrides = attendanceData.fineOverrides && typeof attendanceData.fineOverrides === "object"
+        ? { ...attendanceData.fineOverrides }
+        : {};
+      const fineAuditLog = Array.isArray(attendanceData.fineAuditLog) ? [...attendanceData.fineAuditLog] : [];
+      let before = sourceFine;
+      let after = sourceFine;
+
+      if (kind === "manual") {
+        const index = extraFines.findIndex((item) => String(item?.id || "") === fineId);
+        if (index < 0) throw new Error("Khoản phạt đã bị xóa hoặc không còn tồn tại.");
+        before = extraFines[index];
+        after = { ...before, ...sourceFine, id: before.id, amount };
+        extraFines[index] = after;
+      } else {
+        before = fineOverrides[overrideKey] || sourceFine;
+        after = { ...before, ...sourceFine, amount, disabled: false };
+        fineOverrides[overrideKey] = after;
+      }
+
+      fineAuditLog.push({
+        id: `flog-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        action: "edit",
+        timestamp: new Date().toLocaleString("vi-VN", { timeZone: "Asia/Bangkok" }),
+        changedBy: currentSession.username,
+        changedByName: currentSession.fullName || currentSession.username,
+        before,
+        after,
+        note: String(payload?.audit?.note || `Sửa khoản phạt: ${after.type || ""} — ${amount}`).slice(0, 2000),
+      });
+
+      const nextAttendanceData = { ...attendanceData, extraFines, fineOverrides, fineAuditLog };
+      await tx.appConfig.upsert({
+        where: { key: "attendanceData" },
+        update: { value: JSON.stringify(nextAttendanceData) },
+        create: { key: "attendanceData", value: JSON.stringify(nextAttendanceData) },
+      });
+      return { extraFines, fineOverrides, fineAuditLog };
+    }, { isolationLevel: "Serializable", timeout: 15000, maxWait: 10000 }));
+
+    void logActivity({
+      module: "attendance",
+      action: "UPDATE_FINE",
+      description: `Sửa khoản phạt ${sourceFine.type || ""} của nhân viên ${empId}`,
+      recordName: fineId || overrideKey,
+      userName: currentSession.username,
+      severity: "WARNING",
+    }).catch((error) => console.warn("Không thể ghi audit sửa phạt:", error.message));
+    return { success: true, data: result };
+  } catch (error) {
+    console.error("❌ attendance:updateFine error:", error);
     return { success: false, error: error.message };
   }
 });
@@ -29919,6 +30775,13 @@ function getBangkokHour(date = new Date()) {
       hourCycle: "h23",
     }).format(date),
   );
+}
+
+function isStockCheckSaturday(date = new Date()) {
+  return new Intl.DateTimeFormat("en-US", {
+    timeZone: "Asia/Bangkok",
+    weekday: "short",
+  }).format(date) === "Sat";
 }
 
 function normalizeStockCheckUsername(value) {
@@ -30306,6 +31169,13 @@ function isTemporaryDailyStockCheckProduct(productOrItem) {
     (name.includes("5D") && name.includes("UNICARE")) ||
     (name.includes("UNICARE") && name.includes("UPF") && name.includes("UV")) ||
     sku.includes("5DUNI")
+  );
+}
+
+function isEligibleStockCheckAssignee(user) {
+  return (
+    isOperationalAssignee(user) &&
+    normalizeStockCheckUsername(user?.username) !== TEST_OPERATOR_USERNAME
   );
 }
 
@@ -31315,6 +32185,9 @@ ipcMain.handle("stockCheck:getSessions", async (_event, options = {}) => {
 ipcMain.handle("stockCheck:ensureDailySession", async (event, payload = {}) => {
   try {
     requireRole("admin", "manager");
+    if (isStockCheckSaturday()) {
+      throw new Error("Thứ 7 chỉ mở phiên kiểm toàn bộ cho tất cả kho.");
+    }
     if (!isPrivilegedStockCheckSession() && getBangkokHour() < 17) {
       throw new Error("Kiểm hàng ngày chỉ mở từ 17:00 đối với non-admin.");
     }
@@ -31377,7 +32250,7 @@ ipcMain.handle("stockCheck:ensureDailySession", async (event, payload = {}) => {
             },
           })
         )
-          .filter(isOperationalAssignee)
+          .filter(isEligibleStockCheckAssignee)
           .sort((a, b) =>
             String(a.username).localeCompare(String(b.username), "vi"),
           );
@@ -31385,6 +32258,17 @@ ipcMain.handle("stockCheck:ensureDailySession", async (event, payload = {}) => {
           throw new Error(
             "Chưa có quản lý đang hoạt động để phân công phiên kiểm.",
           );
+
+        const linkedAssignment = await resolveLinkedModuleAssignment("Kiểm hàng", new Date(), tx);
+        const linkedAssignee = linkedAssignment
+          ? managers.find((manager) => normalizeStockCheckUsername(manager.username) === normalizeStockCheckUsername(linkedAssignment.assignee))
+          : null;
+        if (linkedAssignment && !linkedAssignee) {
+          if (normalizeStockCheckUsername(linkedAssignment.assignee) === TEST_OPERATOR_USERNAME) {
+            throw new Error("Tài khoản test chỉ dùng để kiểm thử, không được phân công kiểm hàng thực tế.");
+          }
+          throw new Error(`Người phụ trách module Kiểm hàng (${linkedAssignment.assignee}) phải là quản lý đang hoạt động.`);
+        }
 
         const previous = [...sessions]
           .filter(
@@ -31405,8 +32289,8 @@ ipcMain.handle("stockCheck:ensureDailySession", async (event, payload = {}) => {
                 normalizeStockCheckUsername(previous.assignedTo),
             )
           : -1;
-        const assignee =
-          managers[(previousIndex + 1 + managers.length) % managers.length];
+        const assignee = linkedAssignee
+          || managers[(previousIndex + 1 + managers.length) % managers.length];
 
         const uniqueSkus = new Set();
         const items = requestedItems
@@ -31506,13 +32390,21 @@ ipcMain.handle("stockCheck:createFullSession", async (event, payload = {}) => {
     }
     const assignedTo = String(payload.assignedTo || "").trim();
     if (!assignedTo) throw new Error("Chưa chọn người phụ trách phiên kiểm.");
-    const requestedItems = normalizeRequestedStockCheckItems(payload.items);
+    let requestedItems = normalizeRequestedStockCheckItems(payload.items);
 
     const result = await getPrismaDirectTx().$transaction(
       async (tx) => {
         await lockStockCheckSessions(tx);
         const today = getStockCheckTodayKey();
         const sessionId = `${today}-full`;
+        if (isStockCheckSaturday()) {
+          const products = await tx.product.findMany({
+            select: productSelectForCatalog(),
+          });
+          requestedItems = normalizeRequestedStockCheckItems(
+            products.flatMap(expandProductForStockCheck),
+          );
+        }
         const record = await tx.appConfig.findUnique({
           where: { key: "stockCheckSessionsV2" },
         });
@@ -31545,10 +32437,10 @@ ipcMain.handle("stockCheck:createFullSession", async (event, payload = {}) => {
           !assignee ||
           assignee.role !== "manager" ||
           assignee.status !== "active" ||
-          !isOperationalAssignee(assignee)
+          !isEligibleStockCheckAssignee(assignee)
         ) {
           throw new Error(
-            "Người phụ trách không còn là quản lý đang hoạt động hoặc chưa được phân công vận hành.",
+            "Người phụ trách không hợp lệ, là tài khoản test, hoặc không còn được phân công vận hành.",
           );
         }
 
@@ -31874,7 +32766,7 @@ ipcMain.handle(
           if (
             !assignee ||
             assignee.status !== "active" ||
-            !isOperationalAssignee(assignee) ||
+            !isEligibleStockCheckAssignee(assignee) ||
             assignee.role !== "manager"
           ) {
             throw new Error(
@@ -32014,7 +32906,7 @@ ipcMain.handle(
           if (
             !assignee ||
             assignee.status !== "active" ||
-            !isOperationalAssignee(assignee) ||
+            !isEligibleStockCheckAssignee(assignee) ||
             assignee.role !== "manager"
           ) {
             throw new Error(
