@@ -281,6 +281,33 @@ const getPackageCategory = (packageType?: string): "TAI" | "THUNG" | "LE" => {
   return "LE";
 };
 
+const normalizeUnitName = (value?: string) =>
+  String(value || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/đ/g, "d")
+    .trim()
+    .toLocaleLowerCase("vi-VN");
+
+const packagingMethodForSpec = (spec?: any): "TAI" | "THUNG" | "LE" =>
+  getPackageCategory(spec?.name) === "THUNG"
+    ? "THUNG"
+    : getPackageCategory(spec?.name) === "TAI"
+      ? "TAI"
+      : "LE";
+
+const latestPackagingSpec = (specs: any[], sku?: string, method?: string) => {
+  const candidates = (Array.isArray(specs) ? specs : [])
+    .filter((spec) => spec?.sku === sku && spec?.status !== "retired")
+    .filter((spec) => !method || packagingMethodForSpec(spec) === method)
+    .sort((left, right) =>
+      String(right?.lastUsedAt || right?.createdAt || right?.id || "").localeCompare(
+        String(left?.lastUsedAt || left?.createdAt || left?.id || ""),
+      ),
+    );
+  return candidates[0];
+};
+
 const getPendingCheckConflict = (
   targetUnit: UnitRow,
   allUnits: UnitRow[],
@@ -1449,6 +1476,7 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
       && candidate.skuName.toUpperCase() === source.skuName.toUpperCase()
       && candidate.status === "Đang sử dụng"
       && !isReturnHandlingUnit(candidate)
+      && normalizeUnitName(candidate.unitName) === normalizeUnitName(source.unitName)
       && Number(candidate.initialPcs) > Number(candidate.currentPcs)
     );
 
@@ -1460,7 +1488,17 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
     }
     const targets = getReturnMergeTargets(source);
     if (!targets.length) {
-      message.warning(`SKU ${source.skuName} chưa có kiện thường đang khui và còn sức chứa để gộp.`);
+      const sameSkuOpened = workspace.register.some((candidate) =>
+        candidate.id.toUpperCase() !== source.id.toUpperCase()
+        && candidate.skuName.toUpperCase() === source.skuName.toUpperCase()
+        && candidate.status === "Đang sử dụng"
+        && !isReturnHandlingUnit(candidate)
+      );
+      message.warning(
+        sameSkuOpened
+          ? `SKU ${source.skuName} có kiện đang khui nhưng khác đơn vị ${source.unitName} hoặc đã hết sức chứa.`
+          : `SKU ${source.skuName} chưa có kiện thường đang khui và còn sức chứa để gộp.`,
+      );
       return;
     }
     const firstTarget = targets[0];
@@ -2469,6 +2507,20 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
     );
   }, [workspace.catalog, watchAllocSku, selected]);
 
+  const currentAllocSpec = useMemo(
+    () => latestPackagingSpec(
+      workspace.packagingSpecs,
+      currentAllocProduct?.sku,
+      watchAllocMethod,
+    ),
+    [workspace.packagingSpecs, currentAllocProduct?.sku, watchAllocMethod],
+  );
+  const currentAllocUnitName = String(
+    normalizeUnitName(currentAllocProduct?.unitName).includes("hop")
+      ? currentAllocProduct?.unitName
+      : currentAllocSpec?.baseUnit || currentAllocProduct?.unitName || "Gói",
+  ).trim() || "Gói";
+
   const currentAllocAllocated = useMemo(() => {
     if (!currentAllocProduct) return 0;
     return (unitsBySku.get(currentAllocProduct.sku) || []).reduce(
@@ -2482,7 +2534,7 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
     return currentAllocAllocated - Number(currentAllocProduct.stock || 0);
   }, [currentAllocProduct, currentAllocAllocated]);
 
-  const totalCalculatedGoi = useMemo(() => {
+  const totalCalculatedQuantity = useMemo(() => {
     if (watchAllocMethod === "LE") {
       return Math.max(1, Number(watchAllocLooseQty || 0));
     }
@@ -2502,6 +2554,12 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
       if (!targetSku) throw new Error("Vui lòng chọn mã SKU / sản phẩm.");
 
       const method = values.packageMethod || "TAI";
+      const spec = latestPackagingSpec(workspace.packagingSpecs, targetSku.sku, method);
+      const unitName = String(
+        normalizeUnitName(targetSku.unitName).includes("hop")
+          ? targetSku.unitName
+          : spec?.baseUnit || targetSku.unitName || "Gói",
+      ).trim() || "Gói";
       const zone = values.zone || "A1";
       const rack = values.rack ? String(values.rack).trim() : "";
       const receiptCode = values.receiptCode
@@ -2541,7 +2599,7 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
 
       if (method === "TAI") {
         const count = Math.max(1, Number(values.packageCount || 1));
-        const factor = Math.max(1, Number(values.conversionFactor || 1200));
+        const factor = Math.max(1, Number(values.conversionFactor || spec?.conversionFactor || 1200));
         created = Array.from({ length: count }, () => {
           return {
             ...unitIdentity,
@@ -2549,8 +2607,8 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
             receiptCode,
             skuName: targetSku.sku,
             packageType: "Tải dứa",
-            packageLabel: `Tải dứa · ${fmt(factor)} gói`,
-            unitName: "gói",
+            packageLabel: `Tải dứa · ${fmt(factor)} ${unitName}`,
+            unitName,
             status: "Nguyên niêm phong",
             location: { zone, rack: rack || undefined },
             initialPcs: factor,
@@ -2560,7 +2618,7 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
         });
       } else if (method === "THUNG") {
         const count = Math.max(1, Number(values.packageCount || 1));
-        const factor = Math.max(1, Number(values.conversionFactor || 50));
+        const factor = Math.max(1, Number(values.conversionFactor || spec?.conversionFactor || 50));
         created = Array.from({ length: count }, () => {
           return {
             ...unitIdentity,
@@ -2568,8 +2626,8 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
             receiptCode,
             skuName: targetSku.sku,
             packageType: "Thùng carton",
-            packageLabel: `Thùng carton · ${fmt(factor)} gói`,
-            unitName: "gói",
+            packageLabel: `Thùng carton · ${fmt(factor)} ${unitName}`,
+            unitName,
             status: "Nguyên niêm phong",
             location: { zone, rack: rack || undefined },
             initialPcs: factor,
@@ -2587,8 +2645,8 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
             receiptCode,
             skuName: targetSku.sku,
             packageType: "Túi lẻ",
-            packageLabel: `Hàng túi lẻ · ${fmt(qty)} gói`,
-            unitName: "gói",
+            packageLabel: `Hàng túi lẻ · ${fmt(qty)} ${unitName}`,
+            unitName,
             status: "Nguyên niêm phong",
             location: { zone: zone || "Hàng lẻ", rack: rack || undefined },
             initialPcs: qty,
@@ -2633,7 +2691,7 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
       }));
 
       message.success(
-        `Đã tạo thành công ${created.length} kiện (quy đổi tổng ${fmt(totalPcs)} gói)!`,
+        `Đã tạo thành công ${created.length} kiện (quy đổi tổng ${fmt(totalPcs)} ${unitName})!`,
       );
       setShowAllocation(false);
       allocationForm.resetFields();
@@ -2648,15 +2706,21 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
 
   const openCreatePackageModal = (targetSku?: string) => {
     const skuToUse = targetSku || selected?.sku || workspace.catalog[0]?.sku;
-    const spec = workspace.packagingSpecs.find((s) => s.sku === skuToUse);
-    const method = spec?.name === "Thùng" ? "THUNG" : "TAI";
-    const factor = spec?.conversionFactor || (method === "THUNG" ? 50 : 1200);
+    const product = workspace.catalog.find((item) => item.sku === skuToUse);
+    const spec = latestPackagingSpec(workspace.packagingSpecs, skuToUse);
+    const method = normalizeUnitName(product?.unitName).includes("hop")
+      ? "THUNG"
+      : spec
+        ? packagingMethodForSpec(spec)
+        : "TAI";
+    const methodSpec = latestPackagingSpec(workspace.packagingSpecs, skuToUse, method);
+    const factor = methodSpec?.conversionFactor || (method === "THUNG" ? 50 : 1200);
 
     allocationForm.setFieldsValue({
       sku: skuToUse,
       packageMethod: method,
       packageCount: 1,
-      conversionFactor: factor,
+      conversionFactor: methodSpec?.conversionFactor || factor,
       looseQty: undefined,
       zone: "A1",
     });
@@ -5433,7 +5497,7 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
                 style={{ display: "block", fontSize: 12 }}
               >
                 Định danh kiện vật lý, chọn quy cách (Tải / Thùng / Lẻ) và quy
-                đổi số lượng ra gói
+                đổi theo đơn vị cơ sở của SKU
               </Typography.Text>
             </div>
           </Flex>
@@ -5476,22 +5540,23 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
                 placeholder="Chọn hoặc tìm kiếm SKU..."
                 optionFilterProp="label"
                 onChange={(skuVal) => {
-                  const spec = workspace.packagingSpecs.find(
-                    (s) => s.sku === skuVal,
-                  );
-                  const method =
-                    allocationForm.getFieldValue("packageMethod") || "TAI";
-                  if (method === "TAI") {
+                  const product = workspace.catalog.find((item) => item.sku === skuVal);
+                  const preferredSpec = latestPackagingSpec(workspace.packagingSpecs, skuVal);
+                  const isBoxUnit = normalizeUnitName(product?.unitName).includes("hop");
+                  const method = isBoxUnit
+                    ? "THUNG"
+                    : preferredSpec
+                      ? packagingMethodForSpec(preferredSpec)
+                      : allocationForm.getFieldValue("packageMethod") || "TAI";
+                  const spec = latestPackagingSpec(workspace.packagingSpecs, skuVal, method)
+                    || (isBoxUnit ? undefined : preferredSpec);
+                  allocationForm.setFieldValue("packageMethod", method);
+                  if (method === "TAI" || method === "THUNG") {
                     allocationForm.setFieldValue(
                       "conversionFactor",
-                      spec?.conversionFactor || 1200,
+                      spec?.conversionFactor || (method === "THUNG" ? 50 : 1200),
                     );
-                  } else if (method === "THUNG") {
-                    allocationForm.setFieldValue(
-                      "conversionFactor",
-                      spec?.name === "Thùng" ? spec.conversionFactor : 50,
-                    );
-                  } else if (method === "LE") {
+                  } else {
                     allocationForm.setFieldValue("looseQty", undefined);
                   }
                 }}
@@ -5563,11 +5628,17 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
                 className="hu-method-radio-group"
                 onChange={(e) => {
                   const m = e.target.value;
-                  if (m === "TAI") {
-                    allocationForm.setFieldValue("conversionFactor", 1200);
-                  } else if (m === "THUNG") {
-                    allocationForm.setFieldValue("conversionFactor", 50);
-                  } else if (m === "LE") {
+                  if (m === "TAI" || m === "THUNG") {
+                    const spec = latestPackagingSpec(
+                      workspace.packagingSpecs,
+                      allocationForm.getFieldValue("sku"),
+                      m,
+                    );
+                    allocationForm.setFieldValue(
+                      "conversionFactor",
+                      spec?.conversionFactor || (m === "THUNG" ? 50 : 1200),
+                    );
+                  } else {
                     allocationForm.setFieldValue("looseQty", undefined);
                   }
                 }}
@@ -5603,16 +5674,16 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
                 </Form.Item>
                 <Form.Item
                   name="conversionFactor"
-                  label="Quy cách (Số gói mỗi tải)"
-                  rules={[{ required: true, message: "Nhập số gói mỗi tải" }]}
+                  label={`Quy cách (Số ${currentAllocUnitName} mỗi tải)`}
+                  rules={[{ required: true, message: `Nhập số ${currentAllocUnitName} mỗi tải` }]}
                   style={{ flex: 1, marginBottom: 8 }}
                 >
                   <InputNumber
                     min={1}
                     precision={0}
                     style={{ width: "100%" }}
-                    addonAfter="gói/tải"
-                    placeholder="Mặc định: 1.200"
+                    addonAfter={`${currentAllocUnitName}/tải`}
+                    placeholder={`Mặc định: 1.200 ${currentAllocUnitName}`}
                   />
                 </Form.Item>
               </Flex>
@@ -5636,16 +5707,16 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
                 </Form.Item>
                 <Form.Item
                   name="conversionFactor"
-                  label="Quy cách (Số gói mỗi thùng)"
-                  rules={[{ required: true, message: "Nhập số gói mỗi thùng" }]}
+                  label={`Quy cách (Số ${currentAllocUnitName} mỗi thùng)`}
+                  rules={[{ required: true, message: `Nhập số ${currentAllocUnitName} mỗi thùng` }]}
                   style={{ flex: 1, marginBottom: 8 }}
                 >
                   <InputNumber
                     min={1}
                     precision={0}
                     style={{ width: "100%" }}
-                    addonAfter="gói/thùng"
-                    placeholder="Mặc định: 50 hoặc 250"
+                    addonAfter={`${currentAllocUnitName}/thùng`}
+                    placeholder={`Mặc định: 50 hoặc 250 ${currentAllocUnitName}`}
                   />
                 </Form.Item>
               </Flex>
@@ -5654,9 +5725,9 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
             {watchAllocMethod === "LE" && (
               <Form.Item
                 name="looseQty"
-                label="Số lượng gói lẻ tạo kiện"
+                label={`Số lượng ${currentAllocUnitName} lẻ tạo kiện`}
                 rules={[
-                  { required: true, message: "Nhập số gói lẻ" },
+                  { required: true, message: `Nhập số ${currentAllocUnitName} lẻ` },
                 ]}
                 style={{ marginBottom: 8 }}
               >
@@ -5664,26 +5735,26 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
                   min={1}
                   precision={0}
                   style={{ width: "100%" }}
-                  addonAfter="gói"
+                  addonAfter={currentAllocUnitName}
                   placeholder="Nhập số lượng kiểm đếm thực tế"
                 />
               </Form.Item>
             )}
 
-            {/* 4. TÍNH TOÁN QUY ĐỔI RA ĐƠN VỊ GÓI */}
+            {/* 4. TÍNH TOÁN QUY ĐỔI RA ĐƠN VỊ CƠ SỞ CỦA SKU */}
             <div className="hu-alloc-calc-banner">
               <div className="hu-alloc-calc-text">
                 <span className="hu-calc-label">
-                  4. TỔNG SỐ LƯỢNG QUY ĐỔI (ĐƠN VỊ GÓI):
+                  4. TỔNG SỐ LƯỢNG QUY ĐỔI ({currentAllocUnitName.toLocaleUpperCase("vi-VN")}):
                 </span>
                 <b className="hu-calc-total">
                   {watchAllocMethod === "LE"
-                    ? `${fmt(watchAllocLooseQty)} gói`
-                    : `${watchAllocCount} kiện × ${fmt(watchAllocFactor)} gói = ${fmt(totalCalculatedGoi)} gói`}
+                    ? `${fmt(watchAllocLooseQty)} ${currentAllocUnitName}`
+                    : `${watchAllocCount} kiện × ${fmt(watchAllocFactor)} ${currentAllocUnitName} = ${fmt(totalCalculatedQuantity)} ${currentAllocUnitName}`}
                 </b>
               </div>
               <Tag color="green" style={{ fontSize: 13, padding: "4px 10px" }}>
-                Đơn vị cơ sở: Gói
+                Đơn vị cơ sở: {currentAllocUnitName}
               </Tag>
             </div>
           </div>

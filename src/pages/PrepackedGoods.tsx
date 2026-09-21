@@ -328,7 +328,13 @@ export default function PrepackedGoods() {
                     const attachments = typeof task.attachments === 'string'
                         ? (() => { try { return JSON.parse(task.attachments); } catch { return {}; } })()
                         : task.attachments || {};
-                    if (String(task.area || '').trim() !== 'Đóng gói sẵn') return;
+                    const taskSearchText = [task.title, task.description, task.category, task.area, task.tags]
+                        .filter(Boolean)
+                        .join(' ')
+                        .toLowerCase();
+                    const isPrepackTask = Boolean(attachments?.prepackReport && Array.isArray(attachments.prepackReport.batchIds))
+                        || /đóng gói|dong goi|prepack/.test(taskSearchText);
+                    if (!isPrepackTask) return;
                     (attachments?.prepackReport?.batchIds || []).forEach((id: unknown) => {
                         const batchId = Number(id);
                         if (Number.isInteger(batchId) && batchId > 0) ids.add(batchId);
@@ -432,7 +438,8 @@ export default function PrepackedGoods() {
         if (!packerTabs.some(item => item.username === selectedPackerUsername)) setSelectedPackerUsername(packerTabs[0].username);
     }, [packerTabs, selectedPackerUsername]);
     const selectedPackerRows = useMemo(() => targetRows.filter(row => row.packerUsername === selectedPackerUsername), [selectedPackerUsername, targetRows]);
-    const canSubmitMobileEvidence = isUiTest || (!isRolePreview && (isAdmin || linkedCheckBatchIds.size > 0));
+    const isDesignatedPrepackChecker = normalizeProductName(`${user?.username || ''} ${user?.fullName || ''}`).replace(/\s+/g, '').includes('nguyendinhtoan');
+    const canSubmitMobileEvidence = isUiTest || (!isRolePreview && (isAdmin || isDesignatedPrepackChecker || linkedCheckBatchIds.size > 0));
     const selectedPackerGroups = useMemo(() => {
         const groups = new Map<string, { key: string; productName: string; productId?: number; rows: PrepackBatch[] }>();
         selectedPackerRows.forEach(row => {
@@ -517,7 +524,7 @@ export default function PrepackedGoods() {
                 : null,
         }));
         if (!reports.length) return void message.info('Các sản phẩm trong tab này đã được báo cáo.');
-        if (reports.some(report => !Number.isInteger(report.reportedQty) || Number(report.reportedQty) <= 0)) {
+        if (reports.some(report => !Number.isInteger(report.reportedQty) || Number(report.reportedQty) < 0)) {
             return void message.warning('Hãy nhập đầy đủ số lượng thực tế trước khi gửi báo cáo.');
         }
         if (isUiTest) {
@@ -843,7 +850,7 @@ export default function PrepackedGoods() {
                             </div>;
                         })}
                     </div>
-                    <div className="prepack-report-footer"><span><ClockCircleOutlined /> Bắt buộc nhập số lượng thực tế. Sau khi gửi, hệ thống sẽ tạo công việc kiểm tra theo phân công trong Công việc hàng ngày.</span><Button type="primary" loading={submitting} disabled={isRolePreview || selectedPackerRows.every(row => row.reportedAt) || selectedPackerRows.some(row => !row.reportedAt && (!Number.isInteger(Object.prototype.hasOwnProperty.call(reportedQuantities, row.id) ? reportedQuantities[row.id] : null) || Number(reportedQuantities[row.id]) <= 0))} onClick={() => void submitActualReport()}>Gửi báo cáo đóng gói</Button></div>
+                    <div className="prepack-report-footer"><span><ClockCircleOutlined /> Bắt buộc nhập số lượng thực tế, có thể nhập 0. Sau khi gửi, hệ thống sẽ tạo công việc kiểm tra theo phân công trong Công việc hàng ngày.</span><Button type="primary" loading={submitting} disabled={isRolePreview || selectedPackerRows.every(row => row.reportedAt) || selectedPackerRows.some(row => !row.reportedAt && (!Number.isInteger(Object.prototype.hasOwnProperty.call(reportedQuantities, row.id) ? reportedQuantities[row.id] : null) || Number(reportedQuantities[row.id]) < 0))} onClick={() => void submitActualReport()}>Gửi báo cáo đóng gói</Button></div>
                 </> : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="Nhân viên này chưa có chỉ tiêu đóng gói" />}
             </div>
 

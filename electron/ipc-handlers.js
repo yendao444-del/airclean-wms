@@ -19499,6 +19499,23 @@ function isPrepackVerificationTaskRecord(task) {
   return /đóng gói|dong goi|prepack/.test(searchText);
 }
 
+function getOpenPrepackTaskWhere() {
+  return {
+    status: { in: ["pending", "in_progress", "overdue"] },
+    OR: [
+      { area: "Đóng gói sẵn" },
+      { title: { contains: "đóng gói" } },
+      { title: { contains: "dong goi" } },
+      { title: { contains: "prepack" } },
+      { description: { contains: "đóng gói" } },
+      { description: { contains: "dong goi" } },
+      { description: { contains: "prepack" } },
+      { tags: { contains: "prepack" } },
+      { attachments: { contains: "prepackReport" } },
+    ],
+  };
+}
+
 function isDesignatedPrepackChecker(actor) {
   return [actor?.username, actor?.fullName]
     .some((value) => ["nguyendinhtoan", "nguyễn đình toàn"].includes(String(value || "").trim().toLowerCase()));
@@ -27325,6 +27342,17 @@ function parsePositivePrepackQuantity(value, label) {
   return quantity;
 }
 
+function parseNonNegativePrepackQuantity(value, label) {
+  if (value === null || value === undefined || String(value).trim() === "") {
+    throw new Error(`${label} phải là số nguyên từ 0 đến 100.000.`);
+  }
+  const quantity = Number(value);
+  if (!Number.isInteger(quantity) || quantity < 0 || quantity > 100000) {
+    throw new Error(`${label} phải là số nguyên từ 0 đến 100.000.`);
+  }
+  return quantity;
+}
+
 function prepackAvailableQuantity(batch) {
   return Math.max(0, Number(batch.acceptedQty || 0) - Number(batch.issuedQty || 0));
 }
@@ -27633,7 +27661,7 @@ ipcMain.handle("prepack:reportActual", async (_event, payload = {}) => {
     if (!reports.length || reports.length > 300) throw new Error("Báo cáo đóng gói không hợp lệ.");
     const normalizedReports = reports.map((report) => ({
       batchId: Number(report?.batchId),
-      reportedQty: parsePositivePrepackQuantity(report?.reportedQty, "Số lượng thực tế"),
+      reportedQty: parseNonNegativePrepackQuantity(report?.reportedQty, "Số lượng thực tế"),
     }));
     const batchIds = [...new Set(normalizedReports.map((report) => report.batchId))];
     if (batchIds.some((id) => !Number.isInteger(id) || id <= 0) || batchIds.length !== normalizedReports.length) {
@@ -27713,11 +27741,12 @@ async function submitPrepackEvidenceForActor(actor, payload = {}) {
     let linkedCheckTask = null;
     if (!ownsBatch && actor.role !== "admin") {
       const candidateTasks = await prisma.dailyTask.findMany({
-        where: { status: { not: "completed" }, area: "Đóng gói sẵn" },
+        where: getOpenPrepackTaskWhere(),
         orderBy: { createdAt: "desc" },
         take: 100,
       });
       linkedCheckTask = candidateTasks.find((task) => {
+        if (!isPrepackVerificationTaskRecord(task)) return false;
         const attachments = parseTaskAttachments(task.attachments);
         const batchIds = Array.isArray(attachments?.prepackReport?.batchIds)
           ? attachments.prepackReport.batchIds.map(Number)
@@ -27729,7 +27758,7 @@ async function submitPrepackEvidenceForActor(actor, payload = {}) {
       throw new Error("Chỉ người được phân công kiểm tra mới được nộp bằng chứng kiểm tra.");
     }
     const reportedQty = Number.isFinite(Number(payload.reportedQty))
-      ? parsePositivePrepackQuantity(payload.reportedQty, "Số lượng hiện có")
+      ? parseNonNegativePrepackQuantity(payload.reportedQty, "Số lượng hiện có")
       : batch.requestedQty;
     const images = Array.isArray(payload.images) ? payload.images : [];
     if (images.length < 1 || images.length > 3) throw new Error("Cần tải từ 1 đến 3 ảnh bằng chứng.");
@@ -27793,11 +27822,12 @@ async function submitPrepackEvidenceForActor(actor, payload = {}) {
       }
       if (tx.dailyTask) {
         const candidateTasks = await tx.dailyTask.findMany({
-          where: { status: { not: "completed" }, area: "Đóng gói sẵn" },
+          where: getOpenPrepackTaskWhere(),
           orderBy: { createdAt: "desc" },
           take: 100,
         });
         for (const task of candidateTasks) {
+          if (!isPrepackVerificationTaskRecord(task)) continue;
           const attachments = parseTaskAttachments(task.attachments);
           const linkedBatchIds = Array.isArray(attachments?.prepackReport?.batchIds)
             ? attachments.prepackReport.batchIds.map(Number)
@@ -28181,11 +28211,14 @@ ipcMain.handle("prepack:startMobileEvidence", async (event, batchId) => {
   try {
     const actor = await getCurrentActor();
     const candidateTasks = await prisma.dailyTask.findMany({
-      where: { status: { not: "completed" }, area: "Đóng gói sẵn" },
+      where: getOpenPrepackTaskWhere(),
       orderBy: { createdAt: "desc" },
       take: 100,
     });
-    const assignedTasks = candidateTasks.filter((task) => actor.role === "admin" || actorOwnsTask(actor, task));
+    const assignedTasks = candidateTasks.filter((task) => (
+      isPrepackVerificationTaskRecord(task)
+      && (actor.role === "admin" || actorOwnsTask(actor, task))
+    ));
     const assignedBatchIds = [...new Set(assignedTasks.flatMap((task) => {
       const ids = parseTaskAttachments(task.attachments)?.prepackReport?.batchIds;
       return Array.isArray(ids) ? ids.map(Number).filter((id) => Number.isInteger(id) && id > 0) : [];
