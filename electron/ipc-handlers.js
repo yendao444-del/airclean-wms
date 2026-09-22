@@ -29302,6 +29302,11 @@ let attendanceSnapshotReadInFlight = null;
 let attendanceCoreReadCache = null;
 let attendanceCoreReadInFlight = null;
 
+function invalidateAttendanceSnapshotCaches() {
+  attendanceReadCache = null;
+  attendanceCoreReadCache = null;
+}
+
 function stripAttendancePayrollSnapshots(data, includedPeriod = null) {
   return {
     ...(data || {}),
@@ -29563,21 +29568,29 @@ ipcMain.handle("attendance:getInitialData", async () => {
   try {
     requireRole("admin", "manager", "staff");
     if (!prisma) throw new Error("Prisma not available");
-    // Reconcile TMDT SLA/checking fines before returning the attendance
-    // snapshot so the current payroll view includes newly detected charges.
-    await reconcileEcommerceOrderFines(prisma, { now: new Date() })
-      .catch((error) => {
-        console.warn("[Ecommerce Fines] Không đối soát được phạt đơn TMDT:", error.message);
-        return null;
-      });
     const snapshot = await getAttendanceCoreSnapshot();
-    // Seasonal absence reconciliation scans historical attendance logs and
-    // may rewrite the large attendanceData JSON document. It is maintenance
-    // work, so do not make the first Attendance paint wait for it. The
-    // renderer's background sync performs the late-fine reconciliation after
-    // the page is interactive, while this task keeps the legacy safety net.
-    void reconcileMissingSeasonalScheduleFines(prisma, { now: new Date() })
-      .catch((error) => console.warn("[Attendance Schedule] Không đối soát được phạt thiếu khai báo:", error.message));
+    // Order/SLA and seasonal reconciliations scan or rewrite the shared
+    // attendance ledger. They are maintenance work and must not block the
+    // first Attendance paint; invalidate the read caches after each write so
+    // the next refresh observes the newly reconciled ledger.
+    void (async () => {
+      const maintenanceStartedAt = Date.now();
+      try {
+        await reconcileEcommerceOrderFines(prisma, { now: new Date() });
+      } catch (error) {
+        console.warn("[Ecommerce Fines] Không đối soát được phạt đơn TMDT:", error.message);
+      } finally {
+        invalidateAttendanceSnapshotCaches();
+      }
+      try {
+        await reconcileMissingSeasonalScheduleFines(prisma, { now: new Date() });
+      } catch (error) {
+        console.warn("[Attendance Schedule] Không đối soát được phạt thiếu khai báo:", error.message);
+      } finally {
+        invalidateAttendanceSnapshotCaches();
+        console.log(`[Perf] attendance maintenance ms=${Date.now() - maintenanceStartedAt}`);
+      }
+    })();
     console.log(`[Perf] attendance:getInitialData ms=${Date.now() - startedAt} cached=${snapshot.cached}`);
     return {
       success: true,

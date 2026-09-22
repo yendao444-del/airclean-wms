@@ -109,6 +109,12 @@ import attendanceBadgeMinimalSeal from '../assets/attendance/attendance-badge-mi
 // Dùng chung Audio Context trong màn hình chấm công để phát âm báo Ting.
 let sharedAudioCtx: AudioContext | null = null;
 
+// Keep the last core snapshot in memory so returning to Bảng công in the same
+// Electron session can paint immediately. Every mount still starts a fresh IPC
+// refresh, so this cache only improves perceived latency and never suppresses
+// cross-workstation updates.
+let attendanceInitialDataCache: { data: any; updatedAt?: string | null } | null = null;
+
 interface LeaveRequest {
     id: string;
     empId: number;
@@ -4246,15 +4252,24 @@ export default function Attendance() {
                         addCatalogItem(product.sku, product.name, variants.map(variant => variant?.sku));
                     });
                 }
+                // Build the reverse lookup once. The previous implementation
+                // scanned every catalog product for every combo, which became
+                // an avoidable O(combos * products) CPU spike on large catalogs.
+                const parentByMemberSku = new Map<string, PackingCatalogItem>();
+                catalogBySku.forEach(product => {
+                    product.memberSkus.forEach(memberSku => {
+                        if (!parentByMemberSku.has(memberSku)) parentByMemberSku.set(memberSku, product);
+                    });
+                });
                 if (combosRes?.success && Array.isArray(combosRes.data)) {
                     combosRes.data.forEach((combo: any) => {
                         if (combo?.status === 'inactive') return;
                         const comboSku = normalizePackingSku(combo?.sku);
                         const components = parsePackingComboItems(combo?.items);
                         if (!comboSku || components.length === 0) return;
-                        const parent = [...catalogBySku.values()].find(product =>
-                            components.some(component => product.memberSkus.includes(component.sku))
-                        );
+                        const parent = components
+                            .map(component => parentByMemberSku.get(component.sku))
+                            .find(Boolean);
                         if (parent && !parent.memberSkus.includes(comboSku)) parent.memberSkus.push(comboSku);
                     });
                 }
@@ -4277,6 +4292,54 @@ export default function Attendance() {
 
     // 1. Tải dữ liệu từ DB lúc mở component
     useEffect(() => {
+        let cancelled = false;
+        const applyAttendanceSnapshot = (snapshot: any) => {
+            if (!snapshot || cancelled) return;
+            const d = snapshot;
+            if (d.config) {
+                const normalizedConfig = {
+                    ...d.config,
+                    packingCommission: normalizePackingCommission(d.config.packingCommission),
+                } as PenaltyConfig;
+                setConfig(normalizedConfig);
+                setTempConfig(normalizedConfig);
+            }
+            if (d.employees && Array.isArray(d.employees) && d.employees.length > 0) {
+                const merged = d.employees.map((emp: any) => ({
+                    ...emp,
+                    username: emp.username || (initialEmployees.find(ie => ie.id === emp.id)?.username || ''),
+                }));
+                setEmployees(merged);
+            } else if (!d.employees) {
+                setEmployees(initialEmployees);
+            }
+            // An empty employees array is meaningful and must remain empty.
+            if (d.bonusAuditLog) setBonusAuditLog(d.bonusAuditLog);
+            if (d.extraBonuses) setExtraBonuses(d.extraBonuses);
+            if (d.extraFundTx) setExtraFundTx(d.extraFundTx);
+            if (d.fundAuditLog) setFundAuditLog(d.fundAuditLog);
+            if (d.extraFines) {
+                setExtraFines(d.extraFines.map((fine: FineRecord, index: number) => ensureFineId(fine, index)));
+            }
+            if (d.fineOverrides) setFineOverrides(d.fineOverrides);
+            if (d.fineAuditLog) setFineAuditLog(d.fineAuditLog);
+            if (d.fineWaivers) setFineWaivers(d.fineWaivers);
+            if (d.lockedPeriods) setLockedPeriods(d.lockedPeriods);
+            if (d.payrollOverrides) setPayrollOverrides(d.payrollOverrides);
+            if (d.gmailSentLog) setGmailSentLog(d.gmailSentLog);
+            if (Array.isArray(d.leaveRecords)) setLeaveRecords(d.leaveRecords);
+            if (Array.isArray(d.workSchedules)) setWorkSchedules(d.workSchedules);
+        };
+
+        // Paint from the previous in-session snapshot immediately, then let
+        // the network refresh replace it. This removes the spinner on tab
+        // remounts without weakening freshness or data-safety checks.
+        if (!isAttendanceUiTest && attendanceInitialDataCache?.data) {
+            applyAttendanceSnapshot(attendanceInitialDataCache.data);
+            setIsDbLoaded(true);
+            console.info('[Attendance:load] painted from in-session snapshot');
+        }
+
         const loadData = async () => {
             const startedAt = performance.now();
             try {
@@ -4314,42 +4377,13 @@ export default function Attendance() {
                 const rs = await attendancePromise;
 
                 if (rs && rs.success && rs.data) {
-                    const d = rs.data;
-                    if (d.config) {
-                        const normalizedConfig = {
-                            ...d.config,
-                            packingCommission: normalizePackingCommission(d.config.packingCommission),
-                        } as PenaltyConfig;
-                        setConfig(normalizedConfig);
-                        setTempConfig(normalizedConfig);
-                    }
-                    if (d.employees && Array.isArray(d.employees) && d.employees.length > 0) {
-                        const merged = d.employees.map((emp: any) => {
-                            const username = emp.username || (initialEmployees.find(ie => ie.id === emp.id)?.username || '');
-                            return { ...emp, username };
-                        });
-                        setEmployees(merged);
-                    } else if (!d.employees) {
-                        setEmployees(initialEmployees);
-                    }
-                    // Nếu d.employees là mảng rỗng [] → giữ nguyên (user đã xóa hết NV)
-                    if (d.bonusAuditLog) setBonusAuditLog(d.bonusAuditLog);
-                    if (d.extraBonuses) setExtraBonuses(d.extraBonuses);
-                    if (d.extraFundTx) setExtraFundTx(d.extraFundTx);
-                    if (d.fundAuditLog) setFundAuditLog(d.fundAuditLog);
-                    if (d.extraFines) {
-                        setExtraFines(d.extraFines.map((fine: FineRecord, index: number) => ensureFineId(fine, index)));
-                    }
-                    if (d.fineOverrides) setFineOverrides(d.fineOverrides);
-                    if (d.fineAuditLog) setFineAuditLog(d.fineAuditLog);
-                    if (d.fineWaivers) setFineWaivers(d.fineWaivers);
-                    if (d.lockedPeriods) setLockedPeriods(d.lockedPeriods);
-                    if (d.payrollOverrides) setPayrollOverrides(d.payrollOverrides);
-                    if (d.gmailSentLog) setGmailSentLog(d.gmailSentLog);
-                    if (Array.isArray(d.leaveRecords)) setLeaveRecords(d.leaveRecords);
-                    if (Array.isArray(d.workSchedules)) setWorkSchedules(d.workSchedules);
+                    attendanceInitialDataCache = {
+                        data: rs.data,
+                        updatedAt: rs.updatedAt || null,
+                    };
+                    applyAttendanceSnapshot(rs.data);
                 } else {
-                    setEmployees(initialEmployees);
+                    if (!attendanceInitialDataCache?.data) setEmployees(initialEmployees);
                 }
 
                 // The account roster is auxiliary to the first Attendance
@@ -4357,6 +4391,7 @@ export default function Attendance() {
                 // without holding the initial page gate.
                 void usersPromise.then((usersRes) => {
                     try {
+                        if (cancelled) return;
                         if (!usersRes?.success || !Array.isArray(usersRes.data)) return;
                         const users = usersRes.data;
                         setSystemUsers(users);
@@ -4454,6 +4489,7 @@ export default function Attendance() {
         window.addEventListener('attendance:fineRemoved', handleFineRemoved);
         window.addEventListener('attendance:fineChanged', handleFineChanged);
         return () => {
+            cancelled = true;
             window.removeEventListener('attendance:fineAdded', handleFineAdded);
             window.removeEventListener('attendance:fineRemoved', handleFineRemoved);
             window.removeEventListener('attendance:fineChanged', handleFineChanged);
@@ -6232,36 +6268,12 @@ export default function Attendance() {
 
     const payrollData = useMemo(() => {
         if (lockedPayrollSnapshot?.rows) return lockedPayrollSnapshot.rows;
-        if (!isPayrollDataReady) {
-            return employees.map(employee => ({
-                ...employee,
-                shifts: 0,
-                absentDays: 0,
-                salaryBase: 0,
-                packIncome: 0,
-                totalPackValue_100: 0,
-                fineShare: 0,
-                mBonus: 0,
-                salesBonus: 0,
-                myFines: 0,
-                totalBonus: 0,
-                finalSalary: 0,
-                leaveDeduction: 0,
-                packOrderCount: 0,
-                packTotalUnits: 0,
-                packBreakdown: {},
-                autoShifts: 0,
-                autoSalaryBase: 0,
-                autoPackIncome: 0,
-                extraShifts: 0,
-                extraAdjust: 0,
-                adjustNote: '',
-                hasOverride: false,
-                salaryPerShift: 0,
-                employmentEndDate: employmentEndDates[normalizeAttendanceText(employee.username)] || null,
-            }));
-        }
         const startedAt = performance.now();
+        // Calculate with the sources already available instead of replacing
+        // every money cell with a zero placeholder until the slowest source
+        // finishes. `calculatePayroll` already gates attendance deductions
+        // with `overviewAttendanceReady`; final salary remains gated in the
+        // table by `isPayrollDataReady` until all sources are coherent.
         const rows = calculatePayroll(
             overviewFines, leaveRecords, workSchedules, overviewWareHousePacking, employees, overviewBonuses,
             overviewAttendanceLogs, overviewDateRange[0].month() + 1, overviewDateRange[0].year(), overviewPackingLogs, packingCommission, employmentEndDates, payrollOverrides, overviewAttendanceReady, activeSalesBonusSummary.bonusAmount
@@ -6319,6 +6331,27 @@ export default function Attendance() {
     const privatePayrollData = useMemo(
         () => payrollData.filter(isCurrentUserPayrollRow),
         [payrollData, isCurrentUserPayrollRow]
+    );
+    // Keep the amount visible while slower auxiliary sources are still being
+    // reconciled. The value is explicitly marked as provisional; actions that
+    // require a coherent payroll snapshot remain gated by isPayrollDataReady.
+    const renderPayrollAmount = (value: number, ready: boolean, className = 'att-money-final') => (
+        ready
+            ? <span className={className}>{fmt(value || 0)}</span>
+            : <Tooltip title="Đang bổ sung dữ liệu phạt, thưởng hoặc điểm danh">
+                <span className={`${className} att-money-pending`}>
+                    ~ {fmt(value || 0)} <SyncOutlined spin aria-label="Đang cập nhật" />
+                </span>
+            </Tooltip>
+    );
+    const renderFineAmount = (value: number, ready: boolean, className = 'att-money-red') => (
+        ready
+            ? <span className={className}>{value > 0 ? `- ${fmt(value)}` : fmt(0)}</span>
+            : <Tooltip title="Đang bổ sung các nguồn phạt tự động">
+                <span className={`${className} att-money-pending`}>
+                    ~ {value > 0 ? `- ${fmt(value)}` : fmt(0)} <SyncOutlined spin aria-label="Đang cập nhật" />
+                </span>
+            </Tooltip>
     );
     const currentEmployeePayroll = useMemo(
         () => payrollData.find(matchesCurrentUserPayrollRow),
@@ -7645,7 +7678,7 @@ const openConfigModal = () => {
                             <div className="att-staff-net-pay">
                                 <div className="att-staff-net-pay__amount">
                                     <span>Thực nhận</span>
-                                    <strong>{isPayrollDataReady ? fmt(employee.finalSalary || 0) : 'Đang tổng hợp...'}</strong>
+                                    <strong>{renderPayrollAmount(employee.finalSalary || 0, isPayrollDataReady)}</strong>
                                 </div>
                                 <div className={`att-staff-achievement-chip ${attendanceReward?.badgeUnlocked ? 'is-unlocked is-image' : 'is-locked'}`} aria-label={attendanceReward?.badgeUnlocked ? `Huy hiệu đúng giờ đã đạt với ${attendanceReward.currentStreak} ngày liên tiếp` : 'Tiến độ mở huy hiệu đúng giờ'}>
                                     {attendanceReward?.badgeUnlocked ? (
@@ -7755,12 +7788,7 @@ const openConfigModal = () => {
                             </Table.Summary.Cell>
                             <Table.Summary.Cell index={5} align="right" className="att-overview-total-cell">
                                 <span className="att-overview-total-value-fine">
-                                    {areFineSourcesReady
-                                        ? <>
-                                            <span className="att-overview-full-only">{totalFines > 0 ? `- ${fmt(totalFines)}` : fmt(0)}</span>
-                                            <span className="att-overview-compact-only">{totalFines > 0 ? `-${fmtCompactMoney(totalFines)}` : '0đ'}</span>
-                                        </>
-                                        : <Tooltip title="Đang tổng hợp các khoản phạt"><SyncOutlined spin /></Tooltip>}
+                                    {renderFineAmount(totalFines, areFineSourcesReady, 'att-overview-total-value-fine')}
                                 </span>
                             </Table.Summary.Cell>
                             <Table.Summary.Cell index={6} align="right" className="att-overview-total-cell-final">
@@ -7770,9 +7798,7 @@ const openConfigModal = () => {
                             </Table.Summary.Cell>
                             <Table.Summary.Cell index={7} align="right" className="att-overview-total-cell-final">
                                 <span className="att-overview-total-money">
-                                    {isPayrollDataReady
-                                        ? fmt(totalFinalSalary)
-                                        : <Tooltip title="Đang tổng hợp lương hoàn chỉnh"><SyncOutlined spin /></Tooltip>}
+                                    {renderPayrollAmount(totalFinalSalary, isPayrollDataReady)}
                                 </span>
                             </Table.Summary.Cell>
                             <Table.Summary.Cell index={8} className="att-overview-total-action-cell" />
@@ -7815,14 +7841,7 @@ const openConfigModal = () => {
                     },
                     {
                         title: 'Phạt', dataIndex: 'myFines', key: 'fine', align: 'right' as const, width: '9%', className: 'att-overview-cell att-overview-cell--fine',
-                        render: (v: number) => areFineSourcesReady
-                            ? <>
-                                <span className="att-overview-full-only att-money-red">{v > 0 ? `- ${fmt(v)}` : fmt(0)}</span>
-                                <Tooltip title={v > 0 ? `Phạt: - ${fmt(v)}` : 'Không có khoản phạt'}>
-                                    <span className="att-overview-compact-only att-money-red">{v > 0 ? `-${fmtCompactMoney(v)}` : '0đ'}</span>
-                                </Tooltip>
-                            </>
-                            : <Tooltip title="Đang tổng hợp các khoản phạt"><SyncOutlined spin style={{ color: '#ff4d4f' }} /></Tooltip>,
+                        render: (v: number) => renderFineAmount(v, areFineSourcesReady),
                     },
                     {
                         title: 'Nghỉ', dataIndex: 'leaveDeduction', key: 'leaveDeduction', align: 'right' as const, width: '8%', className: 'att-overview-cell att-overview-cell--leave',
@@ -7834,9 +7853,7 @@ const openConfigModal = () => {
                     },
                     {
                         title: 'Tổng lương', dataIndex: 'finalSalary', key: 'final', align: 'right' as const, width: '12%', className: 'att-overview-cell att-overview-cell--final',
-                        render: (v: number) => isPayrollDataReady
-                            ? <span className="att-money-final">{fmt(v)}</span>
-                            : <Tooltip title="Đang tổng hợp lương hoàn chỉnh"><SyncOutlined spin style={{ color: '#1677ff' }} /></Tooltip>,
+                        render: (v: number) => renderPayrollAmount(v, isPayrollDataReady),
                     },
                     {
                         title: 'Chi tiết', key: 'detail', align: 'center' as const, width: '15%', className: 'att-overview-cell att-overview-cell--action',
@@ -7857,9 +7874,9 @@ const openConfigModal = () => {
                     <div><span>Lương cơ bản</span><strong className="att-overview-total-value-base">{fmt(totalBaseSalary)}</strong></div>
                     <div><span>Thưởng đóng gói</span><strong className="att-overview-total-value-pack">+ {fmt(totalPackIncome)}</strong></div>
                     <div><span>Thưởng</span><strong className="att-overview-total-value-bonus">+ {fmt(totalBonus)}</strong></div>
-                    <div><span>Phạt</span><strong className="att-overview-total-value-fine">{areFineSourcesReady ? (totalFines > 0 ? `- ${fmt(totalFines)}` : fmt(0)) : <SyncOutlined spin />}</strong></div>
+                    <div><span>Phạt</span><strong className="att-overview-total-value-fine">{renderFineAmount(totalFines, areFineSourcesReady, 'att-overview-total-value-fine')}</strong></div>
                     <div><span>Nghỉ</span><strong className="att-overview-total-value-fine">{totalLeaveDeduction > 0 ? `- ${fmt(totalLeaveDeduction)}` : fmt(0)}</strong></div>
-                    <div className="att-overview-responsive-total__final"><span>Tổng lương</span><strong>{isPayrollDataReady ? fmt(totalFinalSalary) : <SyncOutlined spin />}</strong></div>
+                    <div className="att-overview-responsive-total__final"><span>Tổng lương</span><strong>{renderPayrollAmount(totalFinalSalary, isPayrollDataReady)}</strong></div>
                 </div>
             </div>
         </div>

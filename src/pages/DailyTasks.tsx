@@ -3186,8 +3186,43 @@ const DailyTasks = () => {
             ? selectedAssignments
             : selectedAssignments.filter(task => deadlineViewFilter === 'completed' ? task.status === 'completed' : task.status !== 'completed');
         const unfilteredSourceTasks = scope === 'daily' ? selectedDailyTasks : scope === 'deadline' ? visibleDeadlineTasks : [...selectedDailyTasks, ...selectedAssignments];
+        // A linked module is a single operational slot per assignee and day.
+        // Older data can contain one task per reported batch, so collapse those
+        // duplicate rows while retaining the most actionable task record.
+        const sourceTasksByLinkedModule = new Map<string, Task>();
+        unfilteredSourceTasks.forEach(task => {
+            const linkedModule = getLinkedModule(task);
+            if (!linkedModule) {
+                sourceTasksByLinkedModule.set(`task:${task.type}:${task.id}`, task);
+                return;
+            }
+            const assigneeKey = String(task.assignee || getAssignmentRecipients(task)[0] || '').trim().toLocaleLowerCase('vi');
+            const dateKey = dayjs(task.dueDate || selectedDateKey).format('YYYY-MM-DD');
+            const key = `linked:${linkedModule}:${assigneeKey}:${dateKey}`;
+            const current = sourceTasksByLinkedModule.get(key);
+            if (!current) {
+                sourceTasksByLinkedModule.set(key, task);
+                return;
+            }
+            const currentEvidence = getEvidence(current);
+            const nextEvidence = getEvidence(task);
+            const currentOpen = current.status !== 'completed';
+            const nextOpen = task.status !== 'completed';
+            const currentSubmitted = ['submitted', 'approved', 'rejected'].includes(currentEvidence.status || '');
+            const nextSubmitted = ['submitted', 'approved', 'rejected'].includes(nextEvidence.status || '');
+            const currentStamp = dayjs(current.createdAt || current.dueDate).valueOf();
+            const nextStamp = dayjs(task.createdAt || task.dueDate).valueOf();
+            if (
+                (nextOpen && !currentOpen)
+                || (nextOpen === currentOpen && nextSubmitted && !currentSubmitted)
+                || (nextOpen === currentOpen && nextSubmitted === currentSubmitted && nextStamp > currentStamp)
+            ) {
+                sourceTasksByLinkedModule.set(key, task);
+            }
+        });
+        const dedupedSourceTasks = Array.from(sourceTasksByLinkedModule.values());
         const normalizedTaskSearch = taskSearch.trim().toLocaleLowerCase('vi');
-        const sourceTasks = unfilteredSourceTasks.filter(task => {
+        const sourceTasks = dedupedSourceTasks.filter(task => {
             if (normalizedTaskSearch && ![task.title, task.assignee, task.category]
                 .some(value => String(value || '').toLocaleLowerCase('vi').includes(normalizedTaskSearch))) return false;
             if (boardFilter === 'all') return true;

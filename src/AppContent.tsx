@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useRef, lazy, Suspense, Component, ErrorInfo, ReactNode, type ComponentType } from 'react';
+import { useState, useEffect, useMemo, useCallback, useRef, lazy, Suspense, Component, ErrorInfo, ReactNode, type ComponentType } from 'react';
 import { Layout, Menu, Button, Typography, ConfigProvider, Space, Tooltip, Avatar } from 'antd';
 import AntAppProvider from './components/AntAppProvider';
 import {
@@ -78,6 +78,9 @@ const OrdersPage = lazy(() => import('./pages/Orders'));
 const BusinessReportPage = lazy(() => import('./pages/BusinessReport'));
 const loadAttendancePage = () => import('./pages/Attendance');
 const AttendancePage = lazy(loadAttendancePage);
+const prefetchAttendancePage = () => {
+    void loadAttendancePage();
+};
 const StockCheckPage = lazy(() => import('./pages/StockCheck'));
 const MyProfilePage = lazy(() => import('./pages/MyProfile'));
 const HandlingUnitsPage = lazy(() => import('./pages/HandlingUnits'));
@@ -140,6 +143,7 @@ function AppContent() {
         logout,
     } = useAuth();
     const { getAccessibleMenuKeys, hasPermission } = usePermissions();
+    const canManagePermissions = hasPermission('permissions');
     const [selectedKey, setSelectedKey] = useState(isAttendanceUiTest ? 'attendance' : isPrepackedUiTest ? 'prepack' : 'dashboard');
     const [openMenuKeys, setOpenMenuKeys] = useState<string[]>(isPrepackedUiTest ? ['inventory'] : []);
     const [collapsed, setCollapsed] = useState(false);
@@ -203,9 +207,9 @@ function AppContent() {
         };
 
         if (idleWindow.requestIdleCallback) {
-            idleId = idleWindow.requestIdleCallback(preload, { timeout: 30000 });
+            idleId = idleWindow.requestIdleCallback(preload, { timeout: 8000 });
         } else {
-            timer = window.setTimeout(preload, 30000);
+            timer = window.setTimeout(preload, 8000);
         }
 
         return () => {
@@ -388,11 +392,18 @@ function AppContent() {
         icon?: React.ReactNode,
         children?: MenuItem[],
     ): MenuItem => {
+        const menuLabel = key === 'attendance'
+            ? (
+                <span onMouseEnter={prefetchAttendancePage} onFocus={prefetchAttendancePage}>
+                    {label}
+                </span>
+            )
+            : label;
         return {
             key,
             icon,
             children,
-            label,
+            label: menuLabel,
         } as MenuItem;
     };
 
@@ -413,11 +424,12 @@ function AppContent() {
             return undefined;
         };
         if (key === 'my-profile') return 'Hồ sơ của tôi';
+        if (key === 'attendance') return 'Bảng công';
         return findLabel(menuItems) || 'AIRCLEAN WMS';
     };
 
     // Build menu items based on accessible keys
-    const buildMenuItems = (): MenuItem[] => {
+    const buildMenuItems = useCallback((): MenuItem[] => {
         const items: MenuItem[] = [];
 
         // Dashboard - always visible if accessible
@@ -437,7 +449,7 @@ function AppContent() {
 
         // Tools submenu
         const toolsChildren: MenuItem[] = [];
-        if (accessibleKeys.includes('fee-calculator') && hasPermission('permissions')) {
+        if (accessibleKeys.includes('fee-calculator') && canManagePermissions) {
             toolsChildren.push(createMenuItem('Tính phí sản', 'fee-calculator', menuGeometric(CalculatorOutlined)));
         }
         if (accessibleKeys.includes('order-picking')) {
@@ -535,11 +547,20 @@ function AppContent() {
 
 
         return items;
-    };
+    }, [accessibleKeys, canManagePermissions]);
 
-    const menuItems = buildMenuItems();
-    const settingsMenuItems = menuItems.filter((item) => item && typeof item === 'object' && 'key' in item && item.key === 'settings');
-    const primaryMenuItems = menuItems.filter((item) => !item || typeof item !== 'object' || !('key' in item) || item.key !== 'settings');
+    // Ant Design Menu derives internal state from `items`. Keep the tree
+    // stable between unrelated shell renders to avoid repeated reconciliation
+    // and the controlled-menu update loop seen during Attendance navigation.
+    const menuItems = useMemo(() => buildMenuItems(), [buildMenuItems]);
+    const settingsMenuItems = useMemo(
+        () => menuItems.filter((item) => item && typeof item === 'object' && 'key' in item && item.key === 'settings'),
+        [menuItems],
+    );
+    const primaryMenuItems = useMemo(
+        () => menuItems.filter((item) => !item || typeof item !== 'object' || !('key' in item) || item.key !== 'settings'),
+        [menuItems],
+    );
 
     useEffect(() => {
         const isStockCheck = selectedKey === 'stock-check';
@@ -952,19 +973,21 @@ function AppContent() {
                             }}
                         >
                             <Suspense fallback={
-                                <div style={{
-                                    position: 'fixed',
-                                    inset: 0,
+                                <div role="status" style={{
+                                    minHeight: 'calc(100vh - 160px)',
                                     display: 'flex',
                                     justifyContent: 'center',
                                     alignItems: 'center',
-                                    background: 'rgba(255,255,255,0.85)',
-                                    zIndex: 900,
+                                    background: '#f8fafb',
+                                    borderRadius: 12,
                                 }}>
                                     <div className="logo-spin-wrapper">
                                         <img src="./logo_splash.png" alt="Loading" className="logo-spin-img" />
                                         <div className="logo-spin-dots">
                                             <span></span><span></span><span></span>
+                                        </div>
+                                        <div style={{ marginTop: 12, color: '#64748b', fontSize: 13 }}>
+                                            Đang mở {getMenuLabel(selectedKey)}...
                                         </div>
                                     </div>
                                 </div>
