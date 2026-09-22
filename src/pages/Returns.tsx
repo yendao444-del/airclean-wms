@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import {
     Card,
     Button,
@@ -278,10 +278,10 @@ export default function ReturnsPage() {
         }
     };
 
-    const handleAdd = () => {
+    const handleAdd = useCallback(() => {
         // Mở thẳng popup Import Excel
         setInputMethod('excel');
-    };
+    }, []);
 
     const handleMethodSelect = (method: 'manual' | 'excel') => {
         setInputMethod(method);
@@ -817,24 +817,6 @@ export default function ReturnsPage() {
             message.error(error?.message || 'Không thể cập nhật trạng thái hàng loạt');
             await loadReturns(true);
         }
-    };
-
-    const handleExportDisplayed = async () => {
-        const rows = displayedReturns.map(item => ({
-            'Mã KN': item.complaintCode,
-            'Đơn hàng': item.orderNumber,
-            'Ngày': dayjs(item.complaintDate).format('DD/MM/YYYY'),
-            'Sản phẩm': item.productName,
-            'Lý do': item.reason,
-            'Nhân viên đóng gói': item.packer || '',
-            'Lỗi do': item.faultParty === 'customer' ? 'Khách hàng' : 'Kho',
-            'Trạng thái': statusList.find(status => status.value === item.status)?.label || item.status,
-        }));
-        const XLSX = await import('xlsx');
-        const worksheet = XLSX.utils.json_to_sheet(rows);
-        const workbook = XLSX.utils.book_new();
-        XLSX.utils.book_append_sheet(workbook, worksheet, 'Tra hang');
-        XLSX.writeFile(workbook, `tra-hang-${dayjs().format('YYYY-MM-DD')}.xlsx`);
     };
 
     const clearReturnFilters = () => {
@@ -1414,6 +1396,27 @@ export default function ReturnsPage() {
 
     // Determine which data to show based on active tab
     const displayedReturns = activeTab === 'active' ? filteredActive : filteredHistory;
+    const displayedReturnsRef = useRef(displayedReturns);
+    displayedReturnsRef.current = displayedReturns;
+    const statusListRef = useRef(statusList);
+    statusListRef.current = statusList;
+    const handleExportDisplayed = useCallback(async () => {
+        const rows = displayedReturnsRef.current.map(item => ({
+            'Mã KN': item.complaintCode,
+            'Đơn hàng': item.orderNumber,
+            'Ngày': dayjs(item.complaintDate).format('DD/MM/YYYY'),
+            'Sản phẩm': item.productName,
+            'Lý do': item.reason,
+            'Nhân viên đóng gói': item.packer || '',
+            'Lỗi do': item.faultParty === 'customer' ? 'Khách hàng' : 'Kho',
+            'Trạng thái': statusListRef.current.find(status => status.value === item.status)?.label || item.status,
+        }));
+        const XLSX = await import('xlsx');
+        const worksheet = XLSX.utils.json_to_sheet(rows);
+        const workbook = XLSX.utils.book_new();
+        XLSX.utils.book_append_sheet(workbook, worksheet, 'Tra hang');
+        XLSX.writeFile(workbook, `tra-hang-${dayjs().format('YYYY-MM-DD')}.xlsx`);
+    }, []);
     const overdueCount = activeReturns.filter(item => getReturnSla(item).overdue).length;
     const waitingStatus = statusList.find(status => /wait|cho|chờ|support|cskh/i.test(`${status.value} ${status.label}`));
     const waitingCount = waitingStatus ? activeReturns.filter(item => item.status === waitingStatus.value).length : 0;
