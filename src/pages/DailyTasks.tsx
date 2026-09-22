@@ -1994,7 +1994,7 @@ const DailyTasks = () => {
                 task.id,
                 approved,
                 {
-                    submittedAt: evidence.submittedAt || evidence.reviewedAt,
+                    submittedAt: evidence.submittedAt,
                     evidenceKeys,
                     rejectionReason,
                 },
