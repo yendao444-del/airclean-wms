@@ -89,6 +89,7 @@ type UnitRow = {
   location?: { zone?: string; rack?: string };
   initialPcs: number;
   currentPcs: number;
+  conversionFactor?: number;
   note?: string;
   updatedAt?: string;
   hasWithdrawalHistory?: boolean;
@@ -288,6 +289,9 @@ const normalizeUnitName = (value?: string) =>
     .replace(/đ/g, "d")
     .trim()
     .toLocaleLowerCase("vi-VN");
+
+const capacityForUnit = (unit: Pick<UnitRow, "initialPcs" | "conversionFactor">) =>
+  Math.max(Number(unit.initialPcs || 0), Number(unit.conversionFactor || 0));
 
 const packagingMethodForSpec = (spec?: any): "TAI" | "THUNG" | "LE" =>
   getPackageCategory(spec?.name) === "THUNG"
@@ -1457,12 +1461,12 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
 
   const getReturnMergeTargets = (source: UnitRow) =>
     workspace.register.filter((candidate) =>
-      candidate.id.toUpperCase() !== source.id.toUpperCase()
-      && candidate.skuName.toUpperCase() === source.skuName.toUpperCase()
+      candidate.id.trim().toUpperCase() !== source.id.trim().toUpperCase()
+      && candidate.skuName.trim().toUpperCase() === source.skuName.trim().toUpperCase()
       && candidate.status === "Đang sử dụng"
       && !isReturnHandlingUnit(candidate)
       && normalizeUnitName(candidate.unitName) === normalizeUnitName(source.unitName)
-      && Number(candidate.initialPcs) > Number(candidate.currentPcs)
+      && capacityForUnit(candidate) > Number(candidate.currentPcs || 0)
     );
 
   const openMergeReturnUnit = (source: UnitRow) => {
@@ -1474,8 +1478,8 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
     const targets = getReturnMergeTargets(source);
     if (!targets.length) {
       const sameSkuOpened = workspace.register.some((candidate) =>
-        candidate.id.toUpperCase() !== source.id.toUpperCase()
-        && candidate.skuName.toUpperCase() === source.skuName.toUpperCase()
+        candidate.id.trim().toUpperCase() !== source.id.trim().toUpperCase()
+        && candidate.skuName.trim().toUpperCase() === source.skuName.trim().toUpperCase()
         && candidate.status === "Đang sử dụng"
         && !isReturnHandlingUnit(candidate)
       );
@@ -1487,7 +1491,7 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
       return;
     }
     const firstTarget = targets[0];
-    const availableCapacity = Math.max(0, Number(firstTarget.initialPcs) - Number(firstTarget.currentPcs));
+    const availableCapacity = Math.max(0, capacityForUnit(firstTarget) - Number(firstTarget.currentPcs || 0));
     setMergeReturnUnit(source);
     setMergeTargetCode(firstTarget.id);
     setMergeQuantity(Math.min(Number(source.currentPcs), availableCapacity));
@@ -5757,7 +5761,7 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
           const targets = getReturnMergeTargets(mergeReturnUnit);
           const selectedTarget = targets.find(unit => unit.id === mergeTargetCode);
           const availableCapacity = selectedTarget
-            ? Math.max(0, Number(selectedTarget.initialPcs) - Number(selectedTarget.currentPcs))
+            ? Math.max(0, capacityForUnit(selectedTarget) - Number(selectedTarget.currentPcs || 0))
             : 0;
           const maximumQuantity = Math.min(Number(mergeReturnUnit.currentPcs), availableCapacity);
           return (
@@ -5781,13 +5785,13 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
                   placeholder="Chọn kiện đích"
                   onChange={(code) => {
                     const target = targets.find(unit => unit.id === code);
-                    const capacity = target ? Math.max(0, Number(target.initialPcs) - Number(target.currentPcs)) : 0;
+                    const capacity = target ? Math.max(0, capacityForUnit(target) - Number(target.currentPcs || 0)) : 0;
                     setMergeTargetCode(code);
                     setMergeQuantity(Math.min(Number(mergeReturnUnit.currentPcs), capacity));
                   }}
                   options={targets.map(unit => ({
                     value: unit.id,
-                    label: `${unit.id} · ${unit.packageType} · còn ${fmt(unit.currentPcs)}/${fmt(unit.initialPcs)} ${unit.unitName}`,
+                    label: `${unit.id} · ${unit.packageType} · còn ${fmt(unit.currentPcs)}/${fmt(capacityForUnit(unit))} ${unit.unitName}`,
                   }))}
                 />
               </div>

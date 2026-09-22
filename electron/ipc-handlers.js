@@ -7183,9 +7183,10 @@ ipcMain.handle("handlingUnits:getWorkspace", async (_event, options = {}) => {
     const stockCheckWorkspace = options?.purpose === "stock-check";
     requireRole("admin", "manager", "staff");
     if (!prisma) throw new Error("Prisma not available");
-    // Non-admins can inspect package identity and location in the workspace,
-    // but never receive aggregate stock or opened-unit quantities.
-    const blindStockCheck = !isAdminStockCheckSession();
+    // Hide quantities only in the dedicated stock-check workspace. Normal
+    // handling-unit operations need live balances to choose merge targets and
+    // validate withdrawals for managers and staff.
+    const blindStockCheck = stockCheckWorkspace && !isAdminStockCheckSession();
 
     const [
       productCandidates,
@@ -7350,6 +7351,7 @@ ipcMain.handle("handlingUnits:getWorkspace", async (_event, options = {}) => {
       location: decodeLocation(row.zone),
       initialPcs: row.initialQuantity,
       currentPcs: row.remainingQuantity,
+      conversionFactor: row.conversionFactor,
       note: "",
       updatedAt: row.updatedAt,
       parentUnitCode: parentByChild.get(String(row.code).toUpperCase()) || undefined,
@@ -10056,6 +10058,23 @@ function getHandlingUnitPackageCategory(value) {
   return "LE";
 }
 
+function handlingUnitCapacity(unit) {
+  return Math.max(
+    0,
+    Number(unit?.initialQuantity || 0),
+    Number(unit?.conversionFactor || 0),
+  );
+}
+
+function normalizeHandlingBaseUnit(value) {
+  return String(value || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/đ/g, "d")
+    .trim()
+    .toLowerCase();
+}
+
 function buildPendingHandlingUnitBlockMessage(sku, pendingUnit, action) {
   const code = pendingUnit?.code || pendingUnit?.id || "không xác định";
   const remaining = Number(
@@ -12323,7 +12342,7 @@ ipcMain.handle("handlingUnits:mergeReturnUnit", async (_event, payload = {}) => 
         throw new Error(`Kiện đích [${targetCode}] chưa được khui hoặc không còn sử dụng.`);
       if (String(source.sku).trim().toUpperCase() !== String(target.sku).trim().toUpperCase())
         throw new Error(`Không thể gộp khác SKU phân loại: ${source.sku} và ${target.sku}.`);
-      if (String(source.baseUnit).trim().toLowerCase() !== String(target.baseUnit).trim().toLowerCase())
+      if (normalizeHandlingBaseUnit(source.baseUnit) !== normalizeHandlingBaseUnit(target.baseUnit))
         throw new Error(`Hai kiện khác đơn vị cơ sở: ${source.baseUnit} và ${target.baseUnit}.`);
       const pendingConflict = await tx.handlingUnit.findFirst({
         where: {
@@ -12339,7 +12358,7 @@ ipcMain.handle("handlingUnits:mergeReturnUnit", async (_event, payload = {}) => 
       if (quantity > Number(source.remainingQuantity))
         throw new Error(`Kiện hàng hoàn chỉ còn ${source.remainingQuantity} ${source.baseUnit}.`);
 
-      const availableCapacity = Number(target.initialQuantity) - Number(target.remainingQuantity);
+      const availableCapacity = handlingUnitCapacity(target) - Number(target.remainingQuantity);
       if (quantity > availableCapacity) {
         throw new Error(`Kiện đích [${targetCode}] chỉ còn sức chứa ${Math.max(0, availableCapacity)} ${target.baseUnit}.`);
       }
@@ -19691,7 +19710,10 @@ ipcMain.handle(
       let historicalSubmission = false;
 
       const currentEvidenceKeys = getSubmittedEvidenceKeys(currentEvidence);
-      const requestedHistoryByTime = requestedSubmittedAt &&
+      // Image identity is stronger than timestamps. Older snapshots may carry
+      // a reviewedAt value or omit submittedAt while still referencing the
+      // exact current proof, which previously misclassified it as missing history.
+      const requestedHistoryByTime = requestedEvidenceKeys.length === 0 && requestedSubmittedAt &&
         String(currentEvidence.submittedAt || "") !== requestedSubmittedAt;
       const requestedHistoryByImage = requestedEvidenceKeys.length > 0 &&
         !requestedEvidenceKeys.some((key) => currentEvidenceKeys.includes(key));

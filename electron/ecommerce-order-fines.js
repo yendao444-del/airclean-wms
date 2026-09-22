@@ -1,5 +1,16 @@
 const ECOMMERCE_ORDER_FINE_TOTAL = 10000;
 const ECOMMERCE_OFFICIAL_RECIPIENTS = 2;
+const ECOMMERCE_FINE_EFFECTIVE_DATE = "2026-09-22";
+
+function bangkokDateKey(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  return date.toLocaleDateString("sv-SE", { timeZone: "Asia/Bangkok" });
+}
+
+function bangkokStartOfDay(dateKey) {
+  return new Date(`${dateKey}T00:00:00+07:00`);
+}
 
 function dateAtBangkokNextDay(value) {
   const date = new Date(value);
@@ -85,7 +96,7 @@ async function reconcileEcommerceOrderFines(prisma, options = {}) {
     const split = splitFine(ECOMMERCE_ORDER_FINE_TOTAL, officialEmployees);
 
     const addViolation = (order, kind, date, detail) => {
-      const id = `fine-ecommerce-${kind}-${order.id}`;
+      const id = `fine-ecommerce-${kind}-${order.id}-${ECOMMERCE_FINE_EFFECTIVE_DATE}`;
       const hasFine = (fineId) => existingIds.has(fineId)
         || deletedIds.has(fineId)
         || Array.from(deletedIds).some((deletedId) => deletedId.startsWith(`${fineId}-`))
@@ -126,22 +137,33 @@ async function reconcileEcommerceOrderFines(prisma, options = {}) {
         (order.status !== "completed" || !completedAt || completedAt > deadline),
       );
       if (isLate) {
+        const completedAfterPolicyStart = completedAt
+          && deadline
+          && bangkokDateKey(deadline) >= ECOMMERCE_FINE_EFFECTIVE_DATE
+          && bangkokDateKey(completedAt) >= ECOMMERCE_FINE_EFFECTIVE_DATE;
+        // Do not grandfather an order whose marketplace SLA deadline was
+        // already missed before this policy became effective.
+        const deadlineAfterPolicyStart = deadline && bangkokDateKey(deadline) >= ECOMMERCE_FINE_EFFECTIVE_DATE;
+        const activeOverdueAfterPolicyStart = order.status !== "completed"
+          && deadlineAfterPolicyStart
+          && bangkokDateKey(now) >= ECOMMERCE_FINE_EFFECTIVE_DATE;
+        if (!completedAfterPolicyStart && !activeOverdueAfterPolicyStart) continue;
         addViolation(
           order,
           "overdue",
-          order.status === "completed" && completedAt > deadline ? completedAt : deadline,
-          `Đơn ${label}${order.customerName ? ` (${order.customerName})` : ""} hoàn tất/quá hạn sau SLA`,
+          order.status === "completed" && completedAt > deadline ? completedAt : bangkokStartOfDay(ECOMMERCE_FINE_EFFECTIVE_DATE),
+          `Đơn ${label}${order.customerName ? ` (${order.customerName})` : ""} trễ SLA từ ngày ${ECOMMERCE_FINE_EFFECTIVE_DATE.split("-").reverse().join("/")}`,
         );
       }
 
       const mismatchAt = order.mismatchAt ? new Date(order.mismatchAt) : null;
       const nextDay = mismatchAt ? dateAtBangkokNextDay(mismatchAt) : null;
-      if (order.status === "mismatch" && nextDay && now >= nextDay) {
+      if (order.status === "mismatch" && nextDay && now >= nextDay && bangkokDateKey(nextDay) >= ECOMMERCE_FINE_EFFECTIVE_DATE) {
         addViolation(
           order,
           "mismatch",
-          nextDay,
-          `Đơn ${label}${order.customerName ? ` (${order.customerName})` : ""} ở tab Cần kiểm tra nhưng chưa xử lý trong ngày`,
+          bangkokStartOfDay(ECOMMERCE_FINE_EFFECTIVE_DATE),
+          `Đơn ${label}${order.customerName ? ` (${order.customerName})` : ""} ở tab Cần kiểm tra nhưng chưa xử lý trong ngày ${ECOMMERCE_FINE_EFFECTIVE_DATE.split("-").reverse().join("/")}`,
         );
       }
     }
