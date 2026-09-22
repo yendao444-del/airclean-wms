@@ -9868,19 +9868,6 @@ async function executeKhuiKien(
         if (pendingConflict) {
           throw new Error(buildPendingHandlingUnitBlockMessage(unit.sku, pendingConflict, "khui kiện mới"));
         }
-        const returnConflict = await tx.handlingUnit.findFirst({
-          where: {
-            sku: unit.sku,
-            code: { not: normalizedCode },
-            status: "opened",
-            remainingQuantity: { gt: 0 },
-            packagingName: { contains: "Hàng hoàn", mode: "insensitive" },
-          },
-          select: { code: true, remainingQuantity: true, baseUnit: true, packagingName: true },
-        });
-        if (returnConflict) {
-          throw new Error(buildReturnHandlingUnitBlockMessage(unit.sku, returnConflict, "khui kiện mới"));
-        }
         if (packageCategory !== "LE") {
           const conflict = await tx.handlingUnit.findFirst({
             where: {
@@ -9986,18 +9973,6 @@ async function executeKhuiKien(
       "khui kiện mới",
     ));
   }
-  const returnConflict = sameSkuUnits.find((candidate) =>
-    (candidate.status === "opened" || candidate.status === "Đang sử dụng")
-    && Number(candidate.remainingQuantity ?? candidate.currentPcs ?? 0) > 0
-    && isReturnHandlingUnitPackage(candidate.packagingName || candidate.packageType),
-  );
-  if (returnConflict) {
-    throw new Error(buildReturnHandlingUnitBlockMessage(
-      target.sku || target.skuName,
-      returnConflict,
-      "khui kiện mới",
-    ));
-  }
   if (targetCategory !== "LE") {
     const openedConflict = sameSkuUnits.find((candidate) =>
       (candidate.status === "opened" || candidate.status === "Đang sử dụng")
@@ -10081,14 +10056,6 @@ function getHandlingUnitPackageCategory(value) {
   return "LE";
 }
 
-function isReturnHandlingUnitPackage(value) {
-  return String(value || "")
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .toLowerCase()
-    .includes("hang hoan");
-}
-
 function buildPendingHandlingUnitBlockMessage(sku, pendingUnit, action) {
   const code = pendingUnit?.code || pendingUnit?.id || "không xác định";
   const remaining = Number(
@@ -10096,11 +10063,6 @@ function buildPendingHandlingUnitBlockMessage(sku, pendingUnit, action) {
   );
   const baseUnit = pendingUnit?.baseUnit || pendingUnit?.unitName || "đơn vị";
   return `Chưa thể ${action}. SKU ${sku} có kiện ${code} đang ở trạng thái Chờ kiểm (tồn theo sổ: ${remaining} ${baseUnit}). Bạn cần vào Quản lý kiện hàng > Chờ kiểm, nhập số lượng thực tế và chốt kiện này trước; sau đó mới khui được kiện mới cùng SKU.`;
-}
-
-function buildReturnHandlingUnitBlockMessage(sku, returnUnit, action) {
-  const code = returnUnit?.code || returnUnit?.id || "không xác định";
-  return `Chưa thể ${action}. SKU ${sku} còn kiện hàng hoàn [${code}] chưa được gộp. Vui lòng gộp kiện hàng hoàn này vào kiện đang khui trước khi tiếp tục rút hoặc khui kiện cùng SKU.`;
 }
 
 async function getHandlingUnitWithdrawalCodes(tx) {
@@ -10251,19 +10213,6 @@ async function executeRutHang(
         if (pendingConflict) {
           throw new Error(buildPendingHandlingUnitBlockMessage(unit.sku, pendingConflict, "rút hàng"));
         }
-        const returnConflict = await tx.handlingUnit.findFirst({
-          where: {
-            sku: unit.sku,
-            code: { not: normalizedCode },
-            status: "opened",
-            remainingQuantity: { gt: 0 },
-            packagingName: { contains: "Hàng hoàn", mode: "insensitive" },
-          },
-          select: { code: true, remainingQuantity: true, baseUnit: true, packagingName: true },
-        });
-        if (returnConflict) {
-          throw new Error(buildReturnHandlingUnitBlockMessage(unit.sku, returnConflict, "rút hàng"));
-        }
         if (unit.status === "pending_check") {
           throw new Error(buildPendingHandlingUnitBlockMessage(unit.sku, unit, "rút hàng"));
         }
@@ -10405,16 +10354,6 @@ async function executeRutHang(
   );
   if (pendingConflict) {
     throw new Error(buildPendingHandlingUnitBlockMessage(targetSku, pendingConflict, "rút hàng"));
-  }
-  const returnConflict = list.find((candidate) =>
-    String(candidate.code || candidate.id || "").trim().toUpperCase() !== normalizedCode
-    && String(candidate.sku || candidate.skuName || "").trim().toUpperCase() === targetSku.toUpperCase()
-    && (candidate.status === "opened" || candidate.status === "Đang sử dụng")
-    && Number(candidate.remainingQuantity ?? candidate.currentPcs ?? 0) > 0
-    && isReturnHandlingUnitPackage(candidate.packagingName || candidate.packageType),
-  );
-  if (returnConflict) {
-    throw new Error(buildReturnHandlingUnitBlockMessage(targetSku, returnConflict, "rút hàng"));
   }
   if (currentStatus === "pending_check" || currentStatus === "Chờ kiểm") {
     throw new Error(buildPendingHandlingUnitBlockMessage(targetSku, target, "rút hàng"));
