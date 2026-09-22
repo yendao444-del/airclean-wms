@@ -322,18 +322,6 @@ const getPendingCheckConflict = (
 const pendingCheckBlockText = (unit: UnitRow, conflict: UnitRow, action: string) =>
   `Không thể ${action}. SKU [${unit.skuName}] đang có kiện [${conflict.id}] chờ kiểm thực tế (tồn theo sổ: ${conflict.currentPcs} ${conflict.unitName}). Vui lòng vào tab Chờ kiểm, nhập số lượng thực tế và chốt kiện này trước.`;
 
-const getReturnMergeConflict = (targetUnit: UnitRow, allUnits: UnitRow[]) =>
-  allUnits.find(
-    (unit) =>
-      unit.id?.toUpperCase() !== targetUnit.id?.toUpperCase() &&
-      unit.skuName?.toUpperCase() === targetUnit.skuName?.toUpperCase() &&
-      isReturnHandlingUnit(unit) &&
-      (unit.status === "Đang sử dụng" || unit.status === "opened"),
-  ) || null;
-
-const returnMergeBlockText = (unit: UnitRow, conflict: UnitRow, action: string) =>
-  `Không thể ${action}. SKU [${unit.skuName}] còn kiện hàng hoàn [${conflict.id}] chưa được gộp. Vui lòng gộp kiện hàng hoàn này vào kiện đang khui trước.`;
-
 const getConflictingOpenedUnit = (
   targetUnit: UnitRow,
   allUnits: UnitRow[],
@@ -346,9 +334,6 @@ const getConflictingOpenedUnit = (
   // Kiện đã về 0/chờ kiểm luôn khóa kiện mới cùng SKU, kể cả khác dạng bao bì.
   const pendingCheck = getPendingCheckConflict(targetUnit, allUnits);
   if (pendingCheck) return pendingCheck;
-
-  const returnConflict = getReturnMergeConflict(targetUnit, allUnits);
-  if (returnConflict) return returnConflict;
 
   // Riêng với hàng lẻ: không áp dụng quy tắc chỉ một kiện đang mở.
   if (cat === "LE") return null;
@@ -1496,8 +1481,8 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
       );
       message.warning(
         sameSkuOpened
-          ? `SKU ${source.skuName} có kiện đang khui nhưng khác đơn vị ${source.unitName} hoặc đã hết sức chứa.`
-          : `SKU ${source.skuName} chưa có kiện thường đang khui và còn sức chứa để gộp.`,
+          ? `SKU ${source.skuName} có kiện đang khui nhưng khác đơn vị ${source.unitName} hoặc đã hết sức chứa. Hãy rút bớt hàng ở kiện phù hợp rồi thử gộp lại.`
+          : `SKU ${source.skuName} chưa có kiện thường đang khui và còn sức chứa. Hãy khui một kiện thường cùng SKU, rút bớt hàng để tạo chỗ rồi quay lại gộp kiện hoàn.`,
       );
       return;
     }
@@ -1545,11 +1530,6 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
       message.warning(pendingCheckBlockText(unit, pendingConflict, "rút hàng"), 8);
       return;
     }
-    const returnConflict = getReturnMergeConflict(unit, workspace.register);
-    if (returnConflict) {
-      message.warning(returnMergeBlockText(unit, returnConflict, "rút hàng"), 8);
-      return;
-    }
     pickRequestIdRef.current = `HU-PICK-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     setPickingUnit(unit);
     pickForm.setFieldsValue({
@@ -1567,10 +1547,6 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
       const pendingConflict = getPendingCheckConflict(pickingUnit, workspace.register);
       if (pendingConflict) {
         throw new Error(pendingCheckBlockText(pickingUnit, pendingConflict, "rút hàng"));
-      }
-      const returnConflict = getReturnMergeConflict(pickingUnit, workspace.register);
-      if (returnConflict) {
-        throw new Error(returnMergeBlockText(pickingUnit, returnConflict, "rút hàng"));
       }
       const values = await pickForm.validateFields();
       const qty = Number(values.quantity || 0);
@@ -2123,8 +2099,6 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
       && candidate.status === "Chờ kiểm",
     );
     if (pendingConflict) return pendingConflict;
-    const returnConflict = getReturnMergeConflict(unit, workspace.register);
-    if (returnConflict) return returnConflict;
     const category = getPackageCategory(unit.packageType);
     if (category === "LE") return null;
     const conflict = openedUnitBySkuAndCategory.get(
@@ -3519,9 +3493,6 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
                     const pendingPickConflict = unit.status === "Đang sử dụng"
                       ? getPendingCheckConflict(unit, workspace.register)
                       : null;
-                    const returnPickConflict = unit.status === "Đang sử dụng"
-                      ? getReturnMergeConflict(unit, workspace.register)
-                      : null;
                     return (
                     <button
                       type="button"
@@ -3606,11 +3577,9 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
                                       : "thùng";
                                   return (
                                     <Tooltip
-                                      title={isReturnHandlingUnit(conflict)
-                                        ? returnMergeBlockText(unit, conflict, "khui kiện mới")
-                                        : conflict.status === "Chờ kiểm"
-                                          ? pendingCheckBlockText(unit, conflict, "khui kiện mới")
-                                          : `Đang có ${catLabel} [${conflict.id}] cùng SKU đang mở (còn ${fmt(conflict.currentPcs)} gói). Vui lòng rút hết kiện cũ trước khi khui ${catLabel} mới.`}
+                                      title={conflict.status === "Chờ kiểm"
+                                        ? pendingCheckBlockText(unit, conflict, "khui kiện mới")
+                                        : `Đang có ${catLabel} [${conflict.id}] cùng SKU đang mở (còn ${fmt(conflict.currentPcs)} gói). Vui lòng rút hết kiện cũ trước khi khui ${catLabel} mới.`}
                                     >
                                       <button
                                         className="hu-action-btn unseal"
@@ -3623,11 +3592,9 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
                                         }}
                                          onClick={() =>
                                           message.warning(
-                                            isReturnHandlingUnit(conflict)
-                                              ? returnMergeBlockText(unit, conflict, "khui kiện mới")
-                                              : conflict.status === "Chờ kiểm"
-                                                ? pendingCheckBlockText(unit, conflict, "khui kiện mới")
-                                                : `⚠️ SKU này đang có ${catLabel} [${conflict.id}] mở sẵn. Vui lòng rút hết kiện cũ trước khi khui thêm ${catLabel}!`,
+                                            conflict.status === "Chờ kiểm"
+                                              ? pendingCheckBlockText(unit, conflict, "khui kiện mới")
+                                              : `⚠️ SKU này đang có ${catLabel} [${conflict.id}] mở sẵn. Vui lòng rút hết kiện cũ trước khi khui thêm ${catLabel}!`,
                                             8,
                                           )
                                         }
@@ -3662,16 +3629,6 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
                                     onClick={() => message.warning(pendingCheckBlockText(unit, pendingPickConflict, "rút hàng"), 8)}
                                   >
                                     <LockOutlined /> Chờ kiểm {pendingPickConflict.id}
-                                  </button>
-                                </Tooltip>
-                              ) : returnPickConflict ? (
-                                <Tooltip title={returnMergeBlockText(unit, returnPickConflict, "rút hàng")}>
-                                  <button
-                                    className="hu-action-btn final-check"
-                                    style={{ opacity: 0.72, cursor: "not-allowed", background: "#fff7e6", color: "#ad6800", borderColor: "#ffd591" }}
-                                    onClick={() => message.warning(returnMergeBlockText(unit, returnPickConflict, "rút hàng"), 8)}
-                                  >
-                                    <LockOutlined /> Chờ gộp {returnPickConflict.id}
                                   </button>
                                 </Tooltip>
                               ) : (
