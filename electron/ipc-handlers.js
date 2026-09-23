@@ -154,6 +154,7 @@ const DATA_SAFETY_ALLOWED_CHANNELS = new Set([
   // stale purchase/group revisions, and never detaches an uploaded invoice.
   "purchases:createVatGroup",
   "purchases:uploadVatGroupInvoice",
+  "googleDrive:reauthenticate",
   "purchases:removeVatGroup",
   "purchases:markAsThht",
   // This workflow uses the stock mutex and one database transaction for the
@@ -1937,6 +1938,138 @@ function getDriveAuthMessage(error) {
   }
   return error?.message || "Không thể kết nối Google Drive.";
 }
+
+let googleReauthInFlight = null;
+
+// Re-authorize the current Windows user without distributing another user's
+// refresh token. The OAuth callback is bound to localhost and the new token is
+// immediately protected by Windows safeStorage.
+async function reauthenticateGoogleDrive() {
+  if (googleReauthInFlight) return googleReauthInFlight;
+
+  googleReauthInFlight = (async () => {
+    if (!OAUTH_CLIENT_ID || !OAUTH_CLIENT_SECRET) {
+      throw new Error("Bản cài đặt đang thiếu cấu hình Google OAuth.");
+    }
+    if (!safeStorage.isEncryptionAvailable()) {
+      throw new Error("Windows safeStorage chưa sẵn sàng; không thể lưu Google token an toàn.");
+    }
+
+    const { google } = require("googleapis");
+    const redirectUri = "http://localhost:3456/callback";
+    const oauth2Client = new google.auth.OAuth2(
+      OAUTH_CLIENT_ID,
+      OAUTH_CLIENT_SECRET,
+      redirectUri,
+    );
+    const state = crypto.randomBytes(24).toString("hex");
+    const authUrl = oauth2Client.generateAuthUrl({
+      access_type: "offline",
+      prompt: "consent",
+      state,
+      scope: [
+        "https://www.googleapis.com/auth/drive.file",
+        "https://www.googleapis.com/auth/gmail.send",
+      ],
+    });
+
+    return await new Promise((resolve, reject) => {
+      let settled = false;
+      let timeout = null;
+      const server = http.createServer(async (request, response) => {
+        let requestUrl;
+        try {
+          requestUrl = new URL(request.url || "/", redirectUri);
+        } catch {
+          response.writeHead(400, { "Content-Type": "text/plain; charset=utf-8" });
+          response.end("Invalid callback URL");
+          return;
+        }
+        if (requestUrl.pathname !== "/callback") {
+          response.writeHead(404);
+          response.end();
+          return;
+        }
+
+        const callbackError = requestUrl.searchParams.get("error");
+        const callbackState = requestUrl.searchParams.get("state");
+        const code = requestUrl.searchParams.get("code");
+        if (callbackError) {
+          response.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+          response.end("<h2>Đã hủy xác thực Google. Bạn có thể đóng tab này.</h2>");
+          fail(new Error(`Google OAuth bị hủy: ${callbackError}`));
+          return;
+        }
+        if (callbackState !== state || !code) {
+          response.writeHead(400, { "Content-Type": "text/html; charset=utf-8" });
+          response.end("<h2>Callback Google không hợp lệ.</h2>");
+          fail(new Error("Callback Google không hợp lệ hoặc đã hết phiên."));
+          return;
+        }
+
+        try {
+          const { tokens } = await oauth2Client.getToken(code);
+          if (!tokens?.refresh_token) {
+            throw new Error("Google không trả về refresh token. Hãy chọn lại tài khoản và cấp quyền đầy đủ.");
+          }
+          writeGoogleTokens(tokens);
+          const legacyLocalPath = getLegacyLocalGoogleTokenPath();
+          if (fs.existsSync(legacyLocalPath)) fs.rmSync(legacyLocalPath, { force: true });
+          resetDriveClient();
+          const driveStatus = await ensureDriveReady();
+          if (!driveStatus.success) throw new Error(driveStatus.error);
+          response.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+          response.end("<h2>✅ Kết nối Google Drive thành công. Bạn có thể đóng tab này.</h2>");
+          succeed({ success: true });
+        } catch (error) {
+          response.writeHead(500, { "Content-Type": "text/html; charset=utf-8" });
+          response.end(`<h2>❌ Kết nối thất bại: ${String(error?.message || error).replace(/[<>]/g, "")}</h2>`);
+          fail(error);
+        }
+      });
+
+      const finish = () => {
+        if (timeout) clearTimeout(timeout);
+        if (!server.listening) return;
+        server.close();
+      };
+      const fail = (error) => {
+        if (settled) return;
+        settled = true;
+        finish();
+        reject(error);
+      };
+      const succeed = (value) => {
+        if (settled) return;
+        settled = true;
+        finish();
+        resolve(value);
+      };
+      server.once("error", (error) => fail(error));
+      server.listen(3456, async () => {
+        try {
+          await shell.openExternal(authUrl);
+          timeout = setTimeout(() => fail(new Error("Hết thời gian chờ xác thực Google.")), 5 * 60 * 1000);
+        } catch (error) {
+          fail(error);
+        }
+      });
+    });
+  })().finally(() => {
+    googleReauthInFlight = null;
+  });
+
+  return googleReauthInFlight;
+}
+
+ipcMain.handle("googleDrive:reauthenticate", async () => {
+  try {
+    return await reauthenticateGoogleDrive();
+  } catch (error) {
+    console.error("[Drive] Re-authentication failed:", error?.message || error);
+    return { success: false, error: error?.message || "Không thể kết nối lại Google Drive." };
+  }
+});
 
 // Creating a Drive client does not prove that its OAuth token is still valid.
 // Verify it before accepting documents, otherwise another machine may show a
@@ -13481,7 +13614,11 @@ ipcMain.handle(
       };
     } catch (error) {
       console.error("❌ Upload group VAT invoice error:", error);
-      return { success: false, error: error.message };
+      return {
+        success: false,
+        error: error.message,
+        reauthRequired: isGoogleReauthError(error) || String(error?.message || "").includes("Phiên Google Drive"),
+      };
     }
   },
 );
@@ -14672,7 +14809,11 @@ ipcMain.handle(
       };
     } catch (error) {
       console.error("Upload company VAT invoice error:", error);
-      return { success: false, error: error.message };
+      return {
+        success: false,
+        error: error.message,
+        reauthRequired: isGoogleReauthError(error) || String(error?.message || "").includes("Phiên Google Drive"),
+      };
     }
   },
 );
@@ -15034,7 +15175,11 @@ ipcMain.handle(
       };
     } catch (error) {
       console.error("❌ Upload VAT invoice error:", error);
-      return { success: false, error: error.message };
+      return {
+        success: false,
+        error: error.message,
+        reauthRequired: isGoogleReauthError(error) || String(error?.message || "").includes("Phiên Google Drive"),
+      };
     }
   },
 );
