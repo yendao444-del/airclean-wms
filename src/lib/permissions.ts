@@ -49,6 +49,12 @@ export type Permission =
     | 'settings'
     | 'attendance';
 
+const DEDICATED_RECEIVING_OPERATOR_USERNAME = 'nguyendinhtoan';
+
+export function isDedicatedReceivingOperator(username: string | undefined): boolean {
+    return String(username || '').trim().toLocaleLowerCase('vi-VN') === DEDICATED_RECEIVING_OPERATOR_USERNAME;
+}
+
 // Permission mapping for each role
 export const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
     admin: ['all'], // Admin has all permissions

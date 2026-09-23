@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import {
     Avatar,
     Button,
+    Calendar,
     Empty,
     Form,
     Image,
@@ -20,6 +21,8 @@ import {
     DownOutlined,
     EditOutlined,
     EyeOutlined,
+    LeftOutlined,
+    RightOutlined,
     SearchOutlined,
     CalendarOutlined,
     PlusOutlined,
@@ -28,6 +31,7 @@ import {
     PictureOutlined,
 } from '@ant-design/icons';
 import { QRCodeSVG } from 'qrcode.react';
+import dayjs, { Dayjs } from 'dayjs';
 import { useAuth } from '../contexts/AuthContext';
 import mockEvidenceImage from '../assets/unbranded-mask-pouch.webp';
 import plainCartonImage from '../assets/plain-kraft-carton.webp';
@@ -43,6 +47,7 @@ interface PrepackEvidence {
     id: number;
     fileName: string;
     mimeType: string;
+    sha256?: string;
 }
 
 interface PrepackComponent {
@@ -184,6 +189,8 @@ export default function PrepackedGoods() {
     const [evidenceLoading, setEvidenceLoading] = useState(false);
     const [submitting, setSubmitting] = useState(false);
     const [listFilter, setListFilter] = useState<'all' | 'missing'>('all');
+    const [selectedWorkDate, setSelectedWorkDate] = useState<Dayjs>(() => dayjs().startOf('day'));
+    const [workDatePickerOpen, setWorkDatePickerOpen] = useState(false);
     const [selectedPackerUsername, setSelectedPackerUsername] = useState<string>('');
     const [reportedQuantities, setReportedQuantities] = useState<Record<number, number | null>>({});
     const [collapsedPackerGroups, setCollapsedPackerGroups] = useState<Set<string>>(() => new Set());
@@ -198,6 +205,16 @@ export default function PrepackedGoods() {
     const [editForm] = Form.useForm();
     const [acceptForm] = Form.useForm();
     const [issueForm] = Form.useForm();
+
+    const isSelectedToday = selectedWorkDate.isSame(dayjs(), 'day');
+    const selectedWorkDateLabel = selectedWorkDate.format('DD/MM/YYYY');
+    const evidenceDateFilters = {
+        evidenceStartDate: selectedWorkDate.startOf('day').toISOString(),
+        evidenceEndDate: selectedWorkDate.add(1, 'day').startOf('day').toISOString(),
+    };
+    const hasEvidenceForSelectedDate = (row: PrepackBatch) => row.evidences.length > 0;
+    const hasReportForSelectedDate = (row: PrepackBatch) => hasEvidenceForSelectedDate(row)
+        || (isSelectedToday && Boolean(row.reportedAt));
 
 
     const allCatalogGroups = useMemo(() => {
@@ -298,7 +315,7 @@ export default function PrepackedGoods() {
         if (isUiTest) return;
         setLoading(true);
         try {
-            const result = await window.electronAPI.prepack.list();
+            const result = await window.electronAPI.prepack.list(evidenceDateFilters);
             if (!result.success) throw new Error(result.error);
             setRows(result.data || []);
         } catch (error: any) {
@@ -308,7 +325,8 @@ export default function PrepackedGoods() {
         }
     };
 
-    useEffect(() => { void loadRows(); }, []);
+    useEffect(() => { void loadRows(); }, [selectedWorkDate.valueOf()]);
+    useEffect(() => { setReportedQuantities({}); }, [selectedWorkDate.valueOf()]);
     useEffect(() => {
         let cancelled = false;
         if (isUiTest) return;
@@ -420,8 +438,8 @@ export default function PrepackedGoods() {
             && photo.getDate() === now.getDate();
     };
     const targetRows = useMemo(() => rows
-        .filter(row => row.status === 'active' || row.status === 'pending' || row.status === 'waiting_acceptance')
-        .filter(row => !isRolePreview || !user?.username || row.packerUsername === user.username), [isRolePreview, rows, user?.username]);
+        .filter(row => !isSelectedToday || row.status === 'active' || row.status === 'pending' || row.status === 'waiting_acceptance')
+        .filter(row => !isRolePreview || !user?.username || row.packerUsername === user.username), [isRolePreview, isSelectedToday, rows, user?.username]);
     const packerTabs = useMemo(() => {
         const byUsername = new Map<string, { username: string; fullName: string }>();
         employees.forEach(employee => byUsername.set(employee.username, { username: employee.username, fullName: employee.fullName || employee.username }));
@@ -439,7 +457,7 @@ export default function PrepackedGoods() {
     }, [packerTabs, selectedPackerUsername]);
     const selectedPackerRows = useMemo(() => targetRows.filter(row => row.packerUsername === selectedPackerUsername), [selectedPackerUsername, targetRows]);
     const isDesignatedPrepackChecker = normalizeProductName(`${user?.username || ''} ${user?.fullName || ''}`).replace(/\s+/g, '').includes('nguyendinhtoan');
-    const canSubmitMobileEvidence = isUiTest || (!isRolePreview && (isAdmin || isDesignatedPrepackChecker || linkedCheckBatchIds.size > 0));
+    const canSubmitMobileEvidence = isSelectedToday && (isUiTest || (!isRolePreview && (isAdmin || isDesignatedPrepackChecker || linkedCheckBatchIds.size > 0)));
     const selectedPackerGroups = useMemo(() => {
         const groups = new Map<string, { key: string; productName: string; productId?: number; rows: PrepackBatch[] }>();
         selectedPackerRows.forEach(row => {
@@ -452,6 +470,10 @@ export default function PrepackedGoods() {
         });
         return Array.from(groups.values());
     }, [catalog, selectedPackerRows]);
+    const selectedReportedCount = useMemo(() => selectedPackerGroups.reduce((total, group) => {
+        const groupHasEvidence = group.rows.some(row => hasEvidenceForSelectedDate(row));
+        return total + (groupHasEvidence ? group.rows.length : group.rows.filter(hasReportForSelectedDate).length);
+    }, 0), [selectedPackerGroups, isSelectedToday]);
     const catalogBySku = useMemo(() => new Map(catalog.map(item => [item.sku, item])), [catalog]);
     const targetGroups = useMemo(() => {
         type VariantGroup = { key: string; productSku: string; productId?: number; productName: string; variantName: string; unit: string; rows: PrepackBatch[]; components?: PrepackComponent[] };
@@ -485,7 +507,7 @@ export default function PrepackedGoods() {
                 .map(variant => ({
                     ...variant,
                     visibleRows: listFilter === 'missing'
-                        ? variant.rows.filter(row => !isPhotoFromToday(row.reportedAt))
+                        ? variant.rows.filter(row => !hasReportForSelectedDate(row))
                         : variant.rows,
                 }))
                 .filter(variant => listFilter === 'all' || variant.visibleRows.length > 0),
@@ -516,6 +538,7 @@ export default function PrepackedGoods() {
 
     const submitActualReport = async () => {
         if (isRolePreview) return;
+        if (!isSelectedToday) return void message.info('Chỉ có thể gửi báo cáo cho ngày hôm nay.');
         const unreportedRows = selectedPackerRows.filter(row => !row.reportedAt);
         const reports = unreportedRows.map(row => ({
             batchId: row.id,
@@ -586,23 +609,22 @@ export default function PrepackedGoods() {
         setEvidenceLoading(false);
     };
 
-    const openEvidence = async (batch: PrepackBatch) => {
-        setEvidenceBatch(batch);
+    const openGroupEvidence = async (batches: PrepackBatch[]) => {
+        const evidenceEntries = batches.flatMap(batch => batch.evidences.map(evidence => ({ batch, evidence })));
+        const uniqueEntries = Array.from(new Map(evidenceEntries.map(entry => [entry.evidence.sha256 || `${entry.batch.id}:${entry.evidence.id}`, entry])).values());
+        setEvidenceBatch(batches[0] || null);
         setEvidenceUrls([]);
         setEvidenceLoading(!isUiTest);
         if (isUiTest) {
-            setEvidenceUrls(batch.evidences.length ? [mockEvidenceImage] : []);
-            if (batch.evidences.length) setPhotoPreviewUrls(current => ({ ...current, [batch.id]: mockEvidenceImage }));
+            setEvidenceUrls(uniqueEntries.length ? uniqueEntries.map(() => mockEvidenceImage) : []);
             return;
         }
         try {
-            const urls = await Promise.all(batch.evidences.map(async evidence => {
+            const urls = await Promise.all(uniqueEntries.map(async ({ batch, evidence }) => {
                 const result = await window.electronAPI.prepack.getEvidenceUrl(batch.id, evidence.id);
                 return result.success ? result.data?.url || '' : '';
             }));
-            const validUrls = urls.filter(Boolean);
-            setEvidenceUrls(validUrls);
-            if (validUrls[0]) setPhotoPreviewUrls(current => ({ ...current, [batch.id]: validUrls[0] }));
+            setEvidenceUrls(urls.filter(Boolean));
         } catch (error: any) {
             message.error(error?.message || 'Không thể tải ảnh bằng chứng.');
         } finally {
@@ -799,11 +821,28 @@ export default function PrepackedGoods() {
         <div className="prepack-page prepack-report-page">
             <div className="prepack-toolbar prepack-toolbar-compact">
                     <div className="prepack-toolbar-actions">
-                        <span className="prepack-date-pill"><CalendarOutlined /> {new Date().toLocaleDateString('vi-VN', { weekday: 'long', day: '2-digit', month: '2-digit', year: 'numeric' })}</span>
+                        <div className="prepack-date-nav" aria-label="Chọn ngày đóng gói">
+                            <Button type="text" aria-label="Ngày trước" icon={<LeftOutlined />} onClick={() => setSelectedWorkDate(current => current.subtract(1, 'day'))} />
+                            <Button type={selectedWorkDate.isSame(dayjs().subtract(1, 'day'), 'day') ? 'primary' : 'text'} onClick={() => setSelectedWorkDate(dayjs().subtract(1, 'day').startOf('day'))}>Hôm qua</Button>
+                            <Button type={isSelectedToday ? 'primary' : 'text'} onClick={() => setSelectedWorkDate(dayjs().startOf('day'))}>Hôm nay</Button>
+                            <Button type="text" icon={<CalendarOutlined />} onClick={() => setWorkDatePickerOpen(true)}>{selectedWorkDateLabel}</Button>
+                            <Button type="text" aria-label="Ngày sau" icon={<RightOutlined />} onClick={() => setSelectedWorkDate(current => current.add(1, 'day'))} />
+                        </div>
                         {canSubmitMobileEvidence && <Button type="primary" icon={<QrcodeOutlined />} loading={mobileEvidenceStarting} onClick={() => void startMobileEvidence()}>Nộp bằng điện thoại</Button>}
                         {isManager && <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>Thiết lập chỉ tiêu</Button>}
                 </div>
             </div>
+
+            <Modal title="Chọn ngày đóng gói" open={workDatePickerOpen} footer={null} width={380} destroyOnHidden onCancel={() => setWorkDatePickerOpen(false)}>
+                <Calendar
+                    fullscreen={false}
+                    value={selectedWorkDate}
+                    onSelect={(value) => {
+                        setSelectedWorkDate(value.startOf('day'));
+                        setWorkDatePickerOpen(false);
+                    }}
+                />
+            </Modal>
 
             <div className="prepack-employee-tabs" role="tablist" aria-label="Nhân viên đóng gói">
                 {packerTabs.map(tab => <button key={tab.username} type="button" role="tab" aria-selected={selectedPackerUsername === tab.username} className={selectedPackerUsername === tab.username ? 'active' : ''} onClick={() => setSelectedPackerUsername(tab.username)}>{tab.fullName}</button>)}
@@ -815,11 +854,13 @@ export default function PrepackedGoods() {
                     <div><strong>Báo cáo đóng gói của nhân viên</strong><span>Nhập số lượng thực tế theo từng sản phẩm trong ca làm việc.</span></div>
                         <b>{selectedPackerRows.length} sản phẩm</b>
                     </div>
-                    <div className="prepack-shift-label"><strong>Ca sáng - {new Date().toLocaleDateString('vi-VN')}</strong><span>{selectedPackerRows.filter(row => row.reportedAt).length}/{selectedPackerRows.length} đã báo cáo</span></div>
+                    <div className="prepack-shift-label"><strong>Ca sáng - {selectedWorkDateLabel}</strong><span>{selectedReportedCount}/{selectedPackerRows.length} đã báo cáo</span></div>
                     <div className="prepack-report-table">
                         <div className="prepack-report-head"><span>Sản phẩm</span><span>Chỉ tiêu</span><span>Số lượng thực tế</span><span>Trạng thái</span><span>Hình ảnh</span><span aria-hidden="true" /></div>
                         {selectedPackerGroups.map(group => {
                             const collapsed = collapsedPackerGroups.has(group.key);
+                            const groupEvidence = Array.from(new Map(group.rows.flatMap(row => row.evidences.map(evidence => [evidence.sha256 || `${row.id}:${evidence.id}`, evidence]))).values());
+                            const groupHasEvidence = groupEvidence.length > 0;
                             return <div className="prepack-report-product-group" key={group.key}>
                                 <div className="prepack-report-group-row" onClick={() => setCollapsedPackerGroups(current => { const next = new Set(current); collapsed ? next.delete(group.key) : next.add(group.key); return next; })}>
                                     <div className="prepack-report-group-title"><DownOutlined className={collapsed ? 'is-collapsed' : ''} /><strong>{group.productName}</strong><small>{group.rows.length} phân loại</small></div>
@@ -829,7 +870,7 @@ export default function PrepackedGoods() {
                                     </div>
                                 </div>
                                 {!collapsed && group.rows.map(row => {
-                                    const hasReport = Boolean(row.reportedAt || row.evidences.length);
+                                    const hasReport = hasReportForSelectedDate(row) || groupHasEvidence;
                                     const isAccepted = row.status === 'ready' || row.status === 'depleted';
                                     const status = isAccepted ? 'accepted' : hasReport ? 'submitted' : 'missing';
                                     return <div className="prepack-report-row prepack-report-child-row" key={row.id}>
@@ -841,12 +882,14 @@ export default function PrepackedGoods() {
                                         <strong className="prepack-report-target">{row.requestedQty} <small>{row.unit}</small></strong>
                                         <InputNumber min={0} max={100000} value={Object.prototype.hasOwnProperty.call(reportedQuantities, row.id) ? reportedQuantities[row.id] : (row.reportedQty || null)} placeholder="Nhập số lượng" disabled={isRolePreview || hasReport} onChange={value => setReportedQuantities(current => ({ ...current, [row.id]: value === null ? null : Number(value) }))} />
                                         <span className={`prepack-report-status ${status}`}>{status === 'accepted' ? <><CheckCircleFilled /> Đã kiểm</> : status === 'submitted' ? <><ClockCircleOutlined /> Đã báo cáo - chờ kiểm</> : <>Chưa báo cáo</>}</span>
-                                        <span className={`prepack-report-image-status ${row.evidences.length ? 'has-image' : 'no-image'}`}><PictureOutlined /> {row.evidences.length ? `${row.evidences.length} ảnh` : 'Chưa có ảnh'}</span>
-                                        <div className="prepack-report-evidence-actions">
-                                            {row.evidences.length > 0 && <Button size="small" icon={<EyeOutlined />} onClick={() => void openEvidence(row)}>Xem ảnh</Button>}
-                                        </div>
+                                        <span className={`prepack-report-image-status ${groupEvidence.length ? 'has-image' : 'no-image'}`}><PictureOutlined /> {groupEvidence.length ? 'Ảnh chung' : 'Chưa có ảnh'}</span>
+                                        <div className="prepack-report-evidence-actions" />
                                     </div>;
                                 })}
+                                {groupEvidence.length ? <div className="prepack-group-evidence-summary">
+                                        <PictureOutlined /> <strong>{groupEvidence.length} ảnh chung</strong>
+                                        <Button size="small" icon={<EyeOutlined />} onClick={() => void openGroupEvidence(group.rows)}>Xem ảnh chung</Button>
+                                    </div> : null}
                             </div>;
                         })}
                     </div>
@@ -1028,12 +1071,10 @@ export default function PrepackedGoods() {
                 </>}
             </Modal>
 
-            <Modal title={evidenceBatch ? `Bằng chứng · ${evidenceBatch.code}` : 'Bằng chứng'} open={!!evidenceBatch} onCancel={() => { setEvidenceBatch(null); setEvidenceUrls([]); }} footer={null} width={620} destroyOnHidden>
+            <Modal title={evidenceBatch ? `Bằng chứng chung · ${evidenceBatch.productName}` : 'Bằng chứng chung'} open={!!evidenceBatch} onCancel={() => { setEvidenceBatch(null); setEvidenceUrls([]); }} footer={null} width={620} destroyOnHidden>
                 {evidenceBatch && <>
                     <div className="prepack-proof-strip">
-                        <span>Đã báo <b>{evidenceBatch.reportedQty}</b></span>
-                        <span>Đã nhận <b>{evidenceBatch.acceptedQty}</b></span>
-                        <span>Còn sẵn <b>{evidenceBatch.readyQty}</b></span>
+                        <span>Ảnh dùng chung cho nhóm <b>{evidenceUrls.length}</b></span>
                     </div>
                     <div className="prepack-evidence-grid">
                         {evidenceLoading ? <Spin /> : evidenceUrls.length ? evidenceUrls.map((url, index) => <Image key={`${url}-${index}`} src={url} alt={`Bằng chứng ${index + 1}`} />) : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="Không tải được ảnh bằng chứng" />}

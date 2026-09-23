@@ -45,6 +45,38 @@
     white-space: nowrap;
 }
 .prepack-date-pill .anticon { color: #00a86b; }
+.prepack-date-nav {
+    display: inline-flex;
+    align-items: center;
+    height: 38px;
+    gap: 3px;
+    padding: 3px;
+    border: 1px solid #dbe3ec;
+    border-radius: 8px;
+    background: #f8fafc;
+}
+.prepack-date-nav .ant-btn {
+    height: 30px;
+    padding: 0 10px;
+    border-radius: 6px;
+    color: #334155;
+    font-weight: 700;
+}
+.prepack-date-nav .ant-btn:first-child,
+.prepack-date-nav .ant-btn:last-child { width: 32px; padding: 0; color: #475569; }
+.prepack-group-evidence-summary {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 0 14px 10px 42px;
+    padding: 8px 10px;
+    border: 1px solid #d8eee4;
+    border-radius: 8px;
+    background: #f4fbf7;
+    color: #087746;
+    font-size: 12px;
+}
+.prepack-group-evidence-summary .ant-btn { margin-left: auto; }
 
 .prepack-toolbar-title { display: block; color: #10244a; font-size: 28px; line-height: 1.15; letter-spacing: -0.4px; }
 .prepack-toolbar-subtitle { display: block; margin-top: 4px; color: #77839a; font-size: 12px; }
