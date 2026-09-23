@@ -18,9 +18,10 @@ function getTrustedDevelopmentOrigin() {
 
 const TRUSTED_DEVELOPMENT_ORIGIN = getTrustedDevelopmentOrigin();
 
-// Fail closed until every destructive workflow has a verified backup and
-// rollback path. This is intentionally not configurable from the renderer or
-// environment so a deployment cannot accidentally re-enable data deletion.
+// Fail closed for ordinary sessions until every destructive workflow has a
+// verified backup and rollback path. Admins have a server-validated break-glass
+// path for maintenance, and the setting is not configurable from the renderer
+// or environment.
 const DATA_SAFETY_MODE = true;
 // The daily rollover is transactional, idempotent, and preserves a snapshot
 // before changing task state, so it remains available in safety mode.
@@ -1859,8 +1860,11 @@ ipcMain.handle = (channel, listener) =>
     if (!trustedSender) {
       throw new Error(`IPC sender không hợp lệ cho channel ${channel}`);
     }
+    // Safety mode protects ordinary staff/manager sessions. An authenticated
+    // admin is the explicit break-glass operator for maintenance workflows.
+    const isAdminSession = currentSession?.role === "admin";
     const blockedOperation =
-      DATA_SAFETY_MODE && !DATA_SAFETY_ALLOWED_CHANNELS.has(channel)
+      DATA_SAFETY_MODE && !isAdminSession && !DATA_SAFETY_ALLOWED_CHANNELS.has(channel)
       ? getDataSafetyBlockedOperation(channel, args)
       : null;
     if (blockedOperation) {
@@ -2163,6 +2167,23 @@ function sanitizeUserForClient(user) {
     canChangePasswordWithoutCurrent: hasValidTemporaryPasswordGrant(user),
     isTestAccount: isTestOperatorSession(user),
   };
+}
+
+// This account is allowed to create catalog items and receive stock without
+// being promoted to manager. Destructive receipt actions remain admin-only.
+const DEDICATED_RECEIVING_OPERATOR_USERNAME = "nguyendinhtoan";
+
+function isDedicatedReceivingOperator(session = currentSession) {
+  return (
+    String(session?.username || "").trim().toLocaleLowerCase("vi-VN") ===
+      DEDICATED_RECEIVING_OPERATOR_USERNAME &&
+    session?.role !== "admin"
+  );
+}
+
+function requireReceivingOperatorRole(...roles) {
+  if (isDedicatedReceivingOperator()) return;
+  requireRole(...roles);
 }
 
 function requireInventoryLedgerReadAccess() {
@@ -3304,7 +3325,7 @@ ipcMain.handle("products:getForAdmin", async () => {
 
 ipcMain.handle("products:getCatalogForPurchase", async () => {
   try {
-    requireRole("admin", "manager");
+    requireReceivingOperatorRole("admin", "manager");
     if (!prisma) throw new Error("Prisma not available");
     const products = await prisma.product.findMany({
       select: productSelectForCatalog(),
@@ -3643,7 +3664,7 @@ ipcMain.handle("products:getBySkus", async (_event, rawSkus = []) => {
 });
 ipcMain.handle("products:create", async (event, data) => {
   try {
-    requireRole("admin", "manager");
+    requireReceivingOperatorRole("admin", "manager");
     console.log(
       "📝 Create product called with:",
       JSON.stringify(data, null, 2),
@@ -3651,30 +3672,39 @@ ipcMain.handle("products:create", async (event, data) => {
     if (!prisma) throw new Error("Prisma not available");
 
     const isAdmin = isAdminSession();
-    const requestedStock = Number(data?.stock || 0);
+    const requestedStock = Number(data?.stock ?? 0);
     const rawVariants = data?.variants ? parseJsonArray(data.variants) : [];
+    if (!Number.isFinite(requestedStock) || requestedStock < 0) {
+      throw new Error("Tồn kho phải là số lớn hơn hoặc bằng 0.");
+    }
+    if (
+      rawVariants.some((variant) => {
+        const stock = Number(variant?.stock ?? 0);
+        return !Number.isFinite(stock) || stock < 0;
+      })
+    ) {
+      throw new Error("Tồn kho phân loại phải là số lớn hơn hoặc bằng 0.");
+    }
     const variantSkus = rawVariants
       .map((variant) => String(variant?.sku || "").trim())
       .filter(Boolean);
     if (new Set(variantSkus).size !== variantSkus.length) {
       throw new Error("Duplicate variant SKU is not allowed.");
     }
-    if (
-      requestedStock !== 0 ||
-      rawVariants.some((variant) => Number(variant?.stock || 0) !== 0)
-    ) {
-      throw new Error(
-        "Khởi tạo tồn phải thực hiện qua phiếu nhập hoặc điều chỉnh tồn có lý do.",
-      );
-    }
     const safeVariants = rawVariants.length
       ? JSON.stringify(
-          rawVariants.map(({ stock, ...variant }) => ({
+          rawVariants.map((variant) => ({
             ...variant,
-            stock: 0,
+            stock: Number(variant?.stock ?? 0),
           })),
         )
       : data.variants || null;
+    const initialStock = rawVariants.length
+      ? rawVariants.reduce(
+          (total, variant) => total + Number(variant?.stock ?? 0),
+          0,
+        )
+      : requestedStock;
     const product = await prisma.product.create({
       data: {
         sku: data.sku,
@@ -3683,7 +3713,7 @@ ipcMain.handle("products:create", async (event, data) => {
         categoryId: data.categoryId,
         price: data.price !== undefined ? data.price : 0,
         cost: data.cost !== undefined ? data.cost : 0,
-        stock: 0,
+        stock: initialStock,
         minStock: isAdmin ? data.minStock || 10 : 0,
         unit: data.unit || "Cái",
         status: data.status || "active",
@@ -5231,6 +5261,15 @@ async function batchStockUpdate(tx, skuChanges, logContext, options = {}) {
   for (const [sku, totalQty] of flatChanges) {
     const info = productMap.get(sku);
     if (!info) {
+      if (options.allowMissingSkus) {
+        // A physical scan of a mismatch order explicitly confirms handover.
+        // Complete that order even when an old marketplace SKU no longer
+        // exists in the current catalog; other pickup paths remain strict.
+        console.warn(
+          `[TMDT] Pickup đơn cần kiểm tra bỏ qua SKU không còn trong kho: ${sku}`,
+        );
+        continue;
+      }
       // Never silently create an export without reducing inventory. The
       // caller runs this inside a transaction, so throwing rolls back the
       // export and keeps the stock ledger/product stock in sync.
@@ -6686,7 +6725,7 @@ ipcMain.handle("purchases:getVatPenaltyReadModel", async (event, { since } = {})
 // Get all purchases
 ipcMain.handle("purchases:getAll", async (event, { since, limit } = {}) => {
   try {
-    requireRole("admin", "manager");
+    requireReceivingOperatorRole("admin", "manager");
     if (!prisma) throw new Error("Prisma not available");
     const [
       vatGroups,
@@ -13565,7 +13604,7 @@ ipcMain.handle("purchases:create", async (event, data) => {
   let uploadedReceiptReferences = [];
   let duplicatePurchase = false;
   try {
-    requireRole("admin", "manager");
+    requireReceivingOperatorRole("admin", "manager");
     if (!prisma) throw new Error("Prisma not available");
     const idempotencyKey = String(data?.idempotencyKey || "").trim();
     if (!/^[A-Za-z0-9_-]{8,100}$/.test(idempotencyKey)) {
@@ -15495,7 +15534,7 @@ ipcMain.handle(
   "goodsCompanies:setProductCompany",
   async (event, { productId, companyId }) => {
     try {
-      requireRole("admin", "manager");
+      requireReceivingOperatorRole("admin", "manager");
       if (!prisma) throw new Error("Prisma not available");
       const normalizedProductId = Number(productId);
       if (!Number.isInteger(normalizedProductId) || normalizedProductId <= 0) {
@@ -19506,8 +19545,13 @@ ipcMain.handle("dailyTasks:startMobileEvidence", async (event, options = {}) => 
     if (tasks.length === 0) {
       throw new Error(`${targetActor.fullName} chưa có công việc nào đang chờ nộp ảnh bằng chứng.`);
     }
-    if (tasks.some(isPrepackVerificationTaskRecord) && actor.role !== "admin" && !tasks.every((task) => actorOwnsTask(actor, task))) {
-      throw new Error("Chỉ người đang được phân công kiểm tra Đóng gói sẵn mới được chụp ảnh.");
+    if (
+      tasks.some(isPrepackVerificationTaskRecord) &&
+      actor.role !== "admin" &&
+      !isDesignatedPrepackChecker(actor) &&
+      !tasks.every((task) => actorOwnsTask(actor, task))
+    ) {
+      throw new Error("Chỉ người được phân công hoặc người kiểm tra Đóng gói sẵn mới được chụp ảnh.");
     }
     ensureMobileDailyEvidenceServer();
     stopMobileDailyEvidenceSession();
@@ -24497,7 +24541,10 @@ async function execEcommerceExportUpdate(id, data, { snapshotPickup = false, all
                 (data.customerName || oldRecord.customerName || "TMDT"),
               createdBy: data.createdBy || "System",
             },
-            { allowNegative: true },
+            {
+              allowNegative: true,
+              allowMissingSkus: allowMismatchPickup,
+            },
           );
         }
 
@@ -27332,6 +27379,7 @@ function mapPrepackBatch(batch) {
           id: evidence.id,
           fileName: evidence.fileName,
           mimeType: evidence.mimeType,
+          sha256: evidence.sha256,
           uploadedByName: evidence.uploadedByName,
           createdAt: evidence.createdAt,
         }))
@@ -27421,11 +27469,20 @@ ipcMain.handle("prepack:list", async (_event, filters = {}) => {
     const where = {};
     if (requestedStatus && requestedStatus !== "all") where.status = requestedStatus;
     if (!["admin", "manager"].includes(actor.role)) where.packerUsername = actor.username;
+    const evidenceStartDate = filters?.evidenceStartDate ? new Date(filters.evidenceStartDate) : null;
+    const evidenceEndDate = filters?.evidenceEndDate ? new Date(filters.evidenceEndDate) : null;
+    const evidenceCreatedAt = {};
+    if (evidenceStartDate && !Number.isNaN(evidenceStartDate.getTime())) evidenceCreatedAt.gte = evidenceStartDate;
+    if (evidenceEndDate && !Number.isNaN(evidenceEndDate.getTime())) evidenceCreatedAt.lt = evidenceEndDate;
     const rows = await prisma.prepackBatch.findMany({
       where,
       include: {
-        // Return only the latest daily proof; older proofs remain auditable.
-        evidences: { orderBy: { createdAt: "desc" }, take: 1 },
+        // Load proofs for the selected workday so the date navigator can show history.
+        evidences: {
+          ...(Object.keys(evidenceCreatedAt).length ? { where: { createdAt: evidenceCreatedAt } } : {}),
+          orderBy: { createdAt: "desc" },
+          take: 20,
+        },
       },
       orderBy: { createdAt: "desc" },
       take: 300,
@@ -27806,7 +27863,7 @@ async function submitPrepackEvidenceForActor(actor, payload = {}) {
               packerId: true,
               packerUsername: true,
               packerName: true,
-              evidences: { select: { id: true }, take: 1 },
+              evidences: { select: { id: true, createdAt: true }, orderBy: { createdAt: "desc" }, take: 3 },
             },
           });
           const coveredBatchIds = new Set(
@@ -27828,9 +27885,10 @@ async function submitPrepackEvidenceForActor(actor, payload = {}) {
             groups.set(key, group);
           }
           const requiredGroups = [...groups.values()];
-          const coveredGroups = requiredGroups.filter((group) => group.every((item) => (
-            coveredBatchIds.has(item.id) || item.evidences.length > 0
-          )));
+          const coveredGroups = requiredGroups.filter((group) => {
+            const evidenceCount = group.reduce((total, item) => total + item.evidences.filter((evidence) => isPrepackEvidenceFromToday(evidence.createdAt)).length, 0);
+            return evidenceCount >= 3 && group.every((item) => coveredBatchIds.has(item.id) || item.evidences.length > 0);
+          });
           if (allLinkedBatches.length === linkedBatchIds.length && requiredGroups.length > 0 && coveredGroups.length === requiredGroups.length) {
             await tx.dailyTask.update({
               where: { id: task.id },
@@ -28040,6 +28098,9 @@ function mapMobilePrepackTarget(batch) {
       ? components.map((component) => `${component.name || component.sku} x${component.quantity}`).join(" + ")
       : "",
   };
+  const evidenceCountToday = Array.isArray(batch.evidences)
+    ? batch.evidences.filter((evidence) => isPrepackEvidenceFromToday(evidence.createdAt)).length
+    : 0;
   return {
     id: batch.id,
     batchIds: [batch.id],
@@ -28055,7 +28116,8 @@ function mapMobilePrepackTarget(batch) {
     employeeNames: [batch.packerName].filter(Boolean),
     items: [item],
     reportedAt: batch.reportedAt,
-    completedToday: Array.isArray(batch.evidences) && batch.evidences.some((evidence) => isPrepackEvidenceFromToday(evidence.createdAt)),
+    evidenceCountToday,
+    completedToday: evidenceCountToday >= 3,
   };
 }
 
@@ -28066,7 +28128,7 @@ async function listMobilePrepackEvidenceTargets(session) {
   if (!batchIds.length) return [];
   const batches = await prisma.prepackBatch.findMany({
     where: { id: { in: batchIds }, status: { in: ["active", "pending", "waiting_acceptance"] } },
-    include: { evidences: { select: { createdAt: true }, orderBy: { createdAt: "desc" }, take: 3 } },
+    include: { evidences: { select: { id: true, createdAt: true }, orderBy: { createdAt: "desc" }, take: 3 } },
     orderBy: [{ createdAt: "asc" }, { id: "asc" }],
     take: 300,
   });
@@ -28091,7 +28153,8 @@ async function listMobilePrepackEvidenceTargets(session) {
     current.requestedQty = (Number(current.requestedQty) || 0) + (Number(batch.requestedQty) || 0);
     current.items.push(mapMobilePrepackTarget(batch).items[0]);
     if (batch.packerName && !current.employeeNames.includes(batch.packerName)) current.employeeNames.push(batch.packerName);
-    current.completedToday = current.completedToday || (Array.isArray(batch.evidences) && batch.evidences.some((evidence) => isPrepackEvidenceFromToday(evidence.createdAt)));
+    current.evidenceCountToday = (Number(current.evidenceCountToday) || 0) + (Number(mapMobilePrepackTarget(batch).evidenceCountToday) || 0);
+    current.completedToday = current.evidenceCountToday >= 3;
   }
   return [...grouped.values()];
 }

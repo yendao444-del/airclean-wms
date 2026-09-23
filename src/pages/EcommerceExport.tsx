@@ -1168,8 +1168,9 @@ Thời gian: ${currentTime}`;
 
         if (foundEcommerceExport) {
             console.info(`[PickupPerf] lookup-done code=${trimmed} ms=${Math.round(performance.now() - scanStartedAt)}`);
-            // A cancelled order is never handed over. A mismatch is a review
-            // item; it must not interrupt the scan lane or silently become a pickup.
+            // A cancelled order is never handed over. Scanning a mismatch is
+            // an explicit physical confirmation that the parcel still exists,
+            // so it may continue through the pickup path below.
             if (foundEcommerceExport.status === 'cancelled') {
                 playAlert();
                 setScanStatus({
@@ -1177,14 +1178,6 @@ Thời gian: ${currentTime}`;
                 message: `FAIL - ĐƠN HỦY - ${foundEcommerceExport.orderNumber || foundEcommerceExport.ecommerceExportCode}`,
                 });
                 message.error(`ĐƠN HỦY - phải giữ lại để kiểm tra: ${foundEcommerceExport.orderNumber || foundEcommerceExport.ecommerceExportCode}`);
-            } else if (foundEcommerceExport.status === 'mismatch') {
-                playAlert();
-                setScanStatus({
-                    type: 'error',
-                    message: `FAIL - CẦN KIỂM TRA - ${foundEcommerceExport.orderNumber || foundEcommerceExport.ecommerceExportCode}`,
-                });
-                message.warning(`Đã đưa đơn ${foundEcommerceExport.orderNumber || foundEcommerceExport.ecommerceExportCode} vào tab Cần kiểm tra. Có thể tiếp tục quét đơn khác.`);
-                scheduleBgSync();
             } else if (foundEcommerceExport.status === 'completed') {
                 // ⚠️ Đơn hàng đã được bàn giao DVVC rồi
                 playAlert();
@@ -1193,7 +1186,7 @@ Thời gian: ${currentTime}`;
                     message: `ĐÃ PICKUP - ${foundEcommerceExport.orderNumber || foundEcommerceExport.ecommerceExportCode}`,
                 });
                 message.warning(`Đơn ${foundEcommerceExport.orderNumber || foundEcommerceExport.ecommerceExportCode} đã gửi rồi!`);
-            } else if (!isPickupEligibleStatus(foundEcommerceExport.status)) {
+            } else if (foundEcommerceExport.status !== 'mismatch' && !isPickupEligibleStatus(foundEcommerceExport.status)) {
                 playAlert();
                 setScanStatus({
                     type: 'error',
@@ -1258,10 +1251,16 @@ Thời gian: ${currentTime}`;
                         let savedRecord: any = null;
                         const createRes = targetId < 0
                             ? await window.electronAPI.ecommerceExports.create(completedPayload)
-                            : await window.electronAPI.ecommerceExports.completePickup(foundEcommerceExport.id, {
-                                updatedAt: foundEcommerceExport.updatedAt,
-                                pickedBy: pickerName || undefined,
-                            });
+                            : foundEcommerceExport.status === 'mismatch'
+                                ? await window.electronAPI.ecommerceExports.resolveMismatch(foundEcommerceExport.id, {
+                                    action: 'pickup',
+                                    updatedAt: foundEcommerceExport.updatedAt,
+                                    pickedBy: pickerName || undefined,
+                                })
+                                : await window.electronAPI.ecommerceExports.completePickup(foundEcommerceExport.id, {
+                                    updatedAt: foundEcommerceExport.updatedAt,
+                                    pickedBy: pickerName || undefined,
+                                });
                         const createResAny = createRes as any;
                         const updateRes = createRes as any;
                         const updateResAny = createResAny;

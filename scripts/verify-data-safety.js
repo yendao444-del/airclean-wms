@@ -63,6 +63,8 @@ requireText(posCreateHandler, 'void logActivity({', 'POS creation must write its
 requireText(posCreateHandler, 'changes: {', 'POS activity logs must persist structured data through ActivityLog.changes');
 
 requireText(ipc, 'const DATA_SAFETY_MODE = true;', 'DATA_SAFETY_MODE must default to true');
+requireText(ipc, 'const isAdminSession = currentSession?.role === "admin";', 'Admin sessions must be able to run maintenance workflows in safety mode');
+requireText(ipc, 'DATA_SAFETY_MODE && !isAdminSession', 'Safety-mode blocking must not apply to authenticated admins');
 requireText(ipc, 'path.join(__dirname, "r2-daily-evidence-bootstrap.json")', 'Daily evidence R2 must support bundled production bootstrap configuration');
 requireText(r2BootstrapScript, 'DAILY_EVIDENCE_KEY', 'R2 bootstrap preparation must read the worker key');
 requireText(r2BootstrapScript, 'legacyBootstrap.testKey', 'R2 bootstrap preparation must reuse the existing production-compatible device key');

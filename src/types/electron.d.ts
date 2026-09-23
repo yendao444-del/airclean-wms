@@ -324,7 +324,7 @@ export interface ElectronAPI {
     onStockChanged?: (callback: (data: any) => void) => () => void;
   };
   prepack: {
-    list: (filters?: { status?: string }) => Promise<{ success: boolean; data?: any[]; error?: string }>;
+    list: (filters?: { status?: string; evidenceStartDate?: string; evidenceEndDate?: string }) => Promise<{ success: boolean; data?: any[]; error?: string }>;
     create: (data: any) => Promise<{ success: boolean; data?: any; createdCount?: number; skippedCount?: number; error?: string }>;
     updateTarget: (data: any) => Promise<{ success: boolean; data?: any; error?: string }>;
     deleteTarget: (batchId: number) => Promise<{ success: boolean; error?: string }>;
