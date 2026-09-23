@@ -1529,6 +1529,37 @@ export default function PurchasePage() {
         setVatModalVisible(true);
     };
 
+    const promptGoogleDriveReauth = (errorText: string) => {
+        Modal.confirm({
+            title: 'Kết nối lại Google Drive',
+            content: `${errorText} Hãy đăng nhập đúng tài khoản Google có quyền chỉnh sửa thư mục lưu HĐ VAT. Bạn có muốn mở trang Google để kết nối lại ngay trên máy này không?`,
+            okText: 'Kết nối lại',
+            cancelText: 'Để sau',
+            onOk: async () => {
+                const reauthenticate = (window.electronAPI as any)?.googleDrive?.reauthenticate;
+                if (typeof reauthenticate !== 'function') {
+                    message.error('Ứng dụng chưa hỗ trợ kết nối lại Google Drive. Vui lòng cập nhật ứng dụng.');
+                    return;
+                }
+                const result = await reauthenticate();
+                if (result?.success) {
+                    message.success('Đã kết nối lại Google Drive trên máy này. Bạn có thể tải lại HĐ VAT.');
+                } else {
+                    message.error(result?.error || 'Không thể kết nối lại Google Drive.');
+                }
+            },
+        });
+    };
+
+    const showVatUploadError = (result: any, fallback: string) => {
+        const errorText = String(result?.error || fallback);
+        if (result?.reauthRequired || errorText.includes('Phiên Google Drive')) {
+            promptGoogleDriveReauth(errorText);
+        } else {
+            message.error(errorText);
+        }
+    };
+
     const handleVatUpload = async (values: any) => {
         const isNewGroup = vatGroupPendingIds.length > 0;
         const isExistingGroup = !!vatGroupUploadId;
@@ -1559,7 +1590,7 @@ export default function PurchasePage() {
                     expectedUpdatedAt: currentPurchase?.updatedAt,
                 });
                 if (!result.success) {
-                    message.error(result.error || 'Lỗi upload hóa đơn VAT');
+                    showVatUploadError(result, 'Lỗi upload hóa đơn VAT');
                     return;
                 }
                 message.success(`Đã lưu HĐ VAT cho ${vatCompanyGroup}`);
@@ -1633,10 +1664,15 @@ export default function PurchasePage() {
                 setVatModalVisible(false);
                 loadPurchases();
             } else {
-                message.error(result.error || 'Lỗi upload');
+                showVatUploadError(result, 'Lỗi upload');
             }
         } catch (err: any) {
-            message.error('Lỗi: ' + (err.message || 'Không xác định'));
+            const errorText = String(err?.message || 'Không xác định');
+            if (errorText.includes('Phiên Google Drive')) {
+                promptGoogleDriveReauth(errorText);
+            } else {
+                message.error('Lỗi: ' + errorText);
+            }
         } finally {
             setVatUploading(false);
         }

@@ -1857,6 +1857,9 @@ export interface ElectronAPI {
       url: string,
     ) => Promise<{ success: boolean; error?: string }>;
   };
+  googleDrive: {
+    reauthenticate: () => Promise<{ success: boolean; error?: string }>;
+  };
   einvoice: {
     getAll: (filters?: {
       limit?: number;

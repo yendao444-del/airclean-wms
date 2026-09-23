@@ -1079,6 +1079,7 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
   const isFinalizingCheckRef = useRef(false);
   const finalPickVerification = Form.useWatch("finalVerification", finalCheckForm);
   const [showShiftCheckModal, setShowShiftCheckModal] = useState(false);
+  const [shiftCheckScope, setShiftCheckScope] = useState<"all" | "mandatory">("all");
   const [shiftCheckDrafts, setShiftCheckDrafts] = useState<
     Record<string, ShiftCheckDraft>
   >({});
@@ -2338,8 +2339,8 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
           const createdAt = new Date(item.createdAt || 0).getTime() || 0;
           return (
             isWithdrawalTransaction(item) &&
-            localDayKey(item.createdAt) === todayKey &&
-            createdAt > latestCompletedCheck
+            createdAt > latestCompletedCheck &&
+            (isPendingCheck || localDayKey(item.createdAt) === todayKey)
           );
         });
         // A pending package remains actionable across day boundaries. The old
@@ -2364,14 +2365,31 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
       .sort((a, b) => b.lastWithdrawalAt - a.lastWithdrawalAt);
   }, [workspace.register, transactionsByUnitId]);
 
-  const openShiftCheck = () => {
-    if (shiftCheckCandidates.length === 0) {
-      message.info("Hôm nay không có kiện nào phát sinh rút hàng cần kiểm.");
+  const mandatoryShiftCheckCandidates = useMemo(
+    () => shiftCheckCandidates.filter(({ unit }) => unit.status === "Chờ kiểm" || unit.status === "pending_check"),
+    [shiftCheckCandidates],
+  );
+
+  const visibleShiftCheckCandidates = shiftCheckScope === "mandatory"
+    ? mandatoryShiftCheckCandidates
+    : shiftCheckCandidates;
+
+  const openShiftCheck = (scope: "all" | "mandatory" = "all") => {
+    const candidates = scope === "mandatory"
+      ? mandatoryShiftCheckCandidates
+      : shiftCheckCandidates;
+    if (candidates.length === 0) {
+      message.info(
+        scope === "mandatory"
+          ? "Không có kiện nào đang chờ kiểm."
+          : "Hôm nay không có kiện nào phát sinh rút hàng cần kiểm.",
+      );
       return;
     }
+    setShiftCheckScope(scope);
     setShiftCheckDrafts(
       Object.fromEntries(
-        shiftCheckCandidates.map(({ unit }) => [
+        candidates.map(({ unit }) => [
           unit.id,
           { actualQuantity: unit.currentPcs, reason: "", note: "" },
         ]),
@@ -2396,7 +2414,7 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
   const submitShiftCheck = async () => {
     if (isSubmittingShiftCheck) return;
     try {
-      const items = shiftCheckCandidates.map(({ unit }) => {
+      const items = visibleShiftCheckCandidates.map(({ unit }) => {
         const draft = shiftCheckDrafts[unit.id];
         if (draft?.actualQuantity === null || draft?.actualQuantity === undefined) {
           throw new Error(`Hãy nhập tồn thực tế của kiện ${unit.id}.`);
@@ -3181,7 +3199,7 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
           </Tooltip>
         </Flex>
       </nav>
-      {shiftCheckCandidates.length > 0 && (
+      {mandatoryShiftCheckCandidates.length > 0 && (
         <Alert
           type="warning"
           showIcon
@@ -3189,12 +3207,12 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
           className="hu-shift-check-alert"
           message={
             <span>
-              <b>Cần kiểm kiện cuối ca:</b> hôm nay có {shiftCheckCandidates.length} kiện đã phát sinh rút hàng nhưng chưa được kiểm lại.
-              {' '}Bạn phải kiểm/chốt các kiện này trước khi khui kiện mới cùng SKU và cùng loại.
+              <b>Cần kiểm và chốt:</b> có {mandatoryShiftCheckCandidates.length} kiện đang ở trạng thái Chờ kiểm.
+              {' '}Hãy nhập số thực tế trước khi tiếp tục thao tác cùng SKU.
             </span>
           }
           action={
-            <Button size="small" type="primary" onClick={openShiftCheck}>
+            <Button size="small" type="primary" onClick={() => openShiftCheck("mandatory")}>
               Kiểm ngay
             </Button>
           }
@@ -3382,12 +3400,12 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
                 <div className="hu-header-right hu-selected-actions">
                   {shiftCheckCandidates.length > 0 && (
                     <Tooltip
-                      title={`${shiftCheckCandidates.length} kiện đang chờ kiểm hoặc có lượt rút mới chưa kiểm`}
+                      title={`${shiftCheckCandidates.length} kiện có lượt rút chưa đối chiếu; chỉ kiện Chờ kiểm mới bắt buộc chốt`}
                     >
                       <Button
                         icon={<CheckCircleOutlined />}
                         className="hu-btn-secondary hu-btn-shift-check"
-                        onClick={openShiftCheck}
+                        onClick={() => openShiftCheck("all")}
                       >
                         Kiểm cuối ca
                         <span className="hu-shift-check-count">
@@ -4739,9 +4757,11 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
               <CheckCircleOutlined />
             </span>
             <div>
-              <b>Kiểm cuối ca</b>
+              <b>{shiftCheckScope === "mandatory" ? "Kiểm và chốt kiện" : "Kiểm cuối ca"}</b>
               <small>
-                Chỉ gồm các kiện đã phát sinh rút hàng hôm nay và chưa kiểm
+                {shiftCheckScope === "mandatory"
+                  ? "Chỉ gồm các kiện đang ở trạng thái Chờ kiểm"
+                  : "Đối chiếu các kiện đã phát sinh rút hàng hôm nay và chưa kiểm"}
               </small>
             </div>
           </div>
@@ -4753,7 +4773,7 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
           setShiftCheckDrafts({});
         }}
         onOk={submitShiftCheck}
-        okText={`Hoàn tất kiểm ${shiftCheckCandidates.length} kiện`}
+        okText={`${shiftCheckScope === "mandatory" ? "Chốt" : "Hoàn tất kiểm"} ${visibleShiftCheckCandidates.length} kiện`}
         cancelText="Để kiểm sau"
         confirmLoading={isSubmittingShiftCheck}
         closable={!isSubmittingShiftCheck}
@@ -4767,13 +4787,15 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
         <Alert
           type="info"
           showIcon
-          message="Nhập số lượng đếm thực tế trong từng kiện"
-          description="Nếu thực tế khác tồn dự kiến, hệ thống sẽ yêu cầu lý do và ghi một giao dịch điều chỉnh riêng vào lịch sử."
+          message={shiftCheckScope === "mandatory" ? "Nhập số lượng thực tế để chốt kiện" : "Nhập số lượng đếm thực tế trong từng kiện"}
+          description={shiftCheckScope === "mandatory"
+            ? "Kiện chỉ được mở lại thao tác sau khi đã chốt số thực tế."
+            : "Kiểm cuối ca là bước đối chiếu; nếu thực tế khác tồn dự kiến, hệ thống sẽ yêu cầu lý do và ghi một giao dịch điều chỉnh riêng vào lịch sử."}
           style={{ marginBottom: 14 }}
         />
         <Table
           rowKey={(item) => item.unit.id}
-          dataSource={shiftCheckCandidates}
+          dataSource={visibleShiftCheckCandidates}
           size="small"
           pagination={false}
           scroll={{ x: 1050, y: 480 }}

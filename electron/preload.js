@@ -523,6 +523,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
         },
     },
 
+    googleDrive: {
+        reauthenticate: () => ipcRenderer.invoke('googleDrive:reauthenticate'),
+    },
+
     // Shell - Open external links in browser
     shell: {
         openExternal: (url) => ipcRenderer.invoke('shell:openExternal', url),
