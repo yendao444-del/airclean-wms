@@ -113,7 +113,26 @@ async function reconcileLateAttendanceFinesNow(prisma, options = {}) {
     return prisma.$transaction(async (tx) => {
         await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${'attendanceData'}))`;
 
-        const configRow = await tx.appConfig.findUnique({ where: { key: 'attendanceData' } });
+        // Payroll snapshots can make attendanceData several megabytes. Late-fine
+        // reconciliation never reads them, so keep them in PostgreSQL instead of
+        // transferring every historical snapshot over the Supabase connection.
+        const configRow = typeof tx.$queryRaw === 'function'
+            ? (await tx.$queryRaw`
+                SELECT jsonb_set(
+                    "value"::jsonb,
+                    '{lockedPeriods}',
+                    COALESCE((
+                        SELECT jsonb_agg(period_row - 'payrollSnapshot')
+                        FROM jsonb_array_elements(
+                            COALESCE(("value"::jsonb)->'lockedPeriods', '[]'::jsonb)
+                        ) AS period_row
+                    ), '[]'::jsonb)
+                )::text AS "value"
+                FROM "AppConfig"
+                WHERE "key" = 'attendanceData'
+                LIMIT 1
+            `)?.[0]
+            : await tx.appConfig.findUnique({ where: { key: 'attendanceData' } });
         if (!configRow) return { created: [], updated: [], waived: [], skippedDeleted: 0, unmatched: [], checked: 0 };
 
         let attendanceData;
@@ -153,6 +172,7 @@ async function reconcileLateAttendanceFinesNow(prisma, options = {}) {
         const created = [];
         const updated = [];
         const waived = [];
+        const waivedExistingFineIds = new Set();
         const unmatched = [];
         let skippedDeleted = 0;
         const currentMonth = localDateKey(new Date()).slice(0, 7);
@@ -188,19 +208,6 @@ async function reconcileLateAttendanceFinesNow(prisma, options = {}) {
                 : configuredAmount;
             const sameFine = fine => isSameAttendanceFine(fine, employee.id, log.date, shiftKey);
             const existingFine = existingFines.find(sameFine);
-            if (existingFine) {
-                if (options.repairReconciledAmounts
-                    && String(existingFine.id || '') === `fine-attendance-log-${log.id}`
-                    && Number(existingFine.amount) !== amount) {
-                    updated.push({ before: existingFine, after: { ...existingFine, amount } });
-                }
-                continue;
-            }
-            if (created.some(sameFine)) continue;
-            if (deletedFines.some(sameFine)) {
-                skippedDeleted += 1;
-                continue;
-            }
             const [year, month, day] = log.date.split('-');
             const nextFine = {
                 id: `fine-attendance-log-${log.id}`,
@@ -221,13 +228,12 @@ async function reconcileLateAttendanceFinesNow(prisma, options = {}) {
             )) || waived.some((waiver) => (
                 Number(waiver.empId) === Number(employee.id) && waiver.periodKey === periodKey
             ));
-            // The same monthly credit grows from 15 to 20 minutes after a
-            // 15-day streak. It remains a single use even when upgraded.
-            if (!waiverAlreadyUsed) {
-                const logsThroughThisCheckIn = logs.filter((candidate) => (
-                    new Date(candidate.timestamp).getTime() <= new Date(log.timestamp).getTime()
-                ));
-                const rewardSummary = calculateAttendanceRewardSummary({
+            const logsThroughThisCheckIn = logs.filter((candidate) => (
+                new Date(candidate.timestamp).getTime() <= new Date(log.timestamp).getTime()
+            ));
+            const rewardSummary = waiverAlreadyUsed
+                ? null
+                : calculateAttendanceRewardSummary({
                     employee,
                     employees,
                     logs: logsThroughThisCheckIn,
@@ -238,20 +244,53 @@ async function reconcileLateAttendanceFinesNow(prisma, options = {}) {
                     now: log.timestamp,
                     periodKey,
                 });
-                const waiver = rewardSummary.waiver;
-                if (waiver?.eligible && lateMinutes <= waiver.lateMaxMinutes) {
-                    const waiverRecord = {
+            const waiver = rewardSummary?.waiver;
+            const shouldWaive = Boolean(waiver?.eligible && lateMinutes <= waiver.lateMaxMinutes);
+            const waiverReason = shouldWaive
+                ? `Miễn phạt chuyên cần: đạt chuỗi đúng giờ ${waiver.upgraded ? waiver.upgradeStreakDays : waiver.streakDays} ngày liên tiếp; lần đi muộn ${lateMinutes} phút nằm trong giới hạn ${Number(config.graceMinutes || 0) + 1}–${waiver.lateMaxMinutes} phút. Không khấu trừ ${amount.toLocaleString('vi-VN')}đ.`
+                : '';
+
+            // Re-run the waiver decision for an existing automatic fine. This
+            // matters when an approved leave is saved after the late-fine
+            // reconciliation already ran: the leave can restore a seven-day
+            // streak, so the stale fine must be converted to a waiver.
+            if (existingFine) {
+                if (shouldWaive && String(existingFine.id || '').startsWith('fine-attendance-log-')) {
+                    waivedExistingFineIds.add(String(existingFine.id));
+                    waived.push({
                         id: `attendance-waiver-${employee.id}-${periodKey}-${log.id}`,
                         empId: Number(employee.id),
                         periodKey,
                         autoAttendanceWaiver: true,
-                        fine: nextFine,
+                        fine: existingFine,
                         waivedAt: new Date(log.timestamp).toISOString(),
-                        reason: `Đã dùng 1 lượt miễn phạt chuyên cần (${Number(config.graceMinutes || 0) + 1}–${waiver.lateMaxMinutes} phút) sau chuỗi đúng giờ ${waiver.upgraded ? waiver.upgradeStreakDays : waiver.streakDays} ngày.`,
-                    };
-                    waived.push(waiverRecord);
-                    continue;
+                        reason: waiverReason,
+                    });
+                } else if (options.repairReconciledAmounts
+                    && String(existingFine.id || '') === `fine-attendance-log-${log.id}`
+                    && Number(existingFine.amount) !== amount) {
+                    updated.push({ before: existingFine, after: { ...existingFine, amount } });
                 }
+                continue;
+            }
+            if (created.some(sameFine)) continue;
+            if (deletedFines.some(sameFine)) {
+                skippedDeleted += 1;
+                continue;
+            }
+            // The same monthly credit grows from 15 to 20 minutes after a
+            // 15-day streak. It remains a single use even when upgraded.
+            if (shouldWaive) {
+                waived.push({
+                    id: `attendance-waiver-${employee.id}-${periodKey}-${log.id}`,
+                    empId: Number(employee.id),
+                    periodKey,
+                    autoAttendanceWaiver: true,
+                    fine: nextFine,
+                    waivedAt: new Date(log.timestamp).toISOString(),
+                    reason: waiverReason,
+                });
+                continue;
             }
 
             created.push(nextFine);
@@ -261,14 +300,14 @@ async function reconcileLateAttendanceFinesNow(prisma, options = {}) {
             const now = new Date().toISOString();
             const actor = options.actor || 'system';
             const updatedById = new Map(updated.map(item => [item.before.id, item.after]));
-            const nextData = {
-                ...attendanceData,
-                extraFines: [
-                    ...existingFines.map(fine => updatedById.get(fine.id) || fine),
+            const nextExtraFines = [
+                    ...existingFines
+                        .filter(fine => !waivedExistingFineIds.has(String(fine?.id)))
+                        .map(fine => updatedById.get(fine.id) || fine),
                     ...created,
-                ],
-                fineWaivers: [...fineWaivers, ...waived],
-                fineAuditLog: [
+                ];
+            const nextFineWaivers = [...fineWaivers, ...waived];
+            const nextFineAuditLog = [
                     ...fineAuditLog,
                     ...created.map(fine => ({
                         id: `flog-reconcile-${fine.attendanceLogId}`,
@@ -291,19 +330,43 @@ async function reconcileLateAttendanceFinesNow(prisma, options = {}) {
                     })),
                     ...waived.map(item => ({
                         id: `flog-attendance-waiver-${item.fine.attendanceLogId}`,
-                        action: 'edit',
+                        action: waivedExistingFineIds.has(String(item.fine.id)) ? 'delete' : 'edit',
                         timestamp: now,
                         changedBy: actor,
                         changedByName: actor === 'system' ? 'Hệ thống chấm công' : actor,
+                        ...(waivedExistingFineIds.has(String(item.fine.id)) ? { before: item.fine } : {}),
                         after: item.fine,
                         note: `Tự động dùng lượt miễn phạt chuyên cần cho log #${item.fine.attendanceLogId}: ${item.reason}`,
                     })),
-                ],
-            };
-            await tx.appConfig.update({
-                where: { key: 'attendanceData' },
-                data: { value: JSON.stringify(nextData) },
-            });
+                ];
+            if (typeof tx.$queryRaw === 'function') {
+                // Update only the fine branches so historical payroll snapshots
+                // remain byte-for-byte intact without a large DB round trip.
+                await tx.$executeRaw`
+                    UPDATE "AppConfig"
+                    SET "value" = jsonb_set(
+                            jsonb_set(
+                                jsonb_set("value"::jsonb, '{extraFines}', ${JSON.stringify(nextExtraFines)}::jsonb, true),
+                                '{fineWaivers}', ${JSON.stringify(nextFineWaivers)}::jsonb, true
+                            ),
+                            '{fineAuditLog}', ${JSON.stringify(nextFineAuditLog)}::jsonb, true
+                        )::text,
+                        "updatedAt" = NOW()
+                    WHERE "key" = 'attendanceData'
+                `;
+            } else {
+                await tx.appConfig.update({
+                    where: { key: 'attendanceData' },
+                    data: {
+                        value: JSON.stringify({
+                            ...attendanceData,
+                            extraFines: nextExtraFines,
+                            fineWaivers: nextFineWaivers,
+                            fineAuditLog: nextFineAuditLog,
+                        }),
+                    },
+                });
+            }
         }
 
         return { created, updated, waived, skippedDeleted, unmatched, checked: firstLogs.size };

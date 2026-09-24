@@ -175,6 +175,7 @@ interface ShiftStatus {
 
 interface FineRecord {
     id?: string;
+    attendanceLogId?: string | number;
     empId: number;
     type: string;
     detail: string;
@@ -557,6 +558,7 @@ interface PackingOrderLog {
     packer: string;            // Người đóng gói
     items: PackingOrderItem[];
     totalSKU: number;          // Tổng SKU đóng cho đơn này
+    orderCount?: number;       // Compact payroll rows can represent multiple orders
     status: 'completed' | 'issue'; // issue = đóng sai/thiếu
     note?: string;
 }
@@ -1065,7 +1067,7 @@ const fmtCompactMoney = (v: number) => {
     if (absoluteValue >= 1000000) {
         return `${new Intl.NumberFormat('vi-VN', { maximumFractionDigits: 2 }).format(absoluteValue / 1000000)}Tr`;
     }
-    return `${new Intl.NumberFormat('vi-VN', { maximumFractionDigits: 1 }).format(absoluteValue / 1000)}K`;
+    return `${Math.round(absoluteValue / 1000)}K`;
 };
 
 // Hoa hồng đóng gói tính theo số gói thực tế trên từng dòng đơn hàng.
@@ -1443,7 +1445,7 @@ function buildPackingWeeklyResults(orderLogs: PackingOrderLog[], employeesList: 
         const scores = weeks.get(weekKey)!;
         const current = scores.get(employee.id) || { employee, units: 0, orderCount: 0 };
         current.units += calcPacksFromItems(order.items, order.timestamp);
-        current.orderCount += 1;
+        current.orderCount += Math.max(1, Number(order.orderCount || 1));
         scores.set(employee.id, current);
     });
 
@@ -1553,7 +1555,7 @@ function calculatePayroll(
             if (employmentEnd?.isValid() && orderDate.isValid() && !orderDate.isBefore(employmentEnd, 'day')) return;
             const aggregate = packingByEmployee.get(employee.id) || { income: 0, orderCount: 0, units: 0, breakdown: {} };
             aggregate.income += packing.income;
-            aggregate.orderCount += 1;
+            aggregate.orderCount += Math.max(1, Number(order.orderCount || 1));
             aggregate.units += packing.units;
             Object.entries(packing.breakdown).forEach(([key, row]) => {
                 if (!aggregate.breakdown[key]) aggregate.breakdown[key] = { units: 0, income: 0 };
@@ -4178,6 +4180,8 @@ export default function Attendance() {
     const [fineSourcesReadyKey, setFineSourcesReadyKey] = useState('');
 
     const [isDbLoaded, setIsDbLoaded] = useState(false);
+    const [isCoreSnapshotReady, setIsCoreSnapshotReady] = useState(false);
+    const payrollLoadStartedAt = useRef(performance.now());
     const [isBackgroundSyncComplete, setIsBackgroundSyncComplete] = useState(false);
     const [systemUsernames, setSystemUsernames] = useState<string[]>([]);
     const [systemUsers, setSystemUsers] = useState<any[]>([]);
@@ -4205,7 +4209,6 @@ export default function Attendance() {
 
     // Catalog loading must not delay employee data or the monthly log query.
     useEffect(() => {
-        if (!isDbLoaded) return;
         if (activeTab !== 'overview' && activeTab !== 'packaging') return;
         if (packingCatalogReady) return;
         if (isAttendanceUiTest) {
@@ -4283,12 +4286,14 @@ export default function Attendance() {
                 if (!cancelled) setPackingCatalogError('Chưa tải đủ danh mục đóng gói. Chưa thể chốt hoặc gửi lương kỳ đang mở.');
             }
         };
-        const timer = window.setTimeout(loadCatalog, activeTab === 'packaging' ? 0 : 500);
+        // Catalog is independent from the attendance snapshot. Start it on
+        // the first event-loop turn so it can overlap the core DB read.
+        const timer = window.setTimeout(loadCatalog, 0);
         return () => {
             cancelled = true;
             window.clearTimeout(timer);
         };
-    }, [activeTab, isAttendanceUiTest, isDbLoaded, loadPackingComponents, packingCatalogAttempt, packingCatalogReady, startBackgroundTransition]);
+    }, [activeTab, isAttendanceUiTest, loadPackingComponents, packingCatalogAttempt, packingCatalogReady, startBackgroundTransition]);
 
     // 1. Tải dữ liệu từ DB lúc mở component
     useEffect(() => {
@@ -4345,6 +4350,7 @@ export default function Attendance() {
             try {
                 const api = (window as any).electronAPI;
                 if (isAttendanceUiTest && !api) {
+                    setIsCoreSnapshotReady(true);
                     setEmployees(initialEmployees);
                     setSystemUsers(initialEmployees.map(employee => ({
                         id: employee.id,
@@ -4382,6 +4388,7 @@ export default function Attendance() {
                         updatedAt: rs.updatedAt || null,
                     };
                     applyAttendanceSnapshot(rs.data);
+                    if (!cancelled) setIsCoreSnapshotReady(true);
                 } else {
                     if (!attendanceInitialDataCache?.data) setEmployees(initialEmployees);
                 }
@@ -4599,7 +4606,7 @@ export default function Attendance() {
     // Bảo trì dữ liệu chạy sau lần render đầu. Không thay đổi logic đối soát;
     // chỉ không bắt toàn bộ giao diện phải chờ quét lịch sử chấm công.
     useEffect(() => {
-        if (!isDbLoaded) return;
+        if (!isCoreSnapshotReady) return;
         if (isAttendanceUiTest) {
             setIsBackgroundSyncComplete(true);
             return;
@@ -4607,9 +4614,8 @@ export default function Attendance() {
         let cancelled = false;
         setIsBackgroundSyncComplete(false);
         const syncTask = (async () => {
-            // Let the primary attendance screen become interactive before
-            // starting maintenance queries and fine reconciliation.
-            await new Promise<void>(resolve => window.setTimeout(resolve, 700));
+            // The fresh core snapshot is already committed. Reconciliation
+            // gates payroll readiness, so do not add an artificial 700ms wait.
             if (cancelled) return;
             const api = (window as any).electronAPI;
             try {
@@ -4621,7 +4627,9 @@ export default function Attendance() {
                     if (!reconcileResult?.success) {
                         console.error('Lỗi đối soát phạt đi muộn:', reconcileResult?.error);
                     } else {
-                        const latest = await api.appConfig.get('attendanceData');
+                        const latest = api.attendance?.getInitialData
+                            ? await api.attendance.getInitialData()
+                            : await api.appConfig.get('attendanceData');
                         if (latest?.success && latest.data) {
                             dbFines = Array.isArray(latest.data.extraFines) ? latest.data.extraFines : [];
                             dbAuditLog = Array.isArray(latest.data.fineAuditLog) ? latest.data.fineAuditLog : [];
@@ -4657,7 +4665,7 @@ export default function Attendance() {
         return () => {
             cancelled = true;
         };
-    }, [isAdmin, isAttendanceUiTest, isDbLoaded]);
+    }, [isAdmin, isAttendanceUiTest, isCoreSnapshotReady]);
 
     const saveAttendanceSnapshot = useCallback(async (snapshot: Record<string, any>) => {
         // Mọi đường ghi đều xếp sau đối soát để không thể ghi snapshot cũ đè kết quả nền.
@@ -4796,9 +4804,9 @@ export default function Attendance() {
         const requestKey = `${range[0].startOf('day').valueOf()}-${range[1].endOf('day').valueOf()}`;
         if (!options?.force && salesBonusReadyKey === requestKey) return salesBonusSummary;
         salesBonusRequestRef.current = requestKey;
-        if (salesBonusReadyKey !== requestKey) {
-            setSalesBonusSummary({ ...EMPTY_SALES_BONUS_SUMMARY, requestedFrom: from, requestedTo: to });
-        }
+        // Do not reset summary here: it is a callback dependency, so resetting
+        // it retriggers the loading effect before this request can finish.
+        // The period readiness key masks the previous result while loading.
         setSalesBonusLoading(true);
         setSalesBonusError('');
         try {
@@ -4857,9 +4865,12 @@ export default function Attendance() {
     }, [isAttendanceUiTest, overviewDateRange, salesBonusReadyKey, salesBonusSummary]);
 
     useEffect(() => {
-        if (!isDbLoaded || !isBackgroundSyncComplete || (activeTab !== 'overview' && activeTab !== 'bonuses')) return;
+        // Sales bonus is an independent aggregate over orders/returns/refunds;
+        // do not wait for the slower attendance-fine reconciliation before
+        // starting it on the overview tab.
+        if (activeTab !== 'overview' && activeTab !== 'bonuses') return;
         void loadSalesBonusSummary(overviewDateRange).catch(() => undefined);
-    }, [activeTab, isBackgroundSyncComplete, isDbLoaded, loadSalesBonusSummary, overviewDateRange]);
+    }, [activeTab, loadSalesBonusSummary, overviewDateRange]);
 
     const [packingOrderLogsData, setPackingOrderLogsData] = useState<PackingOrderLog[]>([]);
     const [packingRewardNow, setPackingRewardNow] = useState(() => dayjs());
@@ -4888,7 +4899,7 @@ export default function Attendance() {
         return () => window.clearInterval(timer);
     }, [activeTab]);
 
-    const loadPackingOrders = async (since?: string, options?: { strict?: boolean; range?: AttendancePeriod; includeComparison?: boolean; silent?: boolean; force?: boolean }): Promise<PackingOrderLog[]> => {
+    const loadPackingOrders = async (since?: string, options?: { strict?: boolean; range?: AttendancePeriod; includeComparison?: boolean; silent?: boolean; force?: boolean; summaryOnly?: boolean }): Promise<PackingOrderLog[]> => {
         const requestedRange = options?.range || (activeTab === 'packaging' ? packingDateRange : overviewDateRange);
         const comparisonRange = getPackingComparisonRange(requestedRange);
         const sinceVal = since || getPackingLoadStart(options?.includeComparison ? comparisonRange[0] : requestedRange[0]).toISOString();
@@ -4904,10 +4915,12 @@ export default function Attendance() {
             const sorted = [...rows].sort((a, b) =>
                 (Date.parse(b.timestamp) || 0) - (Date.parse(a.timestamp) || 0),
             );
-            packingOrderCacheRef.current.set(requestKey, sorted);
-            if (packingOrderCacheRef.current.size > 6) {
-                const oldestKey = packingOrderCacheRef.current.keys().next().value;
-                if (oldestKey) packingOrderCacheRef.current.delete(oldestKey);
+            if (!options?.summaryOnly) {
+                packingOrderCacheRef.current.set(requestKey, sorted);
+                if (packingOrderCacheRef.current.size > 6) {
+                    const oldestKey = packingOrderCacheRef.current.keys().next().value;
+                    if (oldestKey) packingOrderCacheRef.current.delete(oldestKey);
+                }
             }
             if (packingRequestKeyRef.current === requestKey) {
                 packingOrderLogsRef.current = sorted;
@@ -5007,6 +5020,22 @@ export default function Attendance() {
                     p.then(r => { console.log(`[PACKING] ✅ ${label}:`, r?.data?.length || 0); return r; }),
                     new Promise((_, reject) => setTimeout(() => reject(`${label} TIMEOUT (${ms}ms)`), ms))
                 ]).catch(e => { console.warn(`[PACKING] ⚠️ ${label} failed:`, e); return { success: false, error: String(e) }; });
+
+            if (options?.summaryOnly && api.ecommerceExports.getPackingPayrollSummary) {
+                const summaryRes = await withTimeout(
+                    api.ecommerceExports.getPackingPayrollSummary({
+                        since: sinceVal,
+                        until: untilVal,
+                        commission: packingCommission,
+                    }),
+                    'Packing payroll summary',
+                );
+                if (summaryRes?.success && Array.isArray(summaryRes.data)) {
+                    console.log('[PACKING] Payroll summary rows:', summaryRes.data.length, 'cached:', Boolean(summaryRes.cached));
+                    return commitPackingRows(summaryRes.data as PackingOrderLog[]);
+                }
+                throw new Error(summaryRes?.error || 'Không tải được tổng hợp đóng gói cho bảng lương.');
+            }
 
             // Prefer the main-process read model: it parses JSON once, keeps a
             // revision-aware cache across tab remounts, and transfers only the
@@ -5411,9 +5440,12 @@ export default function Attendance() {
     // behind requestIdleCallback only adds latency to the payroll readiness gate
     // without reducing database work or changing the rendered result.
     useEffect(() => {
-        if (!isDbLoaded || activeTab !== 'overview') return;
-        void loadPackingOrders(getPackingLoadStart(overviewDateRange[0]).toISOString(), { range: overviewDateRange });
-    }, [activeTab, isDbLoaded, overviewDateRange]);
+        // The summary endpoint computes historical commission values in the
+        // main process, so wait for the core snapshot that contains the active
+        // commission history instead of capturing the default rates.
+        if (activeTab !== 'overview' || !isCoreSnapshotReady) return;
+        void loadPackingOrders(getPackingLoadStart(overviewDateRange[0]).toISOString(), { range: overviewDateRange, summaryOnly: true });
+    }, [activeTab, isCoreSnapshotReady, overviewDateRange, config.packingCommission]);
 
     // Đóng gói dùng khoảng tuần riêng; không thay đổi kỳ tháng của các tab còn lại.
     useEffect(() => {
@@ -6175,7 +6207,9 @@ export default function Attendance() {
     const lockedSalesBonusSummary = lockedPayrollSnapshot?.sourceSummary?.salesBonusSummary as SalesBonusSummary | undefined;
     const activeSalesBonusSummary = currentLockedPeriod
         ? (lockedSalesBonusSummary || EMPTY_SALES_BONUS_SUMMARY)
-        : salesBonusSummary;
+        : salesBonusReadyKey === `${overviewDateRange[0].startOf('day').valueOf()}-${overviewDateRange[1].endOf('day').valueOf()}`
+            ? salesBonusSummary
+            : EMPTY_SALES_BONUS_SUMMARY;
     const overviewFines = lockedPayrollSnapshot?.fines || liveOverviewFines;
     const overviewBonuses = lockedPayrollSnapshot?.bonuses || liveOverviewBonusesWithWeekly;
     const overviewPackingLogs = lockedPayrollSnapshot?.packingLogs || liveOverviewPackingLogs;
@@ -6201,7 +6235,7 @@ export default function Attendance() {
                 matchedEmployeesByPacker.set(packerKey, matchedEmployees);
             }
             matchedEmployees.forEach(employee => {
-                previousOrderCounts.set(employee.id, (previousOrderCounts.get(employee.id) || 0) + 1);
+            previousOrderCounts.set(employee.id, (previousOrderCounts.get(employee.id) || 0) + Math.max(1, Number(order.orderCount || 1)));
             });
         });
 
@@ -6216,7 +6250,7 @@ export default function Attendance() {
             matchedEmployees.forEach(employee => {
                 const score = employeeScores.get(employee.id);
                 if (!score) return;
-                score.orderCount += 1;
+                score.orderCount += Math.max(1, Number(order.orderCount || 1));
                 score.units += packing.units;
                 score.income += packing.income;
             });
@@ -6251,12 +6285,27 @@ export default function Attendance() {
     const isCurrentPeriodLocked = Boolean(currentLockedPeriod);
     const overviewAttendanceExpectedKey = `${overviewDateRange[0].year()}-${String(overviewDateRange[0].month() + 1).padStart(2, '0')}`;
     const salesBonusExpectedKey = `${overviewDateRange[0].startOf('day').valueOf()}-${overviewDateRange[1].endOf('day').valueOf()}`;
-    const overviewAttendanceReady = isBackgroundSyncComplete && overviewAttendanceLogsKey === overviewAttendanceExpectedKey;
+    const overviewAttendanceLogsReady = overviewAttendanceLogsKey === overviewAttendanceExpectedKey;
+    const overviewAttendanceReady = isBackgroundSyncComplete && overviewAttendanceLogsReady;
     const packingExpectedKey = `${getPackingLoadStart(overviewDateRange[0]).valueOf()}-${overviewDateRange[1].endOf('day').valueOf()}`;
     const isPackingDataReady = packingCatalogReady && packingReadyKey === packingExpectedKey && !packingLoadError;
-    const isPayrollDataReady = isCurrentPeriodLocked
+    const isPayrollDataReady = isCoreSnapshotReady && (isCurrentPeriodLocked
         ? Boolean(lockedPayrollSnapshot)
-        : (overviewAttendanceReady && areFineSourcesReady && isPackingDataReady && attendanceRewardReadyKey === attendanceRewardPeriodKey && salesBonusReadyKey === salesBonusExpectedKey);
+        : (overviewAttendanceReady && areFineSourcesReady && isPackingDataReady && attendanceRewardReadyKey === attendanceRewardPeriodKey && salesBonusReadyKey === salesBonusExpectedKey));
+    useEffect(() => {
+        if (activeTab !== 'overview') return;
+        console.info('[Attendance:ready]', JSON.stringify({
+            elapsedMs: Math.round(performance.now() - payrollLoadStartedAt.current),
+            ready: isPayrollDataReady,
+            core: isCoreSnapshotReady,
+            attendance: overviewAttendanceReady,
+            fines: areFineSourcesReady,
+            catalog: packingCatalogReady,
+            packing: isPackingDataReady,
+            rewards: attendanceRewardReadyKey === attendanceRewardPeriodKey,
+            sales: salesBonusReadyKey === salesBonusExpectedKey,
+        }));
+    }, [activeTab, isPayrollDataReady, isCoreSnapshotReady, overviewAttendanceReady, areFineSourcesReady, packingCatalogReady, isPackingDataReady, attendanceRewardReadyKey, attendanceRewardPeriodKey, salesBonusReadyKey, salesBonusExpectedKey]);
     const employmentEndDates = useMemo(() => Object.fromEntries(
         systemUsers
             .filter((item: any) => item?.employmentStatus === 'resigned' && item?.resignationDate)
@@ -6276,11 +6325,11 @@ export default function Attendance() {
         // table by `isPayrollDataReady` until all sources are coherent.
         const rows = calculatePayroll(
             overviewFines, leaveRecords, workSchedules, overviewWareHousePacking, employees, overviewBonuses,
-            overviewAttendanceLogs, overviewDateRange[0].month() + 1, overviewDateRange[0].year(), overviewPackingLogs, packingCommission, employmentEndDates, payrollOverrides, overviewAttendanceReady, activeSalesBonusSummary.bonusAmount
+            overviewAttendanceLogs, overviewDateRange[0].month() + 1, overviewDateRange[0].year(), overviewPackingLogs, packingCommission, employmentEndDates, payrollOverrides, overviewAttendanceLogsReady, activeSalesBonusSummary.bonusAmount
         );
         console.info('[Attendance:compute] payroll ms:', Math.round(performance.now() - startedAt));
         return rows;
-    }, [lockedPayrollSnapshot, isPayrollDataReady, overviewFines, leaveRecords, workSchedules, overviewWareHousePacking, employees, overviewBonuses, overviewAttendanceLogs, overviewDateRange, overviewPackingLogs, packingCommission, employmentEndDates, payrollOverrides, overviewAttendanceReady, activeSalesBonusSummary.bonusAmount]);
+    }, [lockedPayrollSnapshot, isPayrollDataReady, overviewFines, leaveRecords, workSchedules, overviewWareHousePacking, employees, overviewBonuses, overviewAttendanceLogs, overviewDateRange, overviewPackingLogs, packingCommission, employmentEndDates, payrollOverrides, overviewAttendanceLogsReady, activeSalesBonusSummary.bonusAmount]);
 
     function buildPayrollDataFromPackingLogs(orderLogs: PackingOrderLog[], bonusSummary: SalesBonusSummary = activeSalesBonusSummary) {
         const freshOverviewPackingLogs = orderLogs.filter(o => inOverviewRange(o.timestamp));
@@ -6338,20 +6387,35 @@ export default function Attendance() {
     const renderPayrollAmount = (value: number, ready: boolean, className = 'att-money-final') => (
         ready
             ? <span className={className}>{fmt(value || 0)}</span>
-            : <Tooltip title="Đang bổ sung dữ liệu phạt, thưởng hoặc điểm danh">
+            : <Tooltip title="Số tạm tính; hệ thống vẫn đang đối soát dữ liệu nền">
                 <span className={`${className} att-money-pending`}>
-                    ~ {fmt(value || 0)} <SyncOutlined spin aria-label="Đang cập nhật" />
+                    {fmt(value || 0)} <SyncOutlined spin aria-label="Đang cập nhật" />
                 </span>
             </Tooltip>
     );
+    const renderPendingValue = (content: string, ready: boolean, className: string) => (
+        <Tooltip title={ready ? undefined : 'Số tạm tính; hệ thống vẫn đang đối soát dữ liệu nền'}>
+            <span className={`${className}${ready ? '' : ' att-money-pending'}`}>
+                {content} {!ready && <SyncOutlined spin aria-label="Đang cập nhật" />}
+            </span>
+        </Tooltip>
+    );
+    const formatDeductionAmount = (value: number) => value > 0 ? `- ${fmtCompactMoney(value)}` : fmtCompactMoney(0);
     const renderFineAmount = (value: number, ready: boolean, className = 'att-money-red') => (
         ready
-            ? <span className={className}>{value > 0 ? `- ${fmt(value)}` : fmt(0)}</span>
-            : <Tooltip title="Đang bổ sung các nguồn phạt tự động">
+            ? <span className={className}>{formatDeductionAmount(value)}</span>
+            : <Tooltip title="Phạt tạm tính; hệ thống vẫn đang bổ sung các nguồn tự động">
                 <span className={`${className} att-money-pending`}>
-                    ~ {value > 0 ? `- ${fmt(value)}` : fmt(0)} <SyncOutlined spin aria-label="Đang cập nhật" />
+                    {formatDeductionAmount(value)} <SyncOutlined spin aria-label="Đang cập nhật" />
                 </span>
             </Tooltip>
+    );
+    const renderOverviewTotalAmount = (value: number, ready: boolean) => (
+        ready ? (
+            <Tooltip title={fmt(value || 0)}>
+                <span className="att-overview-total-money__label">{fmt(value || 0)}</span>
+            </Tooltip>
+        ) : renderPayrollAmount(value, ready)
     );
     const currentEmployeePayroll = useMemo(
         () => payrollData.find(matchesCurrentUserPayrollRow),
@@ -7772,36 +7836,27 @@ const openConfigModal = () => {
                                 </span>
                             </Table.Summary.Cell>
                             <Table.Summary.Cell index={2} align="right" className="att-overview-total-cell">
-                                <span className="att-overview-total-value-base">
-                                    {fmt(totalBaseSalary)}
-                                </span>
+                                {renderPendingValue(fmt(totalBaseSalary), isPayrollDataReady, 'att-overview-total-value-base')}
                             </Table.Summary.Cell>
                             <Table.Summary.Cell index={3} align="right" className="att-overview-total-cell">
-                                <span className="att-overview-total-value-pack">
-                                    + {fmt(totalPackIncome)}
-                                </span>
+                                {renderPendingValue(`+ ${fmt(totalPackIncome)}`, isPayrollDataReady, 'att-overview-total-value-pack')}
                             </Table.Summary.Cell>
                             <Table.Summary.Cell index={4} align="right" className="att-overview-total-cell">
-                                <span className="att-overview-total-value-bonus">
-                                    + {fmt(totalBonus)}
-                                </span>
+                                {renderPendingValue(`+ ${fmt(totalBonus)}`, isPayrollDataReady, 'att-overview-total-value-bonus')}
                             </Table.Summary.Cell>
                             <Table.Summary.Cell index={5} align="right" className="att-overview-total-cell">
                                 <span className="att-overview-total-value-fine">
-                                    {renderFineAmount(totalFines, areFineSourcesReady, 'att-overview-total-value-fine')}
+                                    {renderFineAmount(totalFines, isPayrollDataReady, 'att-overview-total-value-fine')}
                                 </span>
                             </Table.Summary.Cell>
                             <Table.Summary.Cell index={6} align="right" className="att-overview-total-cell-final">
-                                <span className="att-overview-total-value-fine">
-                                    {totalLeaveDeduction > 0 ? `- ${fmt(totalLeaveDeduction)}` : fmt(0)}
-                                </span>
+                                {renderPendingValue(formatDeductionAmount(totalLeaveDeduction), isPayrollDataReady, 'att-overview-total-value-fine')}
                             </Table.Summary.Cell>
-                            <Table.Summary.Cell index={7} align="right" className="att-overview-total-cell-final">
+                            <Table.Summary.Cell index={7} colSpan={2} align="right" className="att-overview-total-cell-final">
                                 <span className="att-overview-total-money">
-                                    {renderPayrollAmount(totalFinalSalary, isPayrollDataReady)}
+                                    {renderOverviewTotalAmount(totalFinalSalary, isPayrollDataReady)}
                                 </span>
                             </Table.Summary.Cell>
-                            <Table.Summary.Cell index={8} className="att-overview-total-action-cell" />
                         </Table.Summary.Row>
                     </Table.Summary>
                 )}
@@ -7815,7 +7870,7 @@ const openConfigModal = () => {
                         render: (t: string) => (
                             <>
                                 <span className={`att-overview-full-only ${t === 'Official' ? 'att-tag-green' : 'att-tag-orange'}`}>
-                                    {t === 'Official' ? 'CHÍNH THỨC' : 'THỜI VỤ'}
+                                    {t === 'Official' ? 'CT' : 'TV'}
                                 </span>
                                 <Tooltip title={t === 'Official' ? 'Nhân viên chính thức' : 'Nhân viên thời vụ'}>
                                     <span className={`att-overview-compact-only att-overview-type-icon ${t === 'Official' ? 'is-official' : 'is-seasonal'}`} aria-label={t === 'Official' ? 'Chính thức' : 'Thời vụ'}>
@@ -7827,27 +7882,25 @@ const openConfigModal = () => {
                     },
                     {
                         title: 'Lương cơ bản', dataIndex: 'salaryBase', key: 'base', align: 'right' as const, width: '11%', className: 'att-overview-cell att-overview-cell--base',
-                        render: (v: number) => (
-                            <span className="att-money-gray">{fmt(v)}</span>
-                        ),
+                        render: (v: number) => renderPendingValue(fmt(v), isPayrollDataReady, 'att-money-gray'),
                     },
                     {
                         title: 'Thưởng đóng gói', dataIndex: 'packIncome', key: 'pack', align: 'right' as const, width: '12%', className: 'att-overview-cell att-overview-cell--pack',
-                        render: (v: number, r: any) => <Tooltip title={`${r.packTotalUnits || 0} gói · tính theo mức Dễ / Trung bình / Cao`}><span className="att-money-emerald">+ {fmt(v)}</span></Tooltip>,
+                        render: (v: number, r: any) => <Tooltip title={`${r.packTotalUnits || 0} gói · tính theo mức Dễ / Trung bình / Cao`}><span>{renderPendingValue(`+ ${fmt(v)}`, isPayrollDataReady, 'att-money-emerald')}</span></Tooltip>,
                     },
                     {
                         title: 'Thưởng', dataIndex: 'totalBonus', key: 'bonus', align: 'right' as const, width: '9%', className: 'att-overview-cell att-overview-cell--bonus',
-                        render: (v: number) => <span className="att-money-emerald">+ {fmt(v)}</span>,
+                        render: (v: number) => renderPendingValue(`+ ${fmt(v)}`, isPayrollDataReady, 'att-money-emerald'),
                     },
                     {
                         title: 'Phạt', dataIndex: 'myFines', key: 'fine', align: 'right' as const, width: '9%', className: 'att-overview-cell att-overview-cell--fine',
-                        render: (v: number) => renderFineAmount(v, areFineSourcesReady),
+                        render: (v: number) => renderFineAmount(v, isPayrollDataReady),
                     },
                     {
                         title: 'Nghỉ', dataIndex: 'leaveDeduction', key: 'leaveDeduction', align: 'right' as const, width: '8%', className: 'att-overview-cell att-overview-cell--leave',
                         render: (v: number, r: any) => (
                             <Tooltip title={r.absentDays > 0 ? `${r.absentDays} ngày/ca nghỉ đã tính` : 'Không có khoản trừ nghỉ'}>
-                                <span className="att-money-red">{v > 0 ? `- ${fmt(v)}` : `${fmt(0)}`}</span>
+                                {renderPendingValue(formatDeductionAmount(v), isPayrollDataReady, 'att-money-red')}
                             </Tooltip>
                         ),
                     },
@@ -7871,11 +7924,11 @@ const openConfigModal = () => {
                     <span>{privatePayrollData.length} nhân viên</span>
                 </div>
                 <div className="att-overview-responsive-total__grid">
-                    <div><span>Lương cơ bản</span><strong className="att-overview-total-value-base">{fmt(totalBaseSalary)}</strong></div>
-                    <div><span>Thưởng đóng gói</span><strong className="att-overview-total-value-pack">+ {fmt(totalPackIncome)}</strong></div>
-                    <div><span>Thưởng</span><strong className="att-overview-total-value-bonus">+ {fmt(totalBonus)}</strong></div>
-                    <div><span>Phạt</span><strong className="att-overview-total-value-fine">{renderFineAmount(totalFines, areFineSourcesReady, 'att-overview-total-value-fine')}</strong></div>
-                    <div><span>Nghỉ</span><strong className="att-overview-total-value-fine">{totalLeaveDeduction > 0 ? `- ${fmt(totalLeaveDeduction)}` : fmt(0)}</strong></div>
+                    <div><span>Lương cơ bản</span><strong>{renderPendingValue(fmt(totalBaseSalary), isPayrollDataReady, 'att-overview-total-value-base')}</strong></div>
+                    <div><span>Thưởng đóng gói</span><strong>{renderPendingValue(`+ ${fmt(totalPackIncome)}`, isPayrollDataReady, 'att-overview-total-value-pack')}</strong></div>
+                    <div><span>Thưởng</span><strong>{renderPendingValue(`+ ${fmt(totalBonus)}`, isPayrollDataReady, 'att-overview-total-value-bonus')}</strong></div>
+                    <div><span>Phạt</span><strong className="att-overview-total-value-fine">{renderFineAmount(totalFines, isPayrollDataReady, 'att-overview-total-value-fine')}</strong></div>
+                    <div><span>Nghỉ</span><strong>{renderPendingValue(formatDeductionAmount(totalLeaveDeduction), isPayrollDataReady, 'att-overview-total-value-fine')}</strong></div>
                     <div className="att-overview-responsive-total__final"><span>Tổng lương</span><strong>{renderPayrollAmount(totalFinalSalary, isPayrollDataReady)}</strong></div>
                 </div>
             </div>
@@ -8893,14 +8946,16 @@ const openConfigModal = () => {
         }
 
         // Gộp phạt gốc + phạt thủ công, đánh dấu nguồn
+        const findFineWaiver = (fine: FineRecord) => fineWaivers.find(item =>
+            (fine.id && item?.fine?.id === fine.id)
+            || (fine.attendanceLogId && item?.fine?.attendanceLogId === fine.attendanceLogId)
+            || getFineContentKey(item?.fine) === getFineContentKey(fine)
+        );
         const systemFineRow = (fine: FineRecord, key: string) => {
             // Some automatic penalties are reconciled later with a corrected
             // description/time. Match the amnesty by durable source ID first,
             // so that a wording change cannot make a waived fine reappear.
-            const waiver = fineWaivers.find(item =>
-                (fine.id && item?.fine?.id === fine.id)
-                || getFineContentKey(item?.fine) === getFineContentKey(fine)
-            );
+            const waiver = findFineWaiver(fine);
             if (waiver) {
                 return {
                     ...fine,
@@ -8928,17 +8983,24 @@ const openConfigModal = () => {
             };
         };
         const liveSystemFineIds = new Set([
+            ...extraFines,
             ...autoVatOverdueFines,
             ...autoDeadlineOverdueFines,
             ...autoEvidenceOverdueFines,
             ...autoStockCheckMissingFines,
         ].map(fine => String((fine as any).id || '')).filter(Boolean));
         const liveSystemFineContentKeys = new Set([
+            ...extraFines,
             ...autoVatOverdueFines,
             ...autoDeadlineOverdueFines,
             ...autoEvidenceOverdueFines,
             ...autoStockCheckMissingFines,
         ].map(fine => getFineContentKey(fine)));
+        const liveAttendanceLogIds = new Set(
+            [...extraFines, ...autoVatOverdueFines, ...autoDeadlineOverdueFines, ...autoEvidenceOverdueFines, ...autoStockCheckMissingFines]
+                .map(fine => String((fine as any).attendanceLogId || ''))
+                .filter(Boolean),
+        );
         const combinedFinesRaw = [
             ...finesData
                 .filter(f => inOverviewRange(f.date))
@@ -8947,7 +9009,13 @@ const openConfigModal = () => {
             ...extraFines
                 .map((f, i) => ({ fine: f, manualIndex: i }))
                 .filter(({ fine }) => inOverviewRange(fine.date))
-                .map(({ fine, manualIndex }) => ({ ...fine, key: fine.id || `manual-${manualIndex}`, empName: employees.find(e => e.id === fine.empId)?.name, isManual: true, manualIndex, source: fine.source })),
+                .map(({ fine, manualIndex }) => {
+                    const waiver = findFineWaiver(fine);
+                    return waiver
+                        ? systemFineRow(fine, fine.id || `waived-persisted-${manualIndex}`)
+                        : { ...fine, key: fine.id || `manual-${manualIndex}`, empName: employees.find(e => e.id === fine.empId)?.name, isManual: true, manualIndex, source: fine.source };
+                })
+                .filter(Boolean),
             ...autoVatOverdueFines
                 .filter(f => inOverviewRange(f.date))
                 .map((f, i) => systemFineRow(f, `vat-${i}`))
@@ -8968,7 +9036,8 @@ const openConfigModal = () => {
                 .filter(waiver => inOverviewRange(waiver.fine?.date)
                     && (waiver.fine?.id
                         ? !liveSystemFineIds.has(String(waiver.fine.id))
-                        : !liveSystemFineContentKeys.has(getFineContentKey(waiver.fine))))
+                        : !liveSystemFineContentKeys.has(getFineContentKey(waiver.fine)))
+                    && (!waiver.fine?.attendanceLogId || !liveAttendanceLogIds.has(String(waiver.fine.attendanceLogId))))
                 .map((waiver, i) => ({
                     ...waiver.fine,
                     key: `waived-${waiver.id || i}`,
@@ -9263,12 +9332,19 @@ const openConfigModal = () => {
                                         };
                                         const color = levelColors[level] || { bg: '#f5f5f5', text: '#595959' };
                                         return (
-                                            <Space size={[6, 4]} wrap style={fineDetailCellStyle}>
-                                                <Text style={{ color: '#595959', fontWeight: 500 }}>Trễ ca {ca} <span style={{ fontWeight: 700, color: '#262626' }}>{minutes} phút</span></Text>
-                                                <Tag style={{ margin: 0, fontWeight: 700, fontSize: 10, border: 'none', background: color.bg, color: color.text }}>
-                                                    MỨC {level.toUpperCase()}
-                                                </Tag>
-                                            </Space>
+                                            <div style={fineDetailCellStyle}>
+                                                <Space size={[6, 4]} wrap>
+                                                    <Text style={{ color: '#595959', fontWeight: 500 }}>Trễ ca {ca} <span style={{ fontWeight: 700, color: '#262626' }}>{minutes} phút</span></Text>
+                                                    <Tag style={{ margin: 0, fontWeight: 700, fontSize: 10, border: 'none', background: color.bg, color: color.text }}>
+                                                        MỨC {level.toUpperCase()}
+                                                    </Tag>
+                                                </Space>
+                                                {record.isWaived && (
+                                                    <Text style={{ display: 'block', marginTop: 4, color: '#237804', fontSize: 11, fontWeight: 700 }}>
+                                                        Lý do miễn: {record.waiverReason || `Đạt chuỗi đúng giờ 7 ngày liên tiếp; lần đi muộn ${minutes} phút thuộc mức được miễn.`}
+                                                    </Text>
+                                                )}
+                                            </div>
                                         );
                                     }
 
@@ -9490,7 +9566,43 @@ const openConfigModal = () => {
         message.success(action === 'clear' ? 'Đã xóa lịch làm.' : action === 'off' ? 'Đã khai báo nghỉ ngày mai.' : 'Đã đăng ký ca làm việc.');
     }, [canManageAttendanceEmployee, canManageWorkSchedules, canEditWorkScheduleDate, checkLocked]);
 
-    const saveLeaveRequestInline = useCallback((
+    const persistLeaveStatus = useCallback(async (
+        emp: any,
+        date: dayjs.Dayjs,
+        action: 'save' | 'clear' | 'unpaid' | 'exempt',
+        scope: LeaveSession | 'full_day',
+        note: string = ''
+    ) => {
+        const sessions: LeaveSession[] = scope === 'full_day' ? ['morning', 'afternoon'] : [scope];
+        const status = action === 'clear'
+            ? 'clear'
+            : action === 'unpaid'
+                ? 'unpaid'
+                : action === 'exempt'
+                    ? 'exempt'
+                    : 'paid';
+        const result = await window.electronAPI.attendance.updateLeaveStatus({
+            empId: Number(emp.id),
+            date: date.format('YYYY-MM-DD'),
+            sessions,
+            status,
+            note,
+        });
+        if (!result?.success) {
+            throw new Error(result?.error || 'Không lưu được trạng thái nghỉ.');
+        }
+        const nextRecords = Array.isArray(result.data?.leaveRecords) ? result.data.leaveRecords : [];
+        setLeaveRecords(nextRecords);
+        if (Array.isArray(result.data?.extraFines)) {
+            setExtraFines(result.data.extraFines.map((fine: FineRecord, index: number) => ensureFineId(fine, index)));
+        }
+        if (Array.isArray(result.data?.fineWaivers)) setFineWaivers(result.data.fineWaivers);
+        if (Array.isArray(result.data?.fineAuditLog)) setFineAuditLog(result.data.fineAuditLog);
+        setAttendanceRewardRefreshKey(value => value + 1);
+        return nextRecords;
+    }, []);
+
+    const saveLeaveRequestInline = useCallback(async (
         emp: any,
         date: dayjs.Dayjs,
         action: 'save' | 'clear' | 'unpaid' | 'exempt',
@@ -9504,28 +9616,13 @@ const openConfigModal = () => {
             return;
         }
 
-        const dateStr = date.format('YYYY-MM-DD');
-        const sessions: LeaveSession[] = scope === 'full_day' ? ['morning', 'afternoon'] : [scope];
-
-        setLeaveRecords(prev => {
-            const withoutCurrent = prev.filter(l => !(l.empId === emp.id && l.date === dateStr && sessions.includes(l.session)));
-            if (action === 'clear') return withoutCurrent;
-            const now = new Date().toISOString();
-            const nextRecords = sessions.map(session => ({
-                id: `${emp.id}-${dateStr}-${session}`,
-                empId: emp.id,
-                date: dateStr,
-                session,
-                exempt: action === 'exempt',
-                unpaid: action === 'unpaid',
-                note,
-                createdAt: now,
-                createdBy: currentUser || user?.username || 'System',
-            }));
-            return [...withoutCurrent, ...nextRecords];
-        });
-        message.success(action === 'clear' ? 'Đã xóa trạng thái nghỉ.' : (action === 'exempt' ? 'Đã ghi nhận miễn trừ.' : action === 'unpaid' ? 'Đã ghi nhận nghỉ không phép.' : 'Đã ghi nhận nghỉ có phép.'));
-    }, [canManageAttendance, canManageAttendanceEmployee, canEditAttendanceDate, checkLocked, currentUser, user?.username]);
+        try {
+            await persistLeaveStatus(emp, date, action, scope, note);
+            message.success(action === 'clear' ? 'Đã xóa trạng thái nghỉ.' : (action === 'exempt' ? 'Đã ghi nhận miễn trừ.' : action === 'unpaid' ? 'Đã ghi nhận nghỉ không phép.' : 'Đã ghi nhận nghỉ có phép.'));
+        } catch (error: any) {
+            message.error(error?.message || 'Không lưu được trạng thái nghỉ.');
+        }
+    }, [canManageAttendance, canManageAttendanceEmployee, canEditAttendanceDate, checkLocked, persistLeaveStatus]);
 
     const openLeaveRequestModal = useCallback((emp: Employee, date: dayjs.Dayjs, defaultSession: LeaveSession, existingLeave?: LeaveRequest) => {
         if (!canManageAttendance || !canManageAttendanceEmployee(emp)) return;
@@ -9535,7 +9632,6 @@ const openConfigModal = () => {
             return;
         }
 
-        const dateStr = date.format('YYYY-MM-DD');
         let selectedAction: 'save' | 'clear' = 'save';
         let selectedScope: LeaveSession | 'full_day' = defaultSession;
         let note = existingLeave?.note || '';
@@ -9584,27 +9680,16 @@ const openConfigModal = () => {
             ),
             okText: 'Lưu lịch xin nghỉ',
             cancelText: 'Hủy',
-            onOk: () => {
-                const sessions: LeaveSession[] = selectedScope === 'full_day' ? ['morning', 'afternoon'] : [selectedScope];
-                setLeaveRecords(prev => {
-                    const withoutCurrent = prev.filter(leave => !(leave.empId === emp.id && leave.date === dateStr && sessions.includes(leave.session)));
-                    if (selectedAction === 'clear') return withoutCurrent;
-                    const now = new Date().toISOString();
-                    const nextRecords = sessions.map(session => ({
-                        id: `${emp.id}-${dateStr}-${session}`,
-                        empId: emp.id,
-                        date: dateStr,
-                        session,
-                        note,
-                        createdAt: now,
-                        createdBy: currentUser || user?.username || 'System',
-                    }));
-                    return [...withoutCurrent, ...nextRecords];
-                });
-                message.success(selectedAction === 'clear' ? 'Đã xóa lịch xin nghỉ.' : 'Đã lưu lịch xin nghỉ.');
+            onOk: async () => {
+                try {
+                    await persistLeaveStatus(emp, date, selectedAction === 'clear' ? 'clear' : 'save', selectedScope, note);
+                    message.success(selectedAction === 'clear' ? 'Đã xóa lịch xin nghỉ.' : 'Đã lưu lịch xin nghỉ.');
+                } catch (error: any) {
+                    message.error(error?.message || 'Không lưu được lịch xin nghỉ.');
+                }
             },
         });
-    }, [canManageAttendance, canManageAttendanceEmployee, canEditAttendanceDate, checkLocked, currentUser, user?.username]);
+    }, [canManageAttendance, canManageAttendanceEmployee, canEditAttendanceDate, checkLocked, persistLeaveStatus]);
 
     const openWorkScheduleModal = useCallback((emp: Employee, date: dayjs.Dayjs, defaultSession: LeaveSession, existingSchedule?: WorkScheduleRecord) => {
         if (!canManageWorkSchedules || !canManageAttendanceEmployee(emp)) return;
@@ -9668,24 +9753,15 @@ const openConfigModal = () => {
             ),
             okText: 'Lưu lịch làm',
             cancelText: 'Hủy',
-            onOk: () => {
+            onOk: async () => {
                 const sessions: LeaveSession[] = selectedScope === 'full_day' ? ['morning', 'afternoon'] : [selectedScope];
                 if (selectedAction === 'leave') {
-                    setLeaveRecords(prev => {
-                        const withoutCurrent = prev.filter(leave => !(leave.empId === emp.id && leave.date === dateStr && sessions.includes(leave.session)));
-                        const now = new Date().toISOString();
-                        const nextRecords = sessions.map(session => ({
-                            id: `${emp.id}-${dateStr}-${session}`,
-                            empId: emp.id,
-                            date: dateStr,
-                            session,
-                            note,
-                            createdAt: now,
-                            createdBy: currentUser || user?.username || 'System',
-                        }));
-                        return [...withoutCurrent, ...nextRecords];
-                    });
-                    message.success('Đã ghi nhận xin nghỉ cho ca đã xếp.');
+                    try {
+                        await persistLeaveStatus(emp, date, 'save', selectedScope, note);
+                        message.success('Đã ghi nhận xin nghỉ cho ca đã xếp.');
+                    } catch (error: any) {
+                        message.error(error?.message || 'Không lưu được lịch xin nghỉ.');
+                    }
                     return;
                 }
                 setWorkSchedules(prev => {
@@ -9706,7 +9782,7 @@ const openConfigModal = () => {
                 message.success(selectedAction === 'clear' ? 'Đã xóa lịch làm.' : 'Đã lưu lịch làm.');
             },
         });
-    }, [canManageAttendanceEmployee, canManageWorkSchedules, canEditAttendanceDate, checkLocked, currentUser, user?.username]);
+    }, [canManageAttendanceEmployee, canManageWorkSchedules, canEditAttendanceDate, checkLocked, currentUser, persistLeaveStatus, user?.username]);
 
     // ============================================
     // TAB 5: ĐIỂM DANH & LỊCH SỬ

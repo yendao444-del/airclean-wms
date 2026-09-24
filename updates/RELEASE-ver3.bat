@@ -117,6 +117,13 @@ if exist "%APPDATA%\quan-ly-ban-hang-desktop\gdrive-token.json" (
         echo        Chay reauth-gdrive.bat truoc khi build.
     )
 )
+call node scripts\verify-gdrive-release-token.cjs "electron\gdrive-token.json"
+if errorlevel 1 (
+    rmdir /S /Q "!PATCH_TEMP!" 2>nul
+    rmdir /S /Q "!BUILD_DIST!" 2>nul
+    pause
+    exit /b 1
+)
 xcopy "!BUILD_DIST!\*" "!PATCH_TEMP!\resources\app\dist\" /E /I /Y /Q >nul 2>&1
 xcopy "electron\*" "!PATCH_TEMP!\resources\app\electron\" /E /I /Y /Q >nul 2>&1
 call node scripts\prepare-r2-daily-evidence-config.js "!PATCH_TEMP!\resources\app\electron\r2-daily-evidence-bootstrap.json"
@@ -130,7 +137,13 @@ if errorlevel 1 (
 del /Q "!PATCH_TEMP!\resources\app\electron\config.js" 2>nul
 del /Q "!PATCH_TEMP!\resources\app\electron\supabase-storage.json" 2>nul
 del /Q "!PATCH_TEMP!\resources\app\electron\gdrive-credentials.json" 2>nul
-del /Q "!PATCH_TEMP!\resources\app\electron\gdrive-token.json" 2>nul
+call node scripts\verify-gdrive-release-token.cjs "!PATCH_TEMP!\resources\app\electron\gdrive-token.json"
+if errorlevel 1 (
+    rmdir /S /Q "!PATCH_TEMP!" 2>nul
+    rmdir /S /Q "!BUILD_DIST!" 2>nul
+    pause
+    exit /b 1
+)
 xcopy "node_modules\@supabase\*" "!PATCH_TEMP!\resources\app\node_modules\@supabase\" /E /I /Y /Q >nul 2>&1
 xcopy "node_modules\@zxing\*" "!PATCH_TEMP!\resources\app\node_modules\@zxing\" /E /I /Y /Q >nul 2>&1
 xcopy "node_modules\cloudflared\*" "!PATCH_TEMP!\resources\app\node_modules\cloudflared\" /E /I /Y /Q >nul 2>&1

@@ -120,6 +120,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
     prepack: {
         list: (filters) => ipcRenderer.invoke('prepack:list', filters),
+        saveDraft: (data) => ipcRenderer.invoke('prepack:saveDraft', data),
+        history: (filters) => ipcRenderer.invoke('prepack:history', filters),
         create: (data) => ipcRenderer.invoke('prepack:create', data),
         updateTarget: (data) => ipcRenderer.invoke('prepack:updateTarget', data),
         deleteTarget: (batchId) => ipcRenderer.invoke('prepack:deleteTarget', batchId),
@@ -329,6 +331,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
         findByScanCode: (code) => ipcRenderer.invoke('ecommerceExports:findByScanCode', code),
         getOperationalCounts: () => ipcRenderer.invoke('ecommerceExports:getOperationalCounts'),
         getPackingReadModel: (args) => ipcRenderer.invoke('ecommerceExports:getPackingReadModel', args),
+        getPackingPayrollSummary: (args) => ipcRenderer.invoke('ecommerceExports:getPackingPayrollSummary', args),
         getPackingRevision: (args) => ipcRenderer.invoke('ecommerceExports:getPackingRevision', args),
         create: (data) => ipcRenderer.invoke('ecommerceExports:create', data),
         update: (id, data) => ipcRenderer.invoke('ecommerceExports:update', id, data),

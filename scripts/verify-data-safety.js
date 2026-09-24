@@ -545,7 +545,7 @@ for (const [name, source] of [
   ['Prisma/Python release', releasePrismaPython],
   ['Full release', releaseFull],
 ]) {
-  requireText(source, 'gdrive-token.json" 2>nul', `${name} must remove local Google Drive tokens from staging`);
+  requireText(source, 'verify-gdrive-release-token.cjs', `${name} must validate the shared Google Drive token before packaging`);
   requireText(source, 'supabase-storage.json" 2>nul', `${name} must remove local Supabase configuration from staging`);
 }
 requireText(releasePrisma, 'npx prisma generate', 'Prisma patch must regenerate Prisma Client');

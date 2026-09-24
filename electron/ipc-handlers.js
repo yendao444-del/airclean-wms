@@ -264,6 +264,7 @@ const {
   resolveEmployeeId,
 } = require("./attendance-rewards");
 const { reconcileEcommerceOrderFines } = require("./ecommerce-order-fines");
+const { reconcilePrepackShortfallFines } = require("./prepack-fines");
 
 // 📦 Offline Queue — lưu scan khi mất mạng, sync lại khi có mạng
 const offlineQueue = require("./offline-queue");
@@ -291,7 +292,7 @@ else delete process.env.DIRECT_URL;
 
 const { PrismaClient, Prisma } = require("@prisma/client");
 const fs = require("fs");
-const { buildPackingReadModel } = require("./packing-read-model");
+const { buildPackingReadModel, buildPackingPayrollSummary } = require("./packing-read-model");
 const {
   calculateMarketplaceSlaDeadline,
   getBangkokDateParts,
@@ -547,6 +548,10 @@ async function cleanupExpiredPrepackEvidence() {
 
 setTimeout(() => void cleanupExpiredPrepackEvidence().catch((error) => console.warn("Prepack evidence cleanup error:", error?.message || error)), 60_000);
 setInterval(() => void cleanupExpiredPrepackEvidence().catch((error) => console.warn("Prepack evidence cleanup error:", error?.message || error)), 24 * 60 * 60 * 1000);
+// Reconcile completed prepack days in the background so a new page visit is
+// not required for the end-of-day penalty to be recorded.
+setTimeout(() => void reconcilePrepackShortfallFines(prisma, { now: new Date() }).catch((error) => console.warn("Prepack fine reconciliation error:", error?.message || error)), 90_000);
+setInterval(() => void reconcilePrepackShortfallFines(prisma, { now: new Date() }).catch((error) => console.warn("Prepack fine reconciliation error:", error?.message || error)), 15 * 60 * 1000);
 
 // Compensation is limited to exact object keys uploaded by the current IPC
 // call. It cannot delete pre-existing evidence and is safe in data-safety mode.
@@ -6745,11 +6750,23 @@ function generateVatIdFromFile(fileName = "", fileSize = 0) {
 // Compact read model used by Attendance fine reconciliation. It avoids
 // purchase line/product payloads, invoice files and import receipts; the
 // general purchases:getAll endpoint remains unchanged for the full screen.
+const attendanceVatReadModelCache = new Map();
+const attendanceVatReadModelInFlight = new Map();
 ipcMain.handle("purchases:getVatPenaltyReadModel", async (event, { since } = {}) => {
+  const cacheKey = since ? new Date(since).toISOString() : "all";
   try {
     const startedAt = Date.now();
     requireRole("admin", "manager");
     if (!prisma) throw new Error("Prisma not available");
+    const cached = attendanceVatReadModelCache.get(cacheKey);
+    if (cached && Date.now() - cached.loadedAt < 20_000) {
+      console.log(`[Perf] purchases:getVatPenaltyReadModel rows=${cached.data.length} cached=true ms=${Date.now() - startedAt}`);
+      return { success: true, data: cached.data, cached: true };
+    }
+    const existing = attendanceVatReadModelInFlight.get(cacheKey);
+    if (existing) return { success: true, data: await existing, cached: false };
+
+    const request = (async () => {
     const [vatGroups, vatFileMeta, purchaseItemCompanies, purchaseCompanyVat, goodsCompanies, purchases] = await Promise.all([
       getPurchaseVatGroups(),
       getPurchaseVatFileMeta(),
@@ -6848,7 +6865,18 @@ ipcMain.handle("purchases:getVatPenaltyReadModel", async (event, { since } = {})
       };
     });
     console.log(`[Perf] purchases:getVatPenaltyReadModel rows=${formatted.length} bytes=${Buffer.byteLength(JSON.stringify(formatted))} ms=${Date.now() - startedAt}`);
-    return { success: true, data: formatted };
+    attendanceVatReadModelCache.set(cacheKey, { data: formatted, loadedAt: Date.now() });
+    while (attendanceVatReadModelCache.size > 4) {
+      attendanceVatReadModelCache.delete(attendanceVatReadModelCache.keys().next().value);
+    }
+    return formatted;
+    })();
+    attendanceVatReadModelInFlight.set(cacheKey, request);
+    try {
+      return { success: true, data: await request };
+    } finally {
+      if (attendanceVatReadModelInFlight.get(cacheKey) === request) attendanceVatReadModelInFlight.delete(cacheKey);
+    }
   } catch (error) {
     console.error("❌ Get VAT penalty read model error:", error);
     return { success: false, error: error.message };
@@ -17799,9 +17827,9 @@ function withEffectiveModuleAssignee(task, date = new Date()) {
 
 function isLinkedModuleTaskTemplate(task, moduleName) {
   const attachments = parseTaskAttachments(task?.attachments);
-  const linkedModule = attachments?.moduleLink?.module || task?.area;
+  const linkedModule = attachments?.moduleLink?.module;
   return normalizeActorName(linkedModule) === normalizeActorName(moduleName)
-    && (attachments?.moduleLink?.kind === "module-link" || Boolean(task?.area))
+    && attachments?.moduleLink?.kind === "module-link"
     && !attachments?.archive?.archivedAt
     && !attachments?.prepackReport;
 }
@@ -19634,11 +19662,8 @@ function stopMobileDailyEvidenceSession() {
 function isPrepackVerificationTaskRecord(task) {
   const attachments = parseTaskAttachments(task?.attachments);
   if (attachments?.prepackReport && Array.isArray(attachments.prepackReport.batchIds)) return true;
-  const searchText = [task?.title, task?.description, task?.category, task?.area, task?.tags]
-    .filter(Boolean)
-    .join(" ")
-    .toLowerCase();
-  return /đóng gói|dong goi|prepack/.test(searchText);
+  return attachments?.moduleLink?.kind === "module-link"
+    && normalizeActorName(attachments.moduleLink.module) === normalizeActorName("Đóng gói sẵn");
 }
 
 function getOpenPrepackTaskWhere() {
@@ -23224,6 +23249,8 @@ const PACKING_READ_MODEL_CACHE_MAX_ROWS = 30000;
 const packingReadModelCache = new Map();
 const packingReadModelInFlight = new Map();
 let packingReadModelCachedRows = 0;
+const packingPayrollSummaryCache = new Map();
+const packingPayrollSummaryInFlight = new Map();
 
 function getPackingDateFilter({ since, until } = {}) {
   const dateFilter = {};
@@ -23424,6 +23451,96 @@ ipcMain.handle(
       }
     } catch (error) {
       console.error("Get packing read model error:", error);
+      return { success: false, error: error.message };
+    }
+  },
+);
+
+ipcMain.handle(
+  "ecommerceExports:getPackingPayrollSummary",
+  async (_event, { since, until, commission } = {}) => {
+    try {
+      requireRole("admin", "manager", "staff");
+      const actor = await getCurrentActor();
+      if (!prisma) throw new Error("Prisma not available");
+      const startedAt = Date.now();
+      const dateFilter = getPackingDateFilter({ since, until });
+      const rangeKey = `${dateFilter.gte?.toISOString() || "all"}|${dateFilter.lte?.toISOString() || "all"}`;
+      const before = await getPackingSourceRevision(dateFilter);
+      const actorCacheKey = actor.role === "staff"
+        ? normalizeActorName(actor.username || actor.fullName)
+        : "all";
+      const cacheKey = `${rangeKey}|${before.revision}|${actorCacheKey}|${JSON.stringify(commission || {})}`;
+      const cached = packingPayrollSummaryCache.get(cacheKey);
+      if (cached) {
+        console.log(`[Perf] ecommerceExports:getPackingPayrollSummary rows=${cached.length} cached=true ms=${Date.now() - startedAt}`);
+        return { success: true, data: cached, revision: before.revision, cached: true };
+      }
+      const existingRequest = packingPayrollSummaryInFlight.get(cacheKey);
+      if (existingRequest) return await existingRequest;
+
+      const request = (async () => {
+        const [exports, combos] = await Promise.all([
+          prisma.ecommerceExport.findMany({
+            where: {
+              status: "completed",
+              ...(Object.keys(dateFilter).length > 0 ? { ecommerceExportDate: dateFilter } : {}),
+            },
+            select: {
+              id: true,
+              customerName: true,
+              ecommerceExportCode: true,
+              orderNumber: true,
+              ecommerceExportDate: true,
+              items: true,
+              createdBy: true,
+              pickedBy: true,
+            },
+            orderBy: [{ ecommerceExportDate: "desc" }, { id: "desc" }],
+            take: PACKING_READ_MODEL_MAX_ROWS + 1,
+          }),
+          prisma.comboProduct.findMany({
+            select: { sku: true, items: true, status: true },
+            orderBy: { createdAt: "desc" },
+          }),
+        ]);
+        if (exports.length > PACKING_READ_MODEL_MAX_ROWS) {
+          throw new Error(`Dữ liệu đóng gói của kỳ vượt ${PACKING_READ_MODEL_MAX_ROWS.toLocaleString("vi-VN")} đơn.`);
+        }
+        const after = await getPackingSourceRevision(dateFilter);
+        if (before.revision !== after.revision) {
+          throw new Error("Dữ liệu đóng gói vừa thay đổi. Vui lòng tải lại để đối chiếu chính xác.");
+        }
+        const normalizedExports = exports.map((row) => ({
+          ...row,
+          ecommerceExportDate: row.ecommerceExportDate.toISOString(),
+          status: "completed",
+        }));
+        const allData = buildPackingPayrollSummary(normalizedExports, combos, commission);
+        const actorKeys = [actor.username, actor.fullName]
+          .map((value) => normalizeActorName(value))
+          .filter(Boolean);
+        const data = actor.role === "staff"
+          ? allData.filter((row) => {
+            const packer = normalizeActorName(row.packer);
+            return actorKeys.some((key) => packer === key || packer.includes(key) || key.includes(packer));
+          })
+          : allData;
+        packingPayrollSummaryCache.set(cacheKey, data);
+        while (packingPayrollSummaryCache.size > 6) {
+          packingPayrollSummaryCache.delete(packingPayrollSummaryCache.keys().next().value);
+        }
+        console.log(`[Perf] ecommerceExports:getPackingPayrollSummary rows=${data.length} cached=false ms=${Date.now() - startedAt}`);
+        return { success: true, data, revision: before.revision, cached: false };
+      })();
+      packingPayrollSummaryInFlight.set(cacheKey, request);
+      try {
+        return await request;
+      } finally {
+        if (packingPayrollSummaryInFlight.get(cacheKey) === request) packingPayrollSummaryInFlight.delete(cacheKey);
+      }
+    } catch (error) {
+      console.error("Get packing payroll summary error:", error);
       return { success: false, error: error.message };
     }
   },
@@ -26810,10 +26927,18 @@ ipcMain.handle("exportOrders:delete", async (event, id, options = {}) => {
 // RETURNS HANDLERS (TRẢ HÀNG)
 // ========================================
 
+const attendanceReturnsCache = new Map();
 ipcMain.handle("returns:getAll", async (event, { since, sinceField, compact } = {}) => {
   try {
+    const startedAt = Date.now();
     requireRole("admin", "manager");
     if (!prisma) throw new Error("Prisma not available");
+    const cacheKey = `${compact ? "compact" : "full"}|${sinceField || "createdAt"}|${since || "all"}`;
+    const cached = compact ? attendanceReturnsCache.get(cacheKey) : null;
+    if (cached && Date.now() - cached.loadedAt < 15_000) {
+      console.log(`[Perf] returns:getAll rows=${cached.data.length} compact=true cached=true ms=${Date.now() - startedAt}`);
+      return { success: true, data: cached.data, cached: true };
+    }
     const dateField = sinceField === "returnDate" ? "returnDate" : "createdAt";
     const returns = await prisma.return.findMany({
       where: since ? { [dateField]: { gte: new Date(since) } } : undefined,
@@ -26843,6 +26968,11 @@ ipcMain.handle("returns:getAll", async (event, { since, sinceField, compact } = 
       processNotes: r.notes || null, // notes → processNotes
       faultParty: r.faultParty || "warehouse", // ✅ Map faultParty (mặc định warehouse)
     }));
+    if (compact) {
+      attendanceReturnsCache.set(cacheKey, { data: formatted, loadedAt: Date.now() });
+      while (attendanceReturnsCache.size > 4) attendanceReturnsCache.delete(attendanceReturnsCache.keys().next().value);
+    }
+    console.log(`[Perf] returns:getAll rows=${formatted.length} compact=${Boolean(compact)} ms=${Date.now() - startedAt}`);
     return { success: true, data: formatted };
   } catch (error) {
     console.error("❌ Get returns error:", error);
@@ -27161,10 +27291,18 @@ ipcMain.handle("returns:bulkCreate", async (event, records) => {
 // REFUNDS HANDLERS (HÀNG HOÀN)
 // ========================================
 
+const attendanceRefundsCache = new Map();
 ipcMain.handle("refunds:getAll", async (event, { since, sinceField, limit, compact } = {}) => {
   try {
+    const startedAt = Date.now();
     requireRole("admin", "manager");
     if (!prisma) throw new Error("Prisma not available");
+    const cacheKey = `${compact ? "compact" : "full"}|${sinceField || "createdAt"}|${limit || 1000}|${since || "all"}`;
+    const cached = compact ? attendanceRefundsCache.get(cacheKey) : null;
+    if (cached && Date.now() - cached.loadedAt < 15_000) {
+      console.log(`[Perf] refunds:getAll rows=${cached.data.length} compact=true cached=true ms=${Date.now() - startedAt}`);
+      return { success: true, data: cached.data, cached: true };
+    }
     const dateField = sinceField === "refundDate" ? "refundDate" : "createdAt";
     const refunds = await prisma.refund.findMany({
       where: since ? { [dateField]: { gte: new Date(since) } } : undefined,
@@ -27186,6 +27324,11 @@ ipcMain.handle("refunds:getAll", async (event, { since, sinceField, limit, compa
       ...r,
       refundDate: r.refundDate.toISOString().split("T")[0],
     }));
+    if (compact) {
+      attendanceRefundsCache.set(cacheKey, { data: formatted, loadedAt: Date.now() });
+      while (attendanceRefundsCache.size > 4) attendanceRefundsCache.delete(attendanceRefundsCache.keys().next().value);
+    }
+    console.log(`[Perf] refunds:getAll rows=${formatted.length} compact=${Boolean(compact)} ms=${Date.now() - startedAt}`);
     return { success: true, data: formatted };
   } catch (error) {
     console.error("❌ Get refunds error:", error);
@@ -27532,6 +27675,51 @@ function mapPrepackBatch(batch) {
   };
 }
 
+const PREPACK_DRAFT_CONFIG_KEY = "prepackDraftQuantities:v1";
+
+function parsePrepackDraftConfig(value) {
+  try {
+    const parsed = typeof value === "string" ? JSON.parse(value) : value;
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function normalizePrepackWorkDateKey(value) {
+  const key = String(value || "").trim();
+  return /^\d{4}-\d{2}-\d{2}$/.test(key) ? key : null;
+}
+
+async function getPrepackDraftConfig(client = prisma) {
+  if (!client?.appConfig) return {};
+  const row = await client.appConfig.findUnique({ where: { key: PREPACK_DRAFT_CONFIG_KEY } });
+  return parsePrepackDraftConfig(row?.value);
+}
+
+async function writePrepackDraftConfig(client, drafts) {
+  if (!client?.appConfig) return;
+  await client.appConfig.upsert({
+    where: { key: PREPACK_DRAFT_CONFIG_KEY },
+    create: { key: PREPACK_DRAFT_CONFIG_KEY, value: JSON.stringify(drafts) },
+    update: { value: JSON.stringify(drafts) },
+  });
+}
+
+async function clearPrepackDrafts(batchIds) {
+  if (!prisma?.appConfig || !Array.isArray(batchIds) || !batchIds.length) return;
+  const drafts = await getPrepackDraftConfig();
+  const ids = new Set(batchIds.map(Number));
+  let changed = false;
+  Object.keys(drafts).forEach((key) => {
+    if (ids.has(Number(String(key).split(":").pop()))) {
+      delete drafts[key];
+      changed = true;
+    }
+  });
+  if (changed) await writePrepackDraftConfig(prisma, drafts);
+}
+
 function normalizePrepackComponents(rawComponents) {
   if (!Array.isArray(rawComponents)) return [];
   const merged = new Map();
@@ -27616,6 +27804,7 @@ ipcMain.handle("prepack:list", async (_event, filters = {}) => {
     if (!["admin", "manager"].includes(actor.role)) where.packerUsername = actor.username;
     const evidenceStartDate = filters?.evidenceStartDate ? new Date(filters.evidenceStartDate) : null;
     const evidenceEndDate = filters?.evidenceEndDate ? new Date(filters.evidenceEndDate) : null;
+    const workDateKey = normalizePrepackWorkDateKey(filters?.workDateKey);
     const evidenceCreatedAt = {};
     if (evidenceStartDate && !Number.isNaN(evidenceStartDate.getTime())) evidenceCreatedAt.gte = evidenceStartDate;
     if (evidenceEndDate && !Number.isNaN(evidenceEndDate.getTime())) evidenceCreatedAt.lt = evidenceEndDate;
@@ -27632,9 +27821,134 @@ ipcMain.handle("prepack:list", async (_event, filters = {}) => {
       orderBy: { createdAt: "desc" },
       take: 300,
     });
-    return { success: true, data: rows.map(mapPrepackBatch) };
+    const drafts = workDateKey ? await getPrepackDraftConfig() : {};
+    return {
+      success: true,
+      data: rows.map((row) => ({
+        ...mapPrepackBatch(row),
+        draftQty: workDateKey ? (drafts[`${workDateKey}:${row.id}`]?.quantity ?? null) : null,
+        draftUpdatedAt: workDateKey ? (drafts[`${workDateKey}:${row.id}`]?.updatedAt || null) : null,
+      })),
+    };
   } catch (error) {
     console.error("Prepack list error:", error);
+    return { success: false, error: getPrepackErrorMessage(error) };
+  }
+});
+
+ipcMain.handle("prepack:saveDraft", async (_event, payload = {}) => {
+  try {
+    const actor = await getCurrentActor();
+    if (!prisma.prepackBatch || !prisma.appConfig) throw new Error("Cần cập nhật Prisma Client cho bản nháp Đóng gói sẵn.");
+    const batchId = Number(payload.batchId);
+    const workDateKey = normalizePrepackWorkDateKey(payload.workDateKey);
+    if (!Number.isInteger(batchId) || batchId <= 0 || !workDateKey) throw new Error("Bản nháp đóng gói không hợp lệ.");
+    const batch = await prisma.prepackBatch.findUnique({ where: { id: batchId }, select: { id: true, packerId: true, packerUsername: true, packerName: true } });
+    if (!batch) throw new Error("Không tìm thấy chỉ tiêu đóng gói.");
+    const ownsBatch = actor.id === batch.packerId || actor.username === batch.packerUsername;
+    if (!ownsBatch && !["admin", "manager"].includes(actor.role)) throw new Error("Bạn không được sửa bản nháp của nhân viên khác.");
+    const hasQuantity = payload.quantity !== null && payload.quantity !== undefined && payload.quantity !== "";
+    const quantity = hasQuantity ? parseNonNegativePrepackQuantity(payload.quantity, "Số lượng thực tế") : null;
+    const drafts = await getPrepackDraftConfig();
+    const key = `${workDateKey}:${batchId}`;
+    if (quantity === null) delete drafts[key];
+    else drafts[key] = {
+      batchId,
+      workDateKey,
+      quantity,
+      packerUsername: batch.packerUsername,
+      packerName: batch.packerName,
+      updatedAt: new Date().toISOString(),
+    };
+    const keys = Object.keys(drafts);
+    if (keys.length > 3000) keys.sort((left, right) => String(drafts[left]?.updatedAt || "").localeCompare(String(drafts[right]?.updatedAt || ""))).slice(0, keys.length - 3000).forEach((oldKey) => delete drafts[oldKey]);
+    await writePrepackDraftConfig(prisma, drafts);
+    return { success: true, data: { batchId, quantity, workDateKey } };
+  } catch (error) {
+    console.error("Prepack draft error:", error);
+    return { success: false, error: getPrepackErrorMessage(error) };
+  }
+});
+
+// Report history is stored on the DailyTask created by prepack:reportActual.
+// Keep this read model separate from current targets so editing a target cannot
+// erase the fact that an employee reported it on a previous day.
+ipcMain.handle("prepack:history", async (_event, filters = {}) => {
+  try {
+    const actor = await getCurrentActor();
+    if (!prisma.dailyTask) throw new Error("Cần cập nhật Prisma Client cho lịch sử Đóng gói sẵn.");
+    const startDate = filters?.startDate ? new Date(filters.startDate) : null;
+    const endDate = filters?.endDate ? new Date(filters.endDate) : null;
+    const tasks = await prisma.dailyTask.findMany({
+      where: {
+        attachments: { contains: "prepackReport" },
+      },
+      orderBy: { createdAt: "desc" },
+      take: 500,
+    });
+    const historyBatchIds = [...new Set(tasks.flatMap((task) => {
+      const report = parseTaskAttachments(task.attachments)?.prepackReport;
+      return Array.isArray(report?.batchIds) ? report.batchIds.map(Number) : [];
+    }).filter((id) => Number.isInteger(id) && id > 0))];
+    const currentBatchRows = historyBatchIds.length
+      ? await prisma.prepackBatch.findMany({
+        where: { id: { in: historyBatchIds } },
+        select: { id: true, reportedQty: true, packerUsername: true, packerName: true },
+      })
+      : [];
+    const currentReportedById = new Map(currentBatchRows.map((batch) => [batch.id, batch.reportedQty]));
+    const currentPackerById = new Map(currentBatchRows.map((batch) => [batch.id, {
+      username: String(batch.packerUsername || '').trim(),
+      name: String(batch.packerName || batch.packerUsername || '').trim(),
+    }]));
+    const requestedUsername = String(filters?.packerUsername || "").trim();
+    const history = tasks.flatMap((task) => {
+      const attachments = parseTaskAttachments(task.attachments);
+      const report = attachments?.prepackReport;
+      if (!report || !Array.isArray(report.batchIds)) return [];
+      const reportBatchIds = report.batchIds.map(Number).filter((id) => Number.isInteger(id) && id > 0);
+      const inferredPackers = [...new Map(reportBatchIds
+        .map((batchId) => currentPackerById.get(batchId))
+        .filter((packer) => packer?.username)
+        .map((packer) => [packer.username, packer])).values()];
+      const inferredPacker = inferredPackers.length === 1 ? inferredPackers[0] : null;
+      // Older prepack tasks only stored batchIds. Infer the employee from the
+      // target batch. This also repairs reports submitted by an admin while
+      // previewing an employee, which were previously attributed to the admin.
+      const employeeUsername = String(inferredPacker?.username || report.employeeUsername || "").trim();
+      if (requestedUsername && employeeUsername !== requestedUsername) return [];
+      if (!['admin', 'manager'].includes(actor.role) && employeeUsername !== actor.username) return [];
+      const activityAt = new Date(attachments?.evidence?.submittedAt || report.reportedAt || task.createdAt);
+      const reportedAt = new Date(report.reportedAt || task.createdAt);
+      if (Number.isNaN(reportedAt.getTime())) return [];
+      if (Number.isNaN(activityAt.getTime())) return [];
+      if (startDate && !Number.isNaN(startDate.getTime()) && activityAt < startDate) return [];
+      if (endDate && !Number.isNaN(endDate.getTime()) && activityAt >= endDate) return [];
+      const reports = Array.isArray(report.reports)
+        ? report.reports.map((item) => ({ batchId: Number(item?.batchId), reportedQty: Number(item?.reportedQty) }))
+          .filter((item) => Number.isInteger(item.batchId) && item.batchId > 0 && Number.isInteger(item.reportedQty) && item.reportedQty >= 0)
+        : report.batchIds.map((batchId) => ({ batchId: Number(batchId), reportedQty: Number(currentReportedById.get(Number(batchId))) }))
+          .filter((item) => Number.isInteger(item.batchId) && Number.isInteger(item.reportedQty) && item.reportedQty >= 0);
+      return [{
+        id: task.id,
+        taskId: task.id,
+        title: task.title,
+        status: task.status,
+        completedAt: task.completedAt,
+        createdAt: task.createdAt,
+        reportedAt: activityAt.toISOString(),
+        quantityReportedAt: reportedAt.toISOString(),
+        employeeUsername,
+        employeeName: report.employeeName || inferredPacker?.name || employeeUsername,
+        batchIds: reportBatchIds,
+        reports,
+        evidenceStatus: attachments?.evidence?.status || "pending",
+        evidenceSubmittedAt: attachments?.evidence?.submittedAt || null,
+      }];
+    });
+    return { success: true, data: history };
+  } catch (error) {
+    console.error("Prepack history error:", error);
     return { success: false, error: getPrepackErrorMessage(error) };
   }
 });
@@ -27751,7 +28065,9 @@ ipcMain.handle("prepack:updateTarget", async (_event, payload = {}) => {
       where: { id: batchId },
       include: { _count: { select: { evidences: true } } },
     });
-    if (!batch || !["active", "pending"].includes(batch.status)) throw new Error("Chỉ tiêu không còn hoạt động.");
+    if (!batch || !["active", "pending", "waiting_acceptance"].includes(batch.status)) {
+      throw new Error("Chỉ tiêu đã bị xóa hoặc đã chốt nhập hàng nên không thể sửa.");
+    }
 
     const packerId = Number(payload.packerId || batch.packerId);
     if (!Number.isInteger(packerId) || packerId <= 0) throw new Error("Hãy chọn nhân viên đóng gói.");
@@ -27787,7 +28103,7 @@ ipcMain.handle("prepack:updateTarget", async (_event, payload = {}) => {
         packerUsername: packer.username,
         packerName: packer.fullName || packer.username,
         note: String(payload.note || "").trim().slice(0, 1000) || null,
-        ...(materialChange ? { reportedQty: 0, acceptedQty: 0, reportedAt: null } : {}),
+        ...(materialChange ? { reportedQty: 0, acceptedQty: 0, reportedAt: null, status: "active" } : {}),
       },
       include: { evidences: { orderBy: { createdAt: "desc" }, take: 1 }, movements: true },
     });
@@ -27805,7 +28121,9 @@ ipcMain.handle("prepack:deleteTarget", async (_event, batchIdValue) => {
     const batchId = Number(batchIdValue);
     if (!Number.isInteger(batchId) || batchId <= 0) throw new Error("Chỉ tiêu không hợp lệ.");
     const result = await prisma.prepackBatch.updateMany({
-      where: { id: batchId, status: { in: ["active", "pending"] } },
+      // Admin may remove an unaccepted target even after the employee has
+      // submitted it; accepted/depleted stock remains immutable.
+      where: { id: batchId, status: { in: ["active", "pending", "waiting_acceptance"] } },
       data: { status: "cancelled" },
     });
     if (result.count !== 1) throw new Error("Chỉ tiêu không còn hoạt động hoặc đã được xóa.");
@@ -27835,7 +28153,7 @@ ipcMain.handle("prepack:reportActual", async (_event, payload = {}) => {
     if (!moduleAssignment) throw new Error("Chưa cấu hình người kiểm tra cho module Đóng gói sẵn.");
     const dateLabel = now.toLocaleDateString("vi-VN");
     const title = `Kiểm tra đóng gói sẵn · ${actor.fullName} · ${dateLabel}`;
-    const taskAttachments = {
+    let taskAttachments = {
       assignment: moduleAssignment.assignment,
       moduleLink: {
         kind: "module-link",
@@ -27845,6 +28163,10 @@ ipcMain.handle("prepack:reportActual", async (_event, payload = {}) => {
       evidence: { required: true, method: "image", status: "pending", minImages: 1, penaltyAmount: 0 },
       prepackReport: {
         batchIds,
+        reports: normalizedReports.map((report) => ({
+          batchId: report.batchId,
+          reportedQty: report.reportedQty,
+        })),
         employeeUsername: actor.username,
         employeeName: actor.fullName,
         reportedAt: now.toISOString(),
@@ -27853,10 +28175,28 @@ ipcMain.handle("prepack:reportActual", async (_event, payload = {}) => {
     const result = await prisma.$transaction(async (tx) => {
       const batches = await tx.prepackBatch.findMany({ where: { id: { in: batchIds } } });
       if (batches.length !== batchIds.length) throw new Error("Không tìm thấy đủ lô đóng gói.");
+      const assignedPackers = [...new Map(batches.map((batch) => [
+        `${batch.packerUsername || ''}:${batch.packerId || ''}`,
+        { username: batch.packerUsername, name: batch.packerName },
+      ])).values()];
+      // Admin may submit while testing an employee's screen. Keep history
+      // attached to the assigned employee, not the admin who clicked submit.
+      if (assignedPackers.length === 1 && assignedPackers[0].username) {
+        taskAttachments = {
+          ...taskAttachments,
+          prepackReport: {
+            ...taskAttachments.prepackReport,
+            employeeUsername: assignedPackers[0].username,
+            employeeName: assignedPackers[0].name || assignedPackers[0].username,
+          },
+        };
+      }
       for (const batch of batches) {
         const ownsBatch = actor.id === batch.packerId || actor.username === batch.packerUsername;
         if (!ownsBatch && !["admin", "manager"].includes(actor.role)) throw new Error("Bạn chỉ được báo cáo lô do mình phụ trách.");
-        if (!['active', 'pending'].includes(batch.status) || batch.reportedAt) throw new Error(`Lô ${batch.code} đã được báo cáo hoặc không còn hoạt động.`);
+        const reportedToday = batch.reportedAt && getBangkokDateKey(batch.reportedAt) === getBangkokDateKey(now);
+        const unavailable = ['cancelled', 'rejected'].includes(String(batch.status || '').toLowerCase());
+        if (unavailable || reportedToday) throw new Error(`Lô ${batch.code} đã được báo cáo trong ngày hoặc không còn hoạt động.`);
       }
       for (const report of normalizedReports) {
         await tx.prepackBatch.update({
@@ -27883,6 +28223,7 @@ ipcMain.handle("prepack:reportActual", async (_event, payload = {}) => {
       });
       return { task, batchIds };
     });
+    await clearPrepackDrafts(batchIds);
     return { success: true, data: result };
   } catch (error) {
     console.error("Prepack actual report error:", error);
@@ -29798,6 +30139,13 @@ ipcMain.handle("attendance:getInitialData", async () => {
         invalidateAttendanceSnapshotCaches();
         console.log(`[Perf] attendance maintenance ms=${Date.now() - maintenanceStartedAt}`);
       }
+      try {
+        await reconcilePrepackShortfallFines(prisma, { now: new Date() });
+      } catch (error) {
+        console.warn("[Prepack Fines] Không đối soát được phạt thiếu đóng gói:", error.message);
+      } finally {
+        invalidateAttendanceSnapshotCaches();
+      }
     })();
     console.log(`[Perf] attendance:getInitialData ms=${Date.now() - startedAt} cached=${snapshot.cached}`);
     return {
@@ -30024,6 +30372,11 @@ ipcMain.handle("appConfig:set", async (event, key, value, expectedUpdatedAt) => 
                         currentValue?.payrollOverrides && typeof currentValue.payrollOverrides === "object"
                           ? currentValue.payrollOverrides
                           : {},
+                      // Automatic attendance waivers are written by the
+                      // reconciliation service, never by whole-page autosave.
+                      fineWaivers: Array.isArray(currentValue?.fineWaivers)
+                        ? currentValue.fineWaivers
+                        : [],
                     };
                     // A renderer opened before a schedule change can flush a
                     // stale snapshot while closing. Keep the authoritative
@@ -30830,6 +31183,25 @@ ipcMain.handle("attendance:updateLeaveStatus", async (event, payload = {}) => {
       throw lastConflict || new Error("Dữ liệu nghỉ đang được cập nhật ở máy khác. Hãy thử lại.");
     });
 
+    // A leave approval can restore an attendance streak and invalidate an
+    // already-created absence/late fine. Reconcile both ledgers immediately so
+    // the UI and payroll do not wait for the next page refresh.
+    try {
+      await reconcileLateAttendanceFines(prisma, { actor: "system" });
+    } catch (error) {
+      console.warn("[Attendance Leave] Không đối soát được miễn phạt sau khi lưu nghỉ:", error.message);
+    }
+    try {
+      await reconcileMissingSeasonalScheduleFines(prisma, { dateKey: date, now: new Date() });
+    } catch (error) {
+      console.warn("[Attendance Leave] Không đối soát được phạt vắng sau khi lưu nghỉ:", error.message);
+    }
+    const refreshedConfig = await prisma.appConfig.findUnique({ where: { key: "attendanceData" } });
+    let refreshedData = {};
+    try {
+      refreshedData = JSON.parse(refreshedConfig?.value || "{}");
+    } catch {}
+
     void logActivity({
       module: "attendance",
       action: "UPDATE_LEAVE_STATUS",
@@ -30839,7 +31211,15 @@ ipcMain.handle("attendance:updateLeaveStatus", async (event, payload = {}) => {
       severity: "INFO",
     }).catch((error) => console.warn("Không thể ghi audit trạng thái nghỉ:", error.message));
 
-    return { success: true, data: result };
+    return {
+      success: true,
+      data: {
+        ...result,
+        extraFines: Array.isArray(refreshedData.extraFines) ? refreshedData.extraFines : [],
+        fineWaivers: Array.isArray(refreshedData.fineWaivers) ? refreshedData.fineWaivers : [],
+        fineAuditLog: Array.isArray(refreshedData.fineAuditLog) ? refreshedData.fineAuditLog : [],
+      },
+    };
   } catch (error) {
     console.error("❌ attendance:updateLeaveStatus error:", error);
     return { success: false, error: error.message };
@@ -40071,6 +40451,7 @@ ipcMain.handle("attendance:reconcileLateFines", async () => {
       repairReconciledAmounts: true,
       actor: currentSession.username,
     });
+    invalidateAttendanceSnapshotCaches();
     return { success: true, data: result };
   } catch (err) {
     console.error("❌ attendance:reconcileLateFines error:", err.message);

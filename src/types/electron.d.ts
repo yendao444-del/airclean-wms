@@ -324,7 +324,9 @@ export interface ElectronAPI {
     onStockChanged?: (callback: (data: any) => void) => () => void;
   };
   prepack: {
-    list: (filters?: { status?: string; evidenceStartDate?: string; evidenceEndDate?: string }) => Promise<{ success: boolean; data?: any[]; error?: string }>;
+    list: (filters?: { status?: string; evidenceStartDate?: string; evidenceEndDate?: string; workDateKey?: string }) => Promise<{ success: boolean; data?: any[]; error?: string }>;
+    saveDraft: (data: { batchId: number; workDateKey: string; quantity: number | null }) => Promise<{ success: boolean; data?: any; error?: string }>;
+    history: (filters?: { startDate?: string; endDate?: string; packerUsername?: string }) => Promise<{ success: boolean; data?: any[]; error?: string }>;
     create: (data: any) => Promise<{ success: boolean; data?: any; createdCount?: number; skippedCount?: number; error?: string }>;
     updateTarget: (data: any) => Promise<{ success: boolean; data?: any; error?: string }>;
     deleteTarget: (batchId: number) => Promise<{ success: boolean; error?: string }>;
@@ -1006,6 +1008,36 @@ export interface ElectronAPI {
       cached?: boolean;
       error?: string;
     }>;
+    getPackingPayrollSummary?: (filters?: {
+      since?: string;
+      until?: string;
+      commission?: any;
+    }) => Promise<{
+      success: boolean;
+      data?: Array<{
+        id: string;
+        timestamp: string;
+        orderNumber: string;
+        platform: 'Shopee' | 'TikTok' | 'Web';
+        customerName: string;
+        packer: string;
+        orderCount?: number;
+        items: Array<{
+          sku: string;
+          productName: string;
+          quantity: number;
+          packingLevel?: string;
+          packingUnits?: number;
+          packingUnitPrice?: number;
+          packingIncome?: number;
+        }>;
+        totalSKU: number;
+        status: 'completed' | 'issue';
+      }>;
+      revision?: string;
+      cached?: boolean;
+      error?: string;
+    }>;
     getPackingRevision: (filters?: {
       since?: string;
       until?: string;
@@ -1442,7 +1474,12 @@ export interface ElectronAPI {
       note?: string;
     }) => Promise<{
       success: boolean;
-      data?: { leaveRecords?: any[] };
+      data?: {
+        leaveRecords?: any[];
+        extraFines?: any[];
+        fineWaivers?: any[];
+        fineAuditLog?: any[];
+      };
       error?: string;
     }>;
     updateWorkSchedule: (data: {
