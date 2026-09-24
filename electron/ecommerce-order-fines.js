@@ -1,6 +1,8 @@
 const ECOMMERCE_ORDER_FINE_TOTAL = 10000;
 const ECOMMERCE_OFFICIAL_RECIPIENTS = 2;
-const ECOMMERCE_FINE_EFFECTIVE_DATE = "2026-09-22";
+// The policy starts on 23/09/2026; violations dated before that day are
+// grandfathered out and must not be recreated by reconciliation.
+const ECOMMERCE_FINE_EFFECTIVE_DATE = "2026-09-23";
 
 function bangkokDateKey(value) {
   const date = new Date(value);

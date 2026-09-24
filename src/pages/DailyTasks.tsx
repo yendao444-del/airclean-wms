@@ -22,7 +22,6 @@ import {
     Radio,
     Alert,
     Spin,
-    Tabs
 } from 'antd';
 const { TextArea } = Input;
 const { Option } = Select;
@@ -280,11 +279,6 @@ const getAssignmentRecipients = (task: Task): string[] => {
 const DAILY_EVIDENCE_DEADLINE = '23:59';
 const PREPACK_AREA = 'Đóng gói sẵn';
 const STOCK_CHECK_AREA = 'Kiểm hàng';
-const LINKED_MODULE_OPTIONS = [
-    { value: PREPACK_AREA, label: '📦 Đóng gói sẵn' },
-    { value: STOCK_CHECK_AREA, label: '📋 Quản lý kho > Kiểm hàng' },
-];
-
 const normalizePenaltyAmount = (value: unknown): number => {
     const raw = typeof value === 'string' ? value.replace(/[^\d]/g, '') : value;
     const amount = Number(raw);
@@ -335,19 +329,20 @@ const GRADIENT_PRESETS = [
 ];
 
 const DailyTasks = () => {
-    const { user, isRolePreview } = useAuth();
+    const { user, actualUser, isRolePreview } = useAuth();
     const isPrepackUiTest = import.meta.env.DEV && new URLSearchParams(window.location.search).has('prepackedUiTest');
-    const isAdmin = user?.role === 'admin';
+    const isAdmin = actualUser?.role === 'admin' || user?.role === 'admin';
     // Tài khoản test có vai trò quản lý mở rộng để kiểm thử toàn bộ luồng công việc.
     const isTestOperator = Boolean(user?.isTestAccount);
     const taskVisibilityScope = `${isRolePreview ? 'preview' : 'actual'}:${user?.username || ''}`;
     const previousTaskVisibilityScopeRef = useRef(taskVisibilityScope);
-    const canReviewEvidence = user?.role === 'admin' || user?.role === 'manager' || isTestOperator;
+    const canReviewEvidence = isAdmin || user?.role === 'manager' || isTestOperator;
     const getLinkedModule = useCallback((task: Task) => {
         const attachments = parseAttachments(task.attachments);
         if (attachments.prepackReport && Array.isArray(attachments.prepackReport.batchIds)) return PREPACK_AREA;
-        const area = String(task.area || '').trim().toLocaleLowerCase('vi-VN');
-        return [PREPACK_AREA, STOCK_CHECK_AREA].find(value => value.toLocaleLowerCase('vi-VN') === area) || null;
+        const moduleLink = attachments.moduleLink;
+        if (moduleLink?.kind !== 'module-link' || !moduleLink.module) return null;
+        return String(moduleLink.module).trim() || null;
     }, []);
     const isPrepackVerificationTask = useCallback((task: Task) => getLinkedModule(task) === PREPACK_AREA, [getLinkedModule]);
     const isLinkedModuleTask = useCallback((task: Task) => Boolean(getLinkedModule(task)), [getLinkedModule]);
@@ -730,7 +725,7 @@ const DailyTasks = () => {
             // cards should not wait for the full maintenance scan.
             const result = await window.electronAPI.dailyTasks.list({
                 maintenance: false,
-                viewerUsername: isRolePreview ? user?.username : undefined,
+                viewerUsername: isRolePreview && !isAdmin ? user?.username : undefined,
             });
             if (result.success && result.data) {
                 setTasks(result.data.map((t: any) => ({
@@ -1690,7 +1685,9 @@ const DailyTasks = () => {
     const handleEditTask = (task: Task) => {
         setEditingTask(task);
         const linkedTask = isPrepackVerificationTask(task);
-        setTaskCreateMode(linkedTask ? 'linked' : 'regular');
+        // Module links are system-owned now; the editor always uses the
+        // regular task form and preserves an existing system link below.
+        setTaskCreateMode('regular');
         const assignment = parseAttachments(task.attachments).assignment || {};
         const rotationAssignees = Array.isArray(assignment.dailyRotation?.assignees)
             ? assignment.dailyRotation.assignees
@@ -1749,8 +1746,13 @@ const DailyTasks = () => {
             const existingAttachments = editingTask ? parseAttachments(editingTask.attachments) : {};
             const existingEvidence = editingTask ? getEvidence(editingTask) : {};
             const existingAssignment = existingAttachments.assignment || {};
+            const preserveSystemModuleLink = Boolean(
+                editingTask
+                && existingAttachments.prepackReport
+                && existingAttachments.moduleLink?.kind === 'module-link',
+            );
             // Only administrators decide how a task is completed and whether a penalty applies.
-            const requiresEvidence = taskCreateMode === 'linked'
+            const requiresEvidence = preserveSystemModuleLink
                 ? false
                 : isAdmin ? Boolean(values.evidenceRequired) : Boolean(existingEvidence.required);
             const selectedAssignmentMode: 'fixed' | 'daily' = values.assignmentMode === 'daily' ? 'daily' : 'fixed';
@@ -1781,7 +1783,7 @@ const DailyTasks = () => {
                     ? values.assignee || ''
                     : selectedAssignmentMode === 'daily' ? rotationAssignees[0] || '' : '',
                 verifier: values.verifier || '',
-                area: taskCreateMode === 'linked' ? values.area || '' : '',
+                area: preserveSystemModuleLink ? editingTask?.area || '' : '',
                 dueDate: dueAt.toISOString(),
                 priority: values.priority,
                 status: values.status || 'pending',
@@ -1811,10 +1813,7 @@ const DailyTasks = () => {
                             ? Math.max(1, Math.min(MAX_EVIDENCE_IMAGES, Math.floor(Number(values.evidenceMinImages) || 1)))
                             : getRequiredEvidenceImageCount(existingEvidence),
                     } : undefined,
-                    moduleLink: taskCreateMode === 'linked' ? {
-                        kind: 'module-link',
-                        module: values.area || '',
-                    } : undefined,
+                    moduleLink: preserveSystemModuleLink ? existingAttachments.moduleLink : undefined,
                 }
             };
 
@@ -3557,7 +3556,7 @@ const DailyTasks = () => {
                                 const sessionActive = mobileEvidenceSession && mobileEvidenceSession.expiresAt > Date.now();
                                 if (sessionActive) {
                                     setMobileEvidenceOpen(true);
-                                } else if (isAdmin && !isRolePreview) {
+                                } else if (isAdmin) {
                                     setMobileEvidenceSession(null);
                                     setMobileEvidenceTargetOpen(true);
                                 } else {
@@ -4437,47 +4436,6 @@ const DailyTasks = () => {
                 cancelButtonProps={{ size: 'large', disabled: isSavingTask }}
             >
                 <Form form={taskForm} layout="vertical">
-                    <Tabs
-                        activeKey={taskCreateMode}
-                        onChange={(key) => {
-                            const nextMode = key === 'linked' ? 'linked' : 'regular';
-                            setTaskCreateMode(nextMode);
-                            if (nextMode === 'linked') {
-                                const currentTitle = String(taskForm.getFieldValue('title') || '').trim();
-                                taskForm.setFieldsValue({
-                                    area: PREPACK_AREA,
-                                    category: 'Kho hàng',
-                                    evidenceRequired: false,
-                                    ...(currentTitle ? {} : { title: 'Kiểm tra đóng gói sẵn' }),
-                                });
-                            } else {
-                                taskForm.setFieldsValue({ area: '' });
-                            }
-                        }}
-                        items={[
-                            { key: 'regular', label: 'Công việc thường' },
-                            { key: 'linked', label: 'Liên kết module' },
-                        ]}
-                        style={{ marginBottom: 8 }}
-                    />
-
-                    {taskCreateMode === 'linked' && (
-                        <div style={{ padding: '12px 14px', marginBottom: 16, border: '1px solid #bbf7d0', borderRadius: 8, background: '#f0fdf4' }}>
-                            <Form.Item
-                                name="area"
-                                label={<span style={{ fontSize: 14, fontWeight: 700 }}>Module liên kết</span>}
-                                rules={[{ required: true, message: 'Hãy chọn module liên kết.' }]}
-                                style={{ marginBottom: 6 }}
-                            >
-                                <Select
-                                    size="large"
-                                    options={LINKED_MODULE_OPTIONS}
-                                />
-                            </Form.Item>
-                            <div style={{ color: '#166534', fontSize: 12.5 }}>Task chỉ dẫn người thực hiện sang module. Nộp ảnh và thao tác nghiệp vụ được thực hiện trong module đó.</div>
-                        </div>
-                    )}
-
                     {/* Tên công việc - BẮT BUỘC */}
                     <Form.Item
                         name="title"

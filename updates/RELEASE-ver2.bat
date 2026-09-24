@@ -118,6 +118,11 @@ if exist "%APPDATA%\quan-ly-ban-hang-desktop\gdrive-token.json" (
         echo    [!] Khong co token AppData, dang dung token hien co trong electron/.
     )
 )
+call node scripts\verify-gdrive-release-token.cjs "electron\gdrive-token.json"
+if errorlevel 1 (
+    pause
+    exit /b 1
+)
 rmdir /S /Q "release4\win-unpacked\resources\app\electron" 2>nul
 xcopy "electron\*" "release4\win-unpacked\resources\app\electron\" /E /I /Y /Q >nul 2>&1
 
@@ -178,7 +183,12 @@ rem Never publish development database/service credentials in a patch.
 del /Q "!PATCH_TEMP!\resources\app\electron\config.js" 2>nul
 del /Q "!PATCH_TEMP!\resources\app\electron\supabase-storage.json" 2>nul
 del /Q "!PATCH_TEMP!\resources\app\electron\gdrive-credentials.json" 2>nul
-del /Q "!PATCH_TEMP!\resources\app\electron\gdrive-token.json" 2>nul
+call node scripts\verify-gdrive-release-token.cjs "!PATCH_TEMP!\resources\app\electron\gdrive-token.json"
+if errorlevel 1 (
+    rmdir /S /Q "!PATCH_TEMP!" 2>nul
+    pause
+    exit /b 1
+)
 
 if exist "python\dist\attendance_service.exe" (
     mkdir "!PATCH_TEMP!\resources\app\python\dist" >nul 2>&1

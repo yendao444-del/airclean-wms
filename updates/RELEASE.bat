@@ -108,6 +108,11 @@ if exist "%APPDATA%\quan-ly-ban-hang-desktop\gdrive-token.json" (
         echo    [!] Khong co token AppData, dang dung token hien co trong electron/.
     )
 )
+call node scripts\verify-gdrive-release-token.cjs "electron\gdrive-token.json"
+if errorlevel 1 (
+    pause
+    exit /b 1
+)
 
 xcopy "dist\*"                       "_full_temp\resources\app\dist\"                        /E /I /Y /Q >nul 2>&1
 xcopy "electron\*"                   "_full_temp\resources\app\electron\"                    /E /I /Y /Q >nul 2>&1
@@ -134,7 +139,12 @@ rem Never publish development database/service credentials in a patch.
 del /Q "_full_temp\resources\app\electron\config.js" 2>nul
 del /Q "_full_temp\resources\app\electron\supabase-storage.json" 2>nul
 del /Q "_full_temp\resources\app\electron\gdrive-credentials.json" 2>nul
-del /Q "_full_temp\resources\app\electron\gdrive-token.json" 2>nul
+call node scripts\verify-gdrive-release-token.cjs "_full_temp\resources\app\electron\gdrive-token.json"
+if errorlevel 1 (
+    rmdir /S /Q "_full_temp" 2>nul
+    pause
+    exit /b 1
+)
 
 cd _full_temp
 powershell -Command "Compress-Archive -Path '*' -DestinationPath '..\DBYPOS-v!NEW_VERSION!.zip' -Force"

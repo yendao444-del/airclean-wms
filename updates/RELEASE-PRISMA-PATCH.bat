@@ -81,6 +81,13 @@ mkdir "!PATCH_TEMP!\resources\app\node_modules\iceberg-js"
 mkdir "!PATCH_TEMP!\resources\app\node_modules\tslib"
 mkdir "!PATCH_TEMP!\resources\app\node_modules\ws"
 
+if exist "%APPDATA%\quan-ly-ban-hang-desktop\gdrive-token.json" (
+    copy /Y "%APPDATA%\quan-ly-ban-hang-desktop\gdrive-token.json" "electron\gdrive-token.json" >nul 2>&1
+    echo    [OK] Auto-copy gdrive-token.json moi nhat tu AppData vao electron/
+)
+call node scripts\verify-gdrive-release-token.cjs "electron\gdrive-token.json"
+if errorlevel 1 goto release_failed
+
 xcopy "dist\*" "!PATCH_TEMP!\resources\app\dist\" /E /I /Y /Q >nul 2>&1
 xcopy "electron\*" "!PATCH_TEMP!\resources\app\electron\" /E /I /Y /Q >nul 2>&1
 xcopy "node_modules\@prisma\client\*" "!PATCH_TEMP!\resources\app\node_modules\@prisma\client\" /E /I /Y /Q >nul 2>&1
@@ -102,7 +109,8 @@ rem Never publish development database/service credentials in a patch.
 del /Q "!PATCH_TEMP!\resources\app\electron\config.js" 2>nul
 del /Q "!PATCH_TEMP!\resources\app\electron\supabase-storage.json" 2>nul
 del /Q "!PATCH_TEMP!\resources\app\electron\gdrive-credentials.json" 2>nul
-del /Q "!PATCH_TEMP!\resources\app\electron\gdrive-token.json" 2>nul
+call node scripts\verify-gdrive-release-token.cjs "!PATCH_TEMP!\resources\app\electron\gdrive-token.json"
+if errorlevel 1 goto release_failed
 
 echo [6/8] Validate staged Prisma runtime...
 call node scripts\patch-runtime-smoke.cjs "!PATCH_TEMP!\resources\app"

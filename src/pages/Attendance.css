@@ -882,16 +882,8 @@
     background: #fff7ed;
 }
 
-/* Keep the table layout on medium Electron widths, but abbreviate dense cells. */
+/* Keep the table readable on medium Electron widths. */
 @container attendance (min-width: 901px) and (max-width: 1120px) {
-    .att-overview-full-only {
-        display: none !important;
-    }
-
-    .att-overview-compact-only {
-        display: inline-flex;
-    }
-
     .attendance-module .att-overview-table .ant-table-thead > tr > th,
     .attendance-module .att-overview-table .ant-table-tbody > tr > td {
         padding-right: 6px !important;
@@ -934,7 +926,28 @@
 .attendance-module .att-overview-table .att-overview-total-money {
     width: 100%;
     min-width: 0;
+    max-width: 100%;
+    box-sizing: border-box;
     padding-inline: 8px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.att-overview-total-money__label {
+    display: block;
+    min-width: 0;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+@container attendance (min-width: 901px) and (max-width: 1120px) {
+    .attendance-module .att-overview-table .att-overview-total-money {
+        padding-inline: 4px;
+        font-size: 12px;
+        letter-spacing: -0.75px;
+    }
 }
 
 .attendance-module .ant-table-thead > tr > th {

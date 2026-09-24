@@ -46,6 +46,26 @@ Every release must pass the checks appropriate to its tier before ZIP creation o
 
 The human-readable release guide is `updates/QUY_TAC_PHAT_HANH.md`. Security and credential packaging checks are in `updates/SECURITY-DEPLOYMENT.md`.
 
+## Project map
+
+Read [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) when a task crosses more than one module or data boundary. Keep this root file focused on operating rules; keep the detailed domain map in that document.
+
+- Stack: React + TypeScript + Vite renderer, Electron main/preload process, Prisma 5, Supabase integrations, and a Python face/attendance service.
+- `src/`: renderer UI. Pages live in `src/pages/`; reusable UI in `src/components/`; state and integration helpers in `src/contexts/`, `src/lib/`, and `src/lib/hooks/`.
+- `electron/`: desktop runtime, IPC handlers, preload bridge, update handlers, and external-service integrations.
+- `prisma/`: schema, migrations, and local development database configuration. Treat model/delegate/field changes as Prisma-impacting even when the schema file is unchanged.
+- `python/`: face/attendance runtime and packaged executable inputs.
+- `scripts/`: build, release, data-safety, packaging, and verification utilities.
+- `tests/`: focused JavaScript/data-flow tests. `tmp/`, `output/`, `dist/`, `build/`, and `release*` are generated or evidence-heavy areas unless a task explicitly targets them.
+
+## Working conventions
+
+- Start with the narrowest relevant file and symbol search. Do not scan `node_modules`, generated builds, release folders, logs, screenshots, or local databases unless the task explicitly requires them.
+- Preserve unrelated working-tree changes. Before deleting, moving, or renaming a file, verify that it is not an active source, credential, database, or user evidence artifact.
+- For data-flow work, inspect the caller and the persistence boundary together. Never run reset, truncate, destructive seed, or production migration commands without explicit approval.
+- Prefer extracting pure calculations and service calls from large renderer pages before changing their behavior. Keep public IPC channels and Prisma contracts stable unless the task explicitly changes them.
+- When a task is limited to documentation, instructions, or local search hygiene, do not run a release script or database command.
+
 ## Product Design Demo Images
 
 When creating any UI/UX demo image, mockup, visual concept, or design exploration:
