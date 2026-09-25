@@ -28,6 +28,12 @@ is available.
 
 ## Release verification
 
+Release scripts now run `scripts/verify-release-archive-secrets.cjs` before
+uploading. The check rejects database files, backups, OAuth/Google tokens,
+service credentials, private keys, and embedded bot tokens from every update
+ZIP. Do not bypass this check; move privileged operations behind a server-side
+endpoint before publishing another desktop update.
+
 Run:
 
 ```powershell
