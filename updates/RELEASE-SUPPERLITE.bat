@@ -106,6 +106,12 @@ if not exist "!CHECKSUM_FILE!" (
     pause
     exit /b 1
 )
+node scripts\verify-release-archive-secrets.cjs "!PATCH_ZIP_PATH!"
+if errorlevel 1 (
+    echo [ERROR] Release archive contains sensitive content. Upload blocked.
+    pause
+    exit /b 1
+)
 echo [OK] Created !CHECKSUM_FILE!
 echo.
 

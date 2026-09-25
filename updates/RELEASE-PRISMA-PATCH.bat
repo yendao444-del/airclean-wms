@@ -125,6 +125,9 @@ powershell -NoProfile -Command "$zip='!PATCH_ZIP_PATH!'; $hash=(Get-FileHash -Al
 if errorlevel 1 goto release_failed
 if not exist "!CHECKSUM_FILE!" goto release_failed
 
+node scripts\verify-release-archive-secrets.cjs "!PATCH_ZIP_PATH!"
+if errorlevel 1 goto release_failed
+
 powershell -NoProfile -Command "Add-Type -AssemblyName System.IO.Compression.FileSystem; $z=[IO.Compression.ZipFile]::OpenRead('!PATCH_ZIP_PATH!'); try { $n=$z.Entries.FullName -replace '\\','/'; if (-not ($n -match 'resources/app/node_modules/@prisma/client/')) { exit 2 }; if (-not ($n -match 'resources/app/node_modules/.prisma/client/')) { exit 3 } } finally { $z.Dispose() }"
 if errorlevel 1 goto release_failed
 

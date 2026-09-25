@@ -204,6 +204,12 @@ set CHECKSUM_FILE=!PATCH_ZIP_PATH!.sha256
 powershell -NoProfile -Command "$zip='!PATCH_ZIP_PATH!'; $hash=(Get-FileHash -Algorithm SHA256 -LiteralPath $zip).Hash.ToLower(); Set-Content -NoNewline -LiteralPath '!CHECKSUM_FILE!' -Value ($hash + '  ' + [IO.Path]::GetFileName($zip))"
 if errorlevel 1 ( echo [ERROR] Cannot create SHA256 checksum. & pause & exit /b 1 )
 if not exist "!CHECKSUM_FILE!" ( echo [ERROR] SHA256 checksum is missing. & pause & exit /b 1 )
+node scripts\verify-release-archive-secrets.cjs "!PATCH_ZIP_PATH!"
+if errorlevel 1 (
+    echo [ERROR] Release archive contains sensitive content. Upload blocked.
+    pause
+    exit /b 1
+)
 echo.
 
 echo [4/4] Git and GitHub release...
