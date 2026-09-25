@@ -30,6 +30,9 @@ check_db.js
 check_app_data.js
 *.spec
 *.code-workspace
+/tmp/
+tmp/**
+!tmp/.gitkeep
 dev.db
 
 electron/gdrive-credentials.json
