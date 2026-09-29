@@ -29,6 +29,7 @@ import {
     PlusOutlined,
     RightOutlined,
     SettingOutlined,
+    SearchOutlined,
     SyncOutlined,
 } from '@ant-design/icons';
 import dayjs from 'dayjs';
@@ -51,7 +52,7 @@ import './StockCheck.css';
 const LS_KEY = 'stock-check-sessions-v2';
 const DAILY_MAX_SKUS = 15;
 const TEMPORARY_DAILY_ONLY_MODE = false;
-const TEMPORARY_DAILY_PRODUCT_NAMES = ['5D UNICARE', 'UNICARE UPF UV'];
+const DAILY_PRODUCT_NAMES = ['5D UNICARE', 'UPF UNICARE', 'AMI ECO'];
 const FULL_CHECK_OPEN_HOUR = 16;
 const DAILY_CHECK_OPEN_HOUR = 17;
 // The test operator can use the stock-check workflow, but must never be part
@@ -103,6 +104,7 @@ interface CheckSession {
     createdAt: string;
     autoAssigned?: boolean;
     dailyScopePolicyVersion?: number;
+    selectionWarnings?: string[];
     completedAt?: string;
     completedBy?: string;
     cancelledAt?: string;
@@ -335,44 +337,6 @@ function expandToVariants(product: any): CheckItem[] {
     }];
 }
 
-function stableStockCheckHash(value: string): number {
-    return [...value].reduce((hash, char) => ((hash * 31) + char.charCodeAt(0)) >>> 0, 0);
-}
-
-function isTemporaryDailyProduct(product: any): boolean {
-    const name = String(product?.name || product?.productName || '').toLocaleUpperCase('vi-VN');
-    const sku = String(product?.sku || '').toLocaleUpperCase('vi-VN');
-    return (
-        (name.includes('5D') && name.includes('UNICARE'))
-        || (name.includes('UNICARE') && name.includes('UPF') && name.includes('UV'))
-        || sku.includes('5DUNI')
-    );
-}
-
-function buildDailyItems(products: any[], dateKey: string, sourceSessions: CheckSession[]): CheckItem[] {
-    const uniqueItems = new Map<string, CheckItem>();
-    products.filter(isTemporaryDailyProduct).flatMap(expandToVariants).forEach(item => {
-        const sku = String(item.sku || '').trim();
-        if (sku && !uniqueItems.has(sku)) uniqueItems.set(sku, item);
-    });
-
-    const lastAssignedDate = new Map<string, string>();
-    sourceSessions
-        .filter(session => session.type === 'daily' && session.date < dateKey && session.status !== 'cancelled')
-        .forEach(session => session.items.forEach(item => {
-            const previous = lastAssignedDate.get(item.sku);
-            if (!previous || session.date > previous) lastAssignedDate.set(item.sku, session.date);
-        }));
-
-    return [...uniqueItems.values()]
-        .sort((left, right) => {
-            const leftDate = lastAssignedDate.get(left.sku) || '';
-            const rightDate = lastAssignedDate.get(right.sku) || '';
-            if (leftDate !== rightDate) return leftDate.localeCompare(rightDate);
-            return stableStockCheckHash(`${dateKey}:${left.sku}`) - stableStockCheckHash(`${dateKey}:${right.sku}`);
-        })
-        .slice(0, DAILY_MAX_SKUS);
-}
 
 function buildStockBySku(products: any[]): Map<string, number> {
     const stockBySku = new Map<string, number>();
@@ -469,11 +433,16 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
     const saveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const pendingConversionRatesRef = useRef<Record<string, ConversionConfig>>({});
     const countRequestQueueRef = useRef<Record<string, Promise<void>>>({});
+    const countSaveErrorsRef = useRef<Record<string, string>>({});
     const countSaveTimersRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
     const countSaveCallbacksRef = useRef<Record<string, () => void>>({});
     const countSaveVersionsRef = useRef<Record<string, number>>({});
     const [expandedProductGroups, setExpandedProductGroups] = useState<Record<string, boolean>>({});
     const [activeProductGroup, setActiveProductGroup] = useState('');
+    const [skuViewByGroup, setSkuViewByGroup] = useState<Record<string, 'pending' | 'completed' | 'all'>>({});
+    const [groupListFilter, setGroupListFilter] = useState<'pending' | 'completed' | 'all'>('pending');
+    const [groupListPage, setGroupListPage] = useState(1);
+    const GROUPS_PER_PAGE = 8;
     const [activeSku, setActiveSku] = useState('');
     const [stockCheckSearch, setStockCheckSearch] = useState('');
     const [handlingCatalog, setHandlingCatalog] = useState<HandlingCatalogItem[]>([]);
@@ -539,6 +508,7 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
     useEffect(() => {
         let cancelled = false;
         setHandlingWorkspaceLoading(true);
+        if (!isAdmin) { setHandlingWorkspaceLoading(false); return; }
         setHandlingWorkspaceError('');
         window.electronAPI.handlingUnits.getWorkspace({ purpose: 'stock-check' })
             .then(result => {
@@ -558,7 +528,7 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
                 if (!cancelled) setHandlingWorkspaceLoading(false);
             });
         return () => { cancelled = true; };
-    }, []);
+    }, [isAdmin]);
 
     const refreshHandlingHistory = useCallback(async () => {
         setHandlingHistoryLoading(true);
@@ -786,6 +756,8 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
             countSaveCallbacksRef.current[sku]?.();
         });
         await Promise.all(Object.values(countRequestQueueRef.current).map(request => request.catch(() => undefined)));
+        const failure = Object.values(countSaveErrorsRef.current)[0];
+        if (failure) throw new Error(failure);
     }, []);
 
     const handleProductTabChange = useCallback((group: ProductGroup, key: string) => {
@@ -843,8 +815,6 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
             });
         fetchStaff();
         loadConversionRates();
-        loadTopSellingProducts();
-        loadStockCheckActivity();
         if (isAdmin) loadBalanceRecords();
         return () => { cancelled = true; };
     }, [isAdmin, loadTopSellingProducts, loadStockCheckActivity, loadBalanceRecords]);
@@ -1465,6 +1435,7 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
                     const result = await window.electronAPI.stockCheck.updateCount({ sessionId: todaySession.id, sku, actualStock: total });
                     if (countSaveVersionsRef.current[sku] !== version) return;
                     if (!result?.success) throw new Error(result?.error || 'Không thể lưu số đếm.');
+                    delete countSaveErrorsRef.current[sku];
                     setSessions(current => current.map(session => session.id !== todaySession.id ? session : {
                         ...session,
                         items: session.items.map(item => item.sku !== sku ? item : { ...item, ...(result.item || {}) }),
@@ -1472,6 +1443,7 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
                 })
                     .catch((error: any): void => {
                         if (countSaveVersionsRef.current[sku] === version) {
+                            countSaveErrorsRef.current[sku] = error?.message || 'Không thể lưu số đếm.';
                             void message.error(error?.message || 'Không thể lưu số đếm.');
                         }
                     });
@@ -1515,7 +1487,11 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
     }, [conversionRates, applyActualStock, canEditCounts]);
 
     const commitCountInputOnBlur = useCallback((sku: string, productName: string, unitIndex: number | 'le', rawValue: string) => {
-        const normalized = rawValue.replace(/[^0-9]/g, '');
+        const normalized = rawValue.trim();
+        if (normalized && (!/^\d+$/.test(normalized) || !Number.isSafeInteger(Number(normalized)))) {
+            message.warning('Số lượng phải là số nguyên không âm.');
+            return;
+        }
         updateCountingInput(sku, productName, unitIndex, normalized === '' ? null : Number(normalized));
     }, [updateCountingInput]);
 
@@ -1572,44 +1548,6 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
 
     const getDailyCarryOver = (_sourceSessions: CheckSession[]) => ({ items: [] as CheckItem[], source: undefined, dates: [] as string[] });
 
-    // Apply the temporary two-product scope to an untouched session that was
-    // already generated under the previous 15-SKU policy.
-    useEffect(() => {
-        if (!todaySession || todaySession.type !== 'daily' || !todaySession.items.length) return;
-        if (todaySession.items.some(item => item.actualStock !== null || item.balanced)) return;
-        const scopedItems = todaySession.items.filter(isTemporaryDailyProduct);
-        if (!scopedItems.length || scopedItems.length === todaySession.items.length) return;
-        persistSessions(sessions.map(session => session.id === todaySession.id
-            ? { ...session, items: scopedItems, dailyScopePolicyVersion: 4 }
-            : session));
-    }, [todaySession, sessions, isAdmin]); // eslint-disable-line react-hooks/exhaustive-deps
-
-    useEffect(() => {
-        if (!isAdmin || !isToday || !sessions.length || !contextProducts.length) return;
-        const stockBySku = buildStockBySku(contextProducts);
-        let changed = false;
-
-        const updated = sessions.map(session => {
-            if (session.date !== todayStr) return session;
-            let sessionChanged = false;
-            const items = session.items.map(item => {
-                // Khi user đã nhập số đếm, giữ nguyên snapshot Tồn HT để không làm mất chênh lệch đang kiểm.
-                if (item.actualStock !== null || item.balanced) return item;
-
-                const systemStock = stockBySku.get(item.sku);
-                if (systemStock === undefined || systemStock === item.systemStock) return item;
-
-                sessionChanged = true;
-                return { ...item, systemStock, difference: 0, balanced: false };
-            });
-
-            if (!sessionChanged) return session;
-            changed = true;
-            return { ...session, items };
-        });
-
-        if (changed) persistSessions(updated);
-    }, [contextProducts, sessions, todayStr, isAdmin, isToday]);
 
     // Admin and managers use the same server-owned assignment resolver. This
     // keeps a linked Daily Tasks rotation in sync with the stock-check session.
@@ -1639,79 +1577,23 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
     }, [isToday, weekend, fullWindowOpen, sessionsLoaded, contextProducts, user?.role, assignableManagers, sessions, todayStr]); // eslint-disable-line react-hooks/exhaustive-deps
 
     useEffect(() => {
-        if (!isAdmin || weekend || !sessionsLoaded || !isToday || !dailyWindowOpen || activeTab !== 'daily' || dailyDisabledByFull || cancelledDailyForDate || !assignableManagers.length || !stockCheckActivityLoaded || !contextProducts.length) return;
-        if (isVietnamRestDay(dayjs())) return;
-        const current = sessions;
-        const existingDailySession = current.find(s =>
-            s.date === todayStr && (s.type === 'daily' || s.type === 'weekend')
-        );
-        if (existingDailySession || autoGeneratedSessionRef.current === `admin-${todayStr}`) return;
-
-        const items = buildDailyItems(contextProducts, todayStr, sessions);
-        if (!items.length) return;
-        autoGeneratedSessionRef.current = `admin-${todayStr}`;
-        void window.electronAPI.stockCheck.ensureDailySession({ items }).then(result => {
-            if (!result?.success || !result.session) {
-                autoGeneratedSessionRef.current = null;
-                message.error(result?.error || 'Không thể tự tạo phiên kiểm hôm nay.');
-                return;
-            }
+        if (!sessionsLoaded || !isToday || weekend || !dailyWindowOpen || isVietnamRestDay(currentDate)
+            || activeTab !== 'daily' || dailyDisabledByFull || cancelledDailyForDate
+            || (user?.role !== 'admin' && user?.role !== 'manager')) return;
+        if (todaySession?.items.length || autoGeneratedSessionRef.current === `daily-${todayStr}`) return;
+        let cancelled = false;
+        autoGeneratedSessionRef.current = `daily-${todayStr}`;
+        void window.electronAPI.stockCheck.ensureDailySession({ items: [] }).then(result => {
+            if (cancelled) return;
+            if (!result?.success || !result.session) throw new Error(result?.error || 'Không thể tạo phiên kiểm hôm nay.');
             setSessions(previous => [...previous.filter(session => session.id !== result.session.id), result.session]);
         }).catch(error => {
+            if (cancelled) return;
             autoGeneratedSessionRef.current = null;
-            message.error(error?.message || 'Không thể tự tạo phiên kiểm hôm nay.');
+            message.error(error?.message || 'Không thể tạo phiên kiểm hôm nay.');
         });
-    }, [isAdmin, weekend, sessionsLoaded, isToday, dailyWindowOpen, activeTab, dailyDisabledByFull, cancelledDailyForDate, assignableManagers, todayStr, sessions, contextProducts, stockCheckActivityLoaded]); // eslint-disable-line react-hooks/exhaustive-deps
-
-    // Assignment and item generation must be one continuous workflow. Previously
-    // the automatic step only created an empty assignment; a manager then saw a
-    // blank page until an admin manually pressed "Tạo danh sách kiểm".
-    useEffect(() => {
-        if (isAdmin || weekend || !isToday || !dailyWindowOpen || activeTab !== 'daily' || dailyDisabledByFull || !todaySession || todaySession.items.length > 0 || !stockCheckActivityLoaded) return;
-        if (!contextProducts.length || autoGeneratedSessionRef.current === todaySession.id) return;
-
-        let cancelled = false;
-        void (async () => {
-            const items = buildDailyItems(contextProducts, todayStr, sessions);
-            if (!items.length) return;
-
-            autoGeneratedSessionRef.current = todaySession.id;
-            const completedSession: CheckSession = {
-                ...todaySession,
-                items,
-                dailyScopePolicyVersion: 3,
-                status: 'in_progress',
-                notes: todaySession.notes,
-                createdAt: todaySession.createdAt || dayjs().toISOString(),
-            };
-            persistSessions(sessions.map(session => session.id === todaySession.id ? completedSession : session));
-        })();
-        return () => { cancelled = true; };
-    }, [isAdmin, weekend, isToday, dailyWindowOpen, activeTab, dailyDisabledByFull, todaySession, contextProducts, topSellingProducts, stockCheckActivityLoaded, stockCheckActivity, sessions, loadTopSellingProducts]); // eslint-disable-line react-hooks/exhaustive-deps
-
-    // Quản lý cần có thể khởi tạo phiên của ngày hiện tại khi không có admin
-    // mở màn hình. Việc tạo thực hiện ở main process: client chỉ gửi danh sách
-    // SKU, còn máy chủ tự chọn người theo vòng và khóa giao dịch.
-    useEffect(() => {
-        if (isAdmin || weekend || user?.role !== 'manager' || !isToday || !dailyWindowOpen || isVietnamRestDay(dayjs()) || activeTab !== 'daily' || dailyDisabledByFull || cancelledDailyForDate || todaySession || !stockCheckActivityLoaded) return;
-        if (!contextProducts.length || autoGeneratedSessionRef.current === `manager-${todayStr}`) return;
-
-        let cancelled = false;
-        void (async () => {
-            const items = buildDailyItems(contextProducts, todayStr, sessions);
-            if (!items.length) return;
-
-            autoGeneratedSessionRef.current = `manager-${todayStr}`;
-            const result = await window.electronAPI.stockCheck.ensureDailySession({ items });
-            if (!result?.success) {
-                autoGeneratedSessionRef.current = null;
-                message.error(result?.error || 'Không thể tự tạo phiên kiểm hôm nay.');
-                return;
-            }
-            if (result.session) setSessions(previous => [...previous.filter(session => session.id !== result.session.id), result.session]);
-        })();
-        return () => { cancelled = true; };
-    }, [isAdmin, weekend, user?.role, isToday, dailyWindowOpen, activeTab, dailyDisabledByFull, cancelledDailyForDate, todaySession, contextProducts, topSellingProducts, stockCheckActivityLoaded, todayStr, loadTopSellingProducts]); // eslint-disable-line react-hooks/exhaustive-deps
+        return () => { cancelled = true; autoGeneratedSessionRef.current = null; };
+    }, [sessionsLoaded, isToday, weekend, dailyWindowOpen, activeTab, dailyDisabledByFull, cancelledDailyForDate, user?.role, todaySession, todayStr]); // eslint-disable-line react-hooks/exhaustive-deps
 
     const handleGenerate = async () => {
         if (isPast) {
@@ -1740,14 +1622,14 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
             return;
         }
         const pool = [...contextProducts];
-        const items = useFullInventory ? pool.flatMap((p: any) => expandToVariants(p)) : buildDailyItems(contextProducts, todayStr, sessions);
-        if (!items.length) { message.error('Không có sản phẩm.'); return; }
+        const items = useFullInventory ? pool.flatMap((p: any) => expandToVariants(p)) : [];
+        if (useFullInventory && !items.length) { message.error('Không có sản phẩm.'); return; }
         // Giữ người phụ trách đã được gán trước đó (pre-assign), nếu có
         const preAssigned = todaySession?.items.length === 0
             ? assignableManagers.find(m => m.username === todaySession.assignedTo) ?? null
             : null;
         const assignee = preAssigned ?? pickNextAssignee();
-        if (!assignee) {
+        if (useFullInventory && !assignee) {
             message.warning('Chưa có quản lý hoạt động để phân công phiên kiểm.');
             return;
         }
@@ -1797,7 +1679,7 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
         setCountingInputs({});
         setExpandedProductGroups({});
         setExpandedConvGroups({});
-        message.success(`Tạo phiên kiểm ${items.length} SKU phân loại → ${createResult.session.assignedName}`);
+        message.success(`Tạo phiên kiểm ${createResult.session.items.length} SKU phân loại → ${createResult.session.assignedName}`);
     };
 
     const handleDirectActualStock = (sku: string, value: number | null) => {
@@ -1847,12 +1729,6 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
         const note = noteModalValue.trim();
         if (item.requiresNote && item.countLocked && !note) {
             message.warning('SKU này cần nhập lý do trước khi cân bằng kho.');
-            return;
-        }
-
-        if (isAdmin) {
-            handleUpdateNote(item.sku, note);
-            closeNoteModal();
             return;
         }
 
@@ -2034,9 +1910,7 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
         setBalancing(prev => ({ ...prev, [item.sku]: true }));
         try {
             if (!await flushConversionRates()) return;
-            if (countSaveTimersRef.current[item.sku]) {
-                await flushPendingCountUpdates();
-            }
+            await flushPendingCountUpdates();
             const result = await window.electronAPI.stockCheck.balanceItem({
                 sessionId: todaySessionId,
                 sku: item.sku,
@@ -2162,8 +2036,11 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
             return;
         }
         if (!await flushConversionRates()) return;
-        if (group.items.some(item => countSaveTimersRef.current[item.sku])) {
+        try {
             await flushPendingCountUpdates();
+        } catch (error: any) {
+            message.error(error?.message || 'Không thể lưu số đếm.');
+            return;
         }
         const effectiveItems = group.items.map(getEffectiveCountedItem);
         const pendingItems = effectiveItems.filter(item => !item.balanced);
@@ -2313,9 +2190,34 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
             .filter(group => normalizeUserText(group.productName).includes(query) || group.items.length > 0);
     }, [productGroups, stockCheckSearch]);
 
-    const selectedProductGroup = productGroups.some(group => group.productName === activeProductGroup)
+    const filteredGroupList = useMemo(() => productGroups.filter(group => {
+        const query = normalizeUserText(stockCheckSearch);
+        if (query && !group.items.some(item =>
+            [item.productName, item.color || '', item.sku].some(value => normalizeUserText(value).includes(query))
+        )) return false;
+        const completed = group.items.length > 0 && group.items.every(item => item.balanced);
+        if (groupListFilter === 'completed') return completed;
+        if (groupListFilter === 'pending') return !completed;
+        return true;
+    }), [productGroups, stockCheckSearch, groupListFilter]);
+    const groupListPageCount = Math.max(1, Math.ceil(filteredGroupList.length / GROUPS_PER_PAGE));
+    const currentGroupPage = Math.min(groupListPage, groupListPageCount);
+    const paginatedGroupList = filteredGroupList.slice(
+        (currentGroupPage - 1) * GROUPS_PER_PAGE,
+        currentGroupPage * GROUPS_PER_PAGE,
+    );
+
+    useEffect(() => {
+        setGroupListPage(1);
+    }, [stockCheckSearch, groupListFilter]);
+
+    useEffect(() => {
+        if (groupListPage > groupListPageCount) setGroupListPage(groupListPageCount);
+    }, [groupListPage, groupListPageCount]);
+
+    const selectedProductGroup = paginatedGroupList.some(group => group.productName === activeProductGroup)
         ? activeProductGroup
-        : productGroups[0]?.productName || '';
+        : paginatedGroupList[0]?.productName || '';
 
     const selectedItem = todaySession?.items.find(item => normalizeSku(item.sku) === normalizeSku(activeSku))
         || todaySession?.items.find(item => !item.balanced)
@@ -3346,38 +3248,11 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
     return (
         <div style={{ background: '#F8FAFC', minHeight: '100vh' }}>
             <main style={{ width: '100%', maxWidth: 'none', margin: 0, padding: '16px 28px 0' }}>
-                {isToday && activeTab === 'daily' && fullCheckExemptions.length > 0 && (
-                    <Alert
-                        type="success"
-                        showIcon
-                        style={{ marginBottom: 12, borderRadius: 8, fontSize: 12 }}
-                        message={
-                            <span>
-                                <strong>Đã miễn kiểm hàng ngày {fullCheckExemptions.length} SKU.</strong>{' '}
-                                {fullCheckExemptionGroups.join(', ')} đã được cân bằng trong Kiểm toàn bộ hôm nay nên không cần kiểm lại.
-                            </span>
-                        }
-                    />
-                )}
-                {activeTab === 'daily' && isToday && todaySession && totalCount > 0 && !isSessionSubmitted && !isSessionReadyToSubmit && (
-                    <Alert
-                        type="warning"
-                        showIcon
-                        style={{ marginBottom: 12, borderRadius: 8, fontSize: 12 }}
-                        message={
-                            <span>
-                                Phiên kiểm chưa hoàn tất: còn <strong>{incompleteSkuCount}/{totalCount} SKU</strong> chưa cân bằng. Kiểm một phần SKU không được tính là hoàn thành; cần cân bằng đủ toàn bộ SKU trước khi nộp
-                                {STOCK_CHECK_MISSING_FINE_ENABLED ? (
-                                    <>; nếu không người phụ trách sẽ bị phạt <strong>{STOCK_CHECK_MISSING_FINE.toLocaleString('vi-VN')}đ</strong> trong Bảng công.</>
-                                ) : (
-                                    <>. Tính năng phạt thiếu kiểm hàng ngày hiện đang tạm tắt.</>
-                                )}
-                            </span>
-                        }
-                    />
-                )}
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16, marginBottom: 16 }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 16, flexWrap: 'wrap' }}>
+                {todaySession?.selectionWarnings?.map(warning => (
+                    <Alert key={warning} type="warning" showIcon message={warning} style={{ marginBottom: 8 }} />
+                ))}
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginBottom: 12, flexWrap: 'wrap' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
                         <div style={{
                             display: 'flex', alignItems: 'center', gap: 6, background: '#fff',
                             border: '1px solid #e2e8f0', borderRadius: 8, padding: '5px 12px', fontSize: 13,
@@ -3392,6 +3267,23 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
                         </div>
 
                         {weekend && <Tag color="orange">📅 Thứ 7 — kiểm toàn bộ tất cả kho</Tag>}
+                        {activeTab === 'daily' && (
+                            <Tooltip trigger={['hover', 'focus', 'click']} title="Tối đa 15 SKU/ngày. 5D UNICARE, UPF UNICARE, AMI ECO: khoảng 40% SKU mỗi dòng. Ưu tiên màu chưa kiểm trong tuần và kiểm lại SKU bán nhiều hoặc có bất thường. Nhập số kiện thực đếm và hàng lẻ.">
+                                <Button type="text" size="small" style={{ color: '#64748b', fontSize: 12 }}>Quy tắc kiểm</Button>
+                            </Tooltip>
+                        )}
+                        {activeTab === 'daily' && isToday && todaySession && totalCount > 0 && !isSessionSubmitted && !isSessionReadyToSubmit && (
+                            <Tooltip trigger={['hover', 'focus', 'click']} title={`Cần cân bằng đủ toàn bộ SKU trước khi nộp. ${STOCK_CHECK_MISSING_FINE_ENABLED ? `Không hoàn thành: người phụ trách bị phạt ${STOCK_CHECK_MISSING_FINE.toLocaleString('vi-VN')}đ trong Bảng công.` : 'Tính năng phạt thiếu kiểm hàng ngày hiện đang tạm tắt.'}`}>
+                                <Button type="text" size="small" style={{ color: '#ad6800', background: '#fffbe6', fontSize: 12 }}>
+                                    Còn {incompleteSkuCount}/{totalCount} SKU
+                                </Button>
+                            </Tooltip>
+                        )}
+                        {isToday && activeTab === 'daily' && fullCheckExemptions.length > 0 && (
+                            <Tooltip trigger={['hover', 'focus', 'click']} title={`${fullCheckExemptionGroups.join(', ')} đã được cân bằng trong Kiểm toàn bộ hôm nay nên không cần kiểm lại.`}>
+                                <Button type="text" size="small" style={{ color: '#15803d', fontSize: 12 }}>Miễn kiểm {fullCheckExemptions.length} SKU</Button>
+                            </Tooltip>
+                        )}
                     </div>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
                         {activeTab === 'inspection' && inspectionSessionsForDate.length > 1 && (
@@ -3474,9 +3366,30 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
                                     </div>
                                 </div>
                                 <div style={{ height: 1, background: '#e9eef5', marginBottom: 18 }} />
-                                <div style={{ fontSize: 14, fontWeight: 800, color: '#334155', marginBottom: 8 }}>Danh sách nhóm hàng</div>
+                                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginBottom: 8 }}>
+                                    <div style={{ fontSize: 14, fontWeight: 800, color: '#334155' }}>Nhóm sản phẩm</div>
+                                    <span style={{ fontSize: 11, color: '#94a3b8', fontWeight: 700 }}>{filteredGroupList.length}/{visibleStockCheckGroups.length}</span>
+                                </div>
+                                <Input
+                                    size="small"
+                                    allowClear
+                                    prefix={<SearchOutlined style={{ color: '#94a3b8' }} />}
+                                    placeholder="Tìm nhóm sản phẩm"
+                                    value={stockCheckSearch}
+                                    onChange={event => setStockCheckSearch(event.target.value)}
+                                    style={{ marginBottom: 8, borderRadius: 7, fontSize: 12 }}
+                                />
+                                <div style={{ display: 'flex', gap: 4, background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 7, padding: 3, marginBottom: 8 }}>
+                                    {([
+                                        ['pending', `Chưa xong · ${productGroups.filter(group => group.items.some(item => !item.balanced)).length}`],
+                                        ['completed', `Đã xong · ${productGroups.filter(group => group.items.length > 0 && group.items.every(item => item.balanced)).length}`],
+                                        ['all', `Tất cả · ${productGroups.length}`],
+                                    ] as const).map(([key, label]) => (
+                                        <button key={key} onClick={() => setGroupListFilter(key)} style={{ flex: 1, minWidth: 0, border: 0, borderRadius: 5, padding: '5px 3px', background: groupListFilter === key ? '#fff' : 'transparent', color: groupListFilter === key ? '#0f766e' : '#64748b', boxShadow: groupListFilter === key ? '0 1px 3px rgba(15,23,42,.12)' : 'none', fontSize: 10.5, fontWeight: groupListFilter === key ? 800 : 600, fontFamily: 'inherit', cursor: 'pointer', whiteSpace: 'nowrap' }}>{label}</button>
+                                    ))}
+                                </div>
                                 <div style={{ display: 'grid', gap: 2 }}>
-                                    {productGroups.map(group => {
+                                    {paginatedGroupList.map(group => {
                                         const entered = group.items.filter(item => item.actualStock !== null).length;
                                         const balanced = group.items.filter(item => item.balanced).length;
                                         const remaining = group.items.length - balanced;
@@ -3508,6 +3421,16 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
                                         );
                                     })}
                                 </div>
+                                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginTop: 10, paddingTop: 10, borderTop: '1px solid #e9eef5' }}>
+                                    <span style={{ fontSize: 11, color: '#64748b', fontWeight: 700 }}>Nhóm {(filteredGroupList.length ? (currentGroupPage - 1) * GROUPS_PER_PAGE + 1 : 0)}–{Math.min(currentGroupPage * GROUPS_PER_PAGE, filteredGroupList.length)} / {filteredGroupList.length}</span>
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                                        <Button size="small" disabled={currentGroupPage <= 1} onClick={() => setGroupListPage(page => Math.max(1, page - 1))}>‹</Button>
+                                        {Array.from({ length: groupListPageCount }, (_, index) => index + 1).slice(0, 5).map(page => (
+                                            <Button key={page} size="small" type={page === currentGroupPage ? 'primary' : 'default'} onClick={() => setGroupListPage(page)}>{page}</Button>
+                                        ))}
+                                        <Button size="small" disabled={currentGroupPage >= groupListPageCount} onClick={() => setGroupListPage(page => Math.min(groupListPageCount, page + 1))}>›</Button>
+                                    </div>
+                                </div>
                                 <div style={{ borderTop: '1px solid #e9eef5', marginTop: 'auto', padding: '18px 2px 0', fontSize: 12, color: '#7c8da6', lineHeight: 2 }}>
                                     <div><span style={{ color: '#10b981', marginRight: 8 }}>●</span> Đã hoàn thành</div>
                                     <div><span style={{ color: '#f97316', marginRight: 8 }}>●</span> Chưa hoàn thành</div>
@@ -3516,7 +3439,7 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
                             </aside>
                             <section style={{ minWidth: 0, background: '#fff', border: '1px solid #e2e8f0', borderRadius: 10, overflow: 'hidden', boxShadow: '0 2px 8px rgba(15, 23, 42, 0.04)' }}>
                         {productGroups.filter(group => group.productName === selectedProductGroup).map(group => {
-                            const units = conversionRates[group.productName]?.units || [];
+                            const units = conversionRates[group.productName]?.noConversion ? [] : conversionRates[group.productName]?.units || [];
                             const hasNoConversion = conversionRates[group.productName]?.noConversion === true;
                             const hasConversion = hasValidConversion(group.productName);
                             const pendingGroupItems = group.items.map(getEffectiveCountedItem).filter(item => !item.balanced);
@@ -3526,6 +3449,11 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
                             const isProductExpanded = true;
                             const groupCheckedCount = group.items.filter(item => item.actualStock !== null).length;
                             const groupRemainingCount = group.items.filter(item => !item.balanced).length;
+                            const groupCompletedCount = group.items.filter(item => item.balanced).length;
+                            const skuView = skuViewByGroup[group.productName] || 'pending';
+                            const visibleGroupItems = group.items.filter(item =>
+                                skuView === 'all' || (skuView === 'completed' ? item.balanced : !item.balanced)
+                            );
                             const bulkNoteTargets = getBulkNoteTargets(group);
                             const isBulkNoteEditing = !!bulkNoteEditors[group.productName];
                             const bulkNoteDraft = bulkNoteDrafts[group.productName] || '';
@@ -3555,9 +3483,9 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
                                             <div>
                                                 <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
                                                     <h1 style={{ margin: 0, color: '#1e3557', fontSize: 38, lineHeight: 1.05, letterSpacing: 0, fontWeight: 800 }}>{group.productName}</h1>
-                                                    <Tooltip title={hasConversion ? 'Xem hoặc cập nhật cách nhập số lượng' : 'Thiết lập đơn vị nhập trước khi cân bằng kho'}>
-                                                        <button onClick={() => setConversionModalGroup(group.productName)} style={{ display: 'inline-flex', alignItems: 'center', gap: 7, color: hasConversion ? '#0f766e' : '#b54708', background: hasConversion ? '#ecfdf5' : '#fff7ed', border: `1px solid ${hasConversion ? '#6ee7b7' : '#fdba74'}`, borderRadius: 8, padding: '7px 11px', cursor: 'pointer', fontSize: 12, fontWeight: 800, boxShadow: 'none' }}>
-                                                            <SettingOutlined /> {hasNoConversion ? 'Đơn vị nhập · trực tiếp' : hasConversion ? `Đơn vị nhập · ${units.length}` : 'Thiết lập đơn vị nhập'}
+                                                    <Tooltip title={hasConversion ? 'Xem hoặc cập nhật cách nhập số lượng' : 'Chưa có cách nhập số lượng. Bấm để thiết lập trước khi cân bằng.'}>
+                                                        <button aria-label="Thiết lập cách nhập số lượng" onClick={() => setConversionModalGroup(group.productName)} style={{ display: 'inline-flex', alignItems: 'center', gap: 6, color: hasConversion ? '#047857' : '#9a3412', background: hasConversion ? '#f0fdf9' : '#fffaf5', border: `1px solid ${hasConversion ? '#99e6cf' : '#fed7aa'}`, borderRadius: 8, padding: '6px 10px', cursor: 'pointer', fontSize: 12, lineHeight: '18px', fontWeight: 700, fontFamily: 'inherit', appearance: 'none', WebkitAppearance: 'none', boxShadow: '0 1px 2px rgba(15, 23, 42, 0.05)', whiteSpace: 'nowrap' }}>
+                                                            <SettingOutlined style={{ fontSize: 12 }} /> {hasNoConversion ? 'Nhập trực tiếp' : hasConversion ? `Quy đổi · ${units.length}` : 'Thiết lập quy đổi'}
                                                         </button>
                                                     </Tooltip>
                                                 </div>
@@ -3591,10 +3519,25 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
                                                         ...(canViewLedger ? [{ key: 'ledger', label: '📋 Thẻ kho' }] : []),
                                                     ]}
                                                 />
+                                                {(productTabs[group.productName] || 'check') === 'check' && (
+                                                    <div style={{ display: 'flex', alignItems: 'center', gap: 4, background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 8, padding: 3 }}>
+                                                        {([
+                                                            ['pending', `Chưa xong · ${groupRemainingCount}`],
+                                                            ['completed', `Đã xong · ${groupCompletedCount}`],
+                                                            ['all', `Tất cả · ${group.items.length}`],
+                                                        ] as const).map(([key, label]) => (
+                                                            <button
+                                                                key={key}
+                                                                onClick={() => setSkuViewByGroup(prev => ({ ...prev, [group.productName]: key }))}
+                                                                style={{ border: 0, borderRadius: 6, padding: '5px 8px', background: skuView === key ? '#fff' : 'transparent', color: skuView === key ? '#0f766e' : '#64748b', boxShadow: skuView === key ? '0 1px 3px rgba(15, 23, 42, 0.12)' : 'none', fontSize: 11, fontWeight: skuView === key ? 800 : 600, cursor: 'pointer', whiteSpace: 'nowrap' }}
+                                                            >{label}</button>
+                                                        ))}
+                                                    </div>
+                                                )}
                                             </div>
                                             {(productTabs[group.productName] || 'check') === 'check' && (
-                                                <div style={{ width: '100%', overflowX: 'hidden' }}>
-                                                    <table style={{ width: '100%', maxWidth: '100%', borderCollapse: 'collapse', tableLayout: 'fixed', minWidth: 0 }}>
+                                                <div style={{ width: '100%', overflowX: 'auto' }}>
+                                                    <table style={{ width: '100%', borderCollapse: 'collapse', tableLayout: 'fixed', minWidth: 900 }}>
                                                         <thead>
                                                             <tr style={{ background: '#f8fafc' }}>
                                                                 <th style={{ ...S.th, background: '#f8fafc', color: '#64748b', width: 126, textAlign: 'left' }}>SKU</th>
@@ -3695,7 +3638,7 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
                                                             </tr>
                                                         </thead>
                                                         <tbody>
-                                                            {group.items.map((item, idx) => {
+                                                            {visibleGroupItems.map((item, idx) => {
                                                                 const needNote = !!item.requiresNote && !!item.countLocked && !item.note.trim() && item.actualStock !== null;
                                                                 const balanceBlockedByNote = needNote;
                                                                 const rowBg = item.balanced ? '#f6ffed' : (idx % 2 === 0 ? '#fff' : '#fafafa');
@@ -3848,6 +3791,13 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
                                                                     </tr>
                                                                 );
                                                             })}
+                                                            {visibleGroupItems.length === 0 && (
+                                                                <tr>
+                                                                    <td colSpan={maxUnitsCount > 0 ? 9 + (isAdmin ? 1 : 0) : 7 + (isAdmin ? 1 : 0)} style={{ padding: '34px 16px', textAlign: 'center', color: '#64748b', fontSize: 13 }}>
+                                                                        {group.items.length === 0 ? 'Không có SKU trong nhóm này.' : 'Đã hoàn thành toàn bộ SKU của nhóm. Chuyển sang “Đã xong” để xem lại.'}
+                                                                    </td>
+                                                                </tr>
+                                                            )}
                                                         </tbody>
                                                     </table>
                                                 </div>
@@ -3887,221 +3837,6 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
                             </section>
                         </div>
 
-                        {todaySession && selectedItem && (
-                            <div className="stock-check-workspace">
-                                <div className="stock-check-workspace-layout">
-                                    <aside className="stock-check-catalog-panel">
-                                        <div className="stock-check-catalog-heading">
-                                            <div><h3>Danh mục kiểm hàng</h3><span>{totalCount} SKU trong phiên hôm nay</span></div>
-                                            <strong>{balancedCount}/{totalCount}</strong>
-                                        </div>
-                                        <Input.Search
-                                            allowClear
-                                            value={stockCheckSearch}
-                                            onChange={event => setStockCheckSearch(event.target.value)}
-                                            placeholder="Tìm sản phẩm, màu, SKU..."
-                                        />
-                                        <div className="stock-check-catalog-tree">
-                                            {visibleStockCheckGroups.map(group => {
-                                                const isOpen = expandedProductGroups[group.productName]
-                                                    ?? group.items.some(item => normalizeSku(item.sku) === normalizeSku(selectedSku));
-                                                const groupUnitCount = group.items.reduce((sum, item) => sum + handlingUnits.filter(unit => normalizeSku(unit.skuName) === normalizeSku(item.sku) && unit.status !== 'Đã hết').length, 0);
-                                                const groupDone = group.items.filter(item => item.balanced).length;
-                                                return (
-                                                    <div className="stock-check-catalog-group" key={group.productName}>
-                                                        <button type="button" className={`stock-check-catalog-group-button${isOpen ? ' open' : ''}`} onClick={() => toggleProductGroup(group.productName)}>
-                                                            <RightOutlined />
-                                                            <span>{group.productName}</span>
-                                                            <small>{group.items.length} màu · {groupUnitCount} kiện</small>
-                                                        </button>
-                                                        {isOpen && (
-                                                            <div className="stock-check-catalog-children">
-                                                                {group.items.map(item => {
-                                                                    const active = normalizeSku(item.sku) === normalizeSku(selectedSku);
-                                                                    const unitCount = handlingUnits.filter(unit => normalizeSku(unit.skuName) === normalizeSku(item.sku) && unit.status !== 'Đã hết').length;
-                                                                    const dot = stockCheckColorDot(item.color);
-                                                                    return (
-                                                                        <button
-                                                                            type="button"
-                                                                            key={item.sku}
-                                                                            className={`stock-check-catalog-item${active ? ' active' : ''}${item.balanced ? ' complete' : ''}`}
-                                                                            onClick={() => setActiveSku(item.sku)}
-                                                                        >
-                                                                            <span className="stock-check-color-dot" style={{ background: dot.background, borderColor: dot.border }} />
-                                                                            <span className="stock-check-catalog-item-text">
-                                                                                <b>{item.color || item.sku}</b>
-                                                                                <small>{item.sku} · {unitCount} kiện</small>
-                                                                            </span>
-                                                                            <span className="stock-check-catalog-status">{item.balanced ? '✓' : item.actualStock !== null ? 'Đã nhập' : ''}</span>
-                                                                        </button>
-                                                                    );
-                                                                })}
-                                                                {group.items.length > 0 && <div className="stock-check-group-progress">Đã hoàn tất {groupDone}/{group.items.length} SKU</div>}
-                                                            </div>
-                                                        )}
-                                                    </div>
-                                                );
-                                            })}
-                                            {visibleStockCheckGroups.length === 0 && <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="Không tìm thấy SKU" />}
-                                        </div>
-                                    </aside>
-
-                                    <div className="stock-check-workspace-card">
-                                    <header className="stock-check-workspace-header">
-                                        <div>
-                                            <span className="stock-check-eyebrow">SKU {todaySession.items.findIndex(item => item.sku === selectedItem.sku) + 1}/{totalCount}</span>
-                                            <h2>{selectedItem.productName}</h2>
-                                            <div className="stock-check-selected-variant"><span className="stock-check-color-dot" style={{ background: stockCheckColorDot(selectedItem.color).background, borderColor: stockCheckColorDot(selectedItem.color).border }} /><b>{selectedItem.color || selectedItem.sku}</b><code>{selectedItem.sku}</code></div>
-                                        </div>
-                                        <div className="stock-check-header-progress">
-                                            <Progress type="circle" percent={progressPct} size={70} strokeWidth={10} strokeColor="#0f9f6e" />
-                                            <div><strong>{checkedCount}/{totalCount}</strong><span>SKU đã nhập</span></div>
-                                        </div>
-                                    </header>
-
-                                    <div className="stock-check-package-heading">
-                                        <div>
-                                            <h3>Kiểm theo kiện hàng thực tế</h3>
-                                            <p>Dữ liệu, hình ảnh và trạng thái được lấy trực tiếp từ Quản lý kiện hàng.</p>
-                                        </div>
-                                    </div>
-
-                                    {handlingWorkspaceLoading ? (
-                                        <div className="stock-check-package-loading"><Spin /><span>Đang tải kiện hàng...</span></div>
-                                    ) : handlingWorkspaceError ? (
-                                        <Alert type="error" showIcon message={handlingWorkspaceError} />
-                                    ) : selectedSkuUnits.length === 0 ? (
-                                        <Alert
-                                            type="warning"
-                                            showIcon
-                                            message={`SKU ${selectedSku} chưa có kiện hàng để kiểm`}
-                                            description="Hãy tạo và quy đổi kiện tại Quản lý kiện hàng trước. Kiểm hàng không tự suy đoán số lượng từ tồn hệ thống."
-                                        />
-                                    ) : (
-                                        <div className="stock-check-package-grid">
-                                            {selectedSkuUnits.map(unit => {
-                                                const sealed = unit.status === 'Nguyên niêm phong';
-                                                const disabled = selectedItem.balanced || !canEditCounts;
-                                                return (
-                                                    <article key={unit.id} className={`stock-check-package-card${sealed ? ' sealed' : ' opened'}`}>
-                                                        <div className="stock-check-package-card-top">
-                                                            <div><b>{unit.id}</b><span>{unit.packageType}</span></div>
-                                                            <Tag color={sealed ? 'green' : 'orange'}>{isAdmin ? (sealed ? 'Nguyên niêm phong' : unit.status) : 'Cần kiểm thực tế'}</Tag>
-                                                        </div>
-                                                        <img src={handlingUnitImage(unit)} alt={`Minh họa kiện ${unit.id}`} />
-                                                        <div className="stock-check-package-meta">
-                                                            <div><span>Vị trí</span><strong>{handlingUnitLocation(unit)}</strong></div>
-                                                            <div><span>Quy cách</span><strong>{unit.packageLabel || `${unit.initialPcs.toLocaleString('vi-VN')} ${unit.unitName}`}</strong></div>
-                                                            {sealed && unit.currentPcs !== undefined && (
-                                                                <div className="stock-check-package-ledger-stock">
-                                                                    <span>Tồn trên Quản lý kiện hàng</span>
-                                                                    <strong>{Number(unit.currentPcs || 0).toLocaleString('vi-VN')} {unit.unitName}</strong>
-                                                                </div>
-                                                            )}
-                                                            {unit.receiptCode && <div><span>Phiếu nhập</span><strong>{unit.receiptCode}</strong></div>}
-                                                        </div>
-                                                        {sealed && isAdmin ? (
-                                                            <div className="stock-check-sealed-choice">
-                                                                <Radio.Group
-                                                                    value={actualUnitCounts[unit.id] === null || actualUnitCounts[unit.id] === undefined
-                                                                        ? undefined
-                                                                        : sealedMismatchUnits[unit.id] ? 'mismatch' : 'match'}
-                                                                    disabled={disabled}
-                                                                    onChange={event => handleSealedDecision(selectedItem, unit, event.target.value)}
-                                                                    optionType="button"
-                                                                    buttonStyle="solid"
-                                                                    options={[
-                                                                        { label: 'Khớp nguyên kiện', value: 'match' },
-                                                                        { label: 'Không khớp', value: 'mismatch' },
-                                                                    ]}
-                                                                />
-                                                                {sealedMismatchUnits[unit.id] ? (
-                                                                    <div className="stock-check-sealed-mismatch-input">
-                                                                        <label>Số {unit.unitName} thực tế</label>
-                                                                        <InputNumber
-                                                                            autoFocus
-                                                                            min={0}
-                                                                            precision={0}
-                                                                            max={Number(unit.initialPcs || 0) || undefined}
-                                                                            placeholder={`Tối đa ${Number(unit.initialPcs || 0).toLocaleString('vi-VN')}`}
-                                                                            value={actualUnitCounts[unit.id] ?? undefined}
-                                                                            disabled={disabled}
-                                                                            onChange={value => handleUnitActualCount(selectedItem, unit.id, value)}
-                                                                        />
-                                                                    </div>
-                                                                ) : (
-                                                                    <small>Khớp sẽ dùng đúng số tồn đang hiển thị phía trên, không cần nhập lại.</small>
-                                                                )}
-                                                            </div>
-                                                        ) : (
-                                                            <div className="stock-check-opened-count">
-                                                                <label>Số {unit.unitName} thực tế</label>
-                                                                <InputNumber
-                                                                    min={0}
-                                                                    precision={0}
-                                                                    max={Number(unit.initialPcs || 0) || undefined}
-                                                                    placeholder={`Tối đa ${Number(unit.initialPcs || 0).toLocaleString('vi-VN')}`}
-                                                                    value={actualUnitCounts[unit.id] ?? undefined}
-                                                                    disabled={disabled}
-                                                                    onChange={value => handleUnitActualCount(selectedItem, unit.id, value)}
-                                                                />
-                                                                <small>Nhập số đếm thực tế của kiện sau khi kiểm trực tiếp.</small>
-                                                            </div>
-                                                        )}
-                                                    </article>
-                                                );
-                                            })}
-                                        </div>
-                                    )}
-
-                                    {selectedSkuUnits.length > 0 && (
-                                        <div className="stock-check-package-summary">
-                                            <div><span>Số kiện đã nhập</span><strong>{selectedSkuUnits.filter(unit => actualUnitCounts[unit.id] !== null && actualUnitCounts[unit.id] !== undefined).length}/{selectedSkuUnits.length}</strong></div>
-                                            {isAdmin && <>
-                                                <div><span>Tổng trên phần mềm</span><strong>{selectedSkuUnits.reduce((sum, unit) => sum + Number(unit.currentPcs || 0), 0).toLocaleString('vi-VN')}</strong></div>
-                                                <div><span>Chênh lệch thực tế</span><strong>{selectedItem.actualStock === null ? '—' : `${selectedItem.actualStock - selectedSkuUnits.reduce((sum, unit) => sum + Number(unit.currentPcs || 0), 0) > 0 ? '+' : ''}${(selectedItem.actualStock - selectedSkuUnits.reduce((sum, unit) => sum + Number(unit.currentPcs || 0), 0)).toLocaleString('vi-VN')}`}</strong></div>
-                                            </>}
-                                            <div className="total"><span>Tổng kiểm thực tế</span><strong>{selectedItem.actualStock === null ? 'Chưa hoàn tất' : selectedItem.actualStock.toLocaleString('vi-VN')}</strong></div>
-                                        </div>
-                                    )}
-
-                                    <footer className="stock-check-workspace-actions">
-                                        <div className="stock-check-item-status">
-                                            <code>{selectedSku}</code>
-                                            <span>{selectedCatalogItem?.variantName || selectedItem.color || selectedItem.unit}</span>
-                                            {selectedItem.actualStock !== null && <Tag color="blue">Đã lưu số đếm</Tag>}
-                                            {selectedItem.balanced && <Tag color="green">Đã cân bằng</Tag>}
-                                        </div>
-                                        <div>
-                                            <Button
-                                                type="primary"
-                                                icon={<CheckOutlined />}
-                                                loading={balancing[selectedItem.sku]}
-                                                disabled={selectedItem.balanced || !selectedPackageCountsComplete || isLockedDate || (!isAdmin && !isAssignedChecker)}
-                                                onClick={() => confirmCompletePackageSku(selectedItem)}
-                                            >
-                                                {selectedItem.balanced
-                                                    ? 'SKU đã hoàn tất'
-                                                    : selectedItem.requiresNote
-                                                        ? 'Nhập lý do và cân bằng SKU'
-                                                        : 'Hoàn tất SKU hiện tại'}
-                                            </Button>
-                                            <Button
-                                                disabled={todaySession.items.findIndex(item => item.sku === selectedItem.sku) >= todaySession.items.length - 1}
-                                                onClick={() => {
-                                                    const index = todaySession.items.findIndex(item => item.sku === selectedItem.sku);
-                                                    const next = todaySession.items[index + 1];
-                                                    if (next) setActiveSku(next.sku);
-                                                }}
-                                            >
-                                                SKU tiếp theo →
-                                            </Button>
-                                        </div>
-                                    </footer>
-                                    </div>
-                                </div>
-                            </div>
-                        )}
 
                         {isToday && todaySession && totalCount > 0 && !isSessionSubmitted && (
                             <div style={{ padding: '16px 0 24px' }}>
@@ -4213,7 +3948,7 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
                                         <div style={{ fontSize: 13, marginBottom: 24 }}>
                                             {activeTab === 'full'
                                                 ? 'Kiểm toàn bộ sản phẩm.'
-                                                : `Tạm thời chỉ kiểm ${TEMPORARY_DAILY_PRODUCT_NAMES.join(' và ')}.`}
+                                                : `Xoay tua khoảng 40% SKU mỗi dòng ${DAILY_PRODUCT_NAMES.join(', ')}; tối đa 15 SKU/ngày.`}
                                         </div>
                                     </>
                                 ) : (
@@ -4228,7 +3963,7 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
                                                  ? 'Phiên này sẽ kiểm toàn bộ sản phẩm.'
                                                  : activeTab === 'inspection'
                                                      ? 'Tạo phiếu, tìm sản phẩm cần kiểm rồi chọn đúng màu/SKU và người phụ trách.'
-                                                     : 'Kiểm theo từng màu/SKU phân loại thuộc 2 dòng sản phẩm tạm thời.'}
+                                                     : 'Tối đa 15 SKU/ngày. Ưu tiên màu chưa kiểm trong tuần, kết hợp SKU bán nhiều hoặc có chênh lệch.'}
                                          </div>
                                     </>
                                 )}

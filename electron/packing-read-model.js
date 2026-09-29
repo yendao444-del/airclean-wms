@@ -141,11 +141,7 @@ function normalizeCommissionVersion(value, fallback = {}) {
   };
 }
 
-function commissionForTimestamp(rawCommission, timestamp) {
-  const orderTime = Date.parse(timestamp || "");
-  if (Number.isFinite(orderTime) && orderTime < PACKING_POLICY_START_MS) {
-    return { legacy: true, rates: { easy: LEGACY_PACKING_UNIT_PRICE } };
-  }
+function prepareCommission(rawCommission) {
   const current = normalizeCommissionVersion(rawCommission);
   const history = (Array.isArray(rawCommission?.history) ? rawCommission.history : [])
     .map((version) => ({
@@ -154,6 +150,14 @@ function commissionForTimestamp(rawCommission, timestamp) {
     }))
     .filter((version) => Number.isFinite(version.effectiveAt))
     .sort((left, right) => left.effectiveAt - right.effectiveAt);
+  return { current, history };
+}
+
+function commissionForTimestamp({ current, history }, timestamp) {
+  const orderTime = Date.parse(timestamp || "");
+  if (Number.isFinite(orderTime) && orderTime < PACKING_POLICY_START_MS) {
+    return { legacy: true, rates: { easy: LEGACY_PACKING_UNIT_PRICE } };
+  }
   if (Number.isFinite(orderTime)) {
     for (let index = history.length - 1; index >= 0; index -= 1) {
       if (history[index].effectiveAt <= orderTime) return history[index].commission;
@@ -169,7 +173,7 @@ function saleMultiplierForDate(commission, timestamp) {
   if (multiplier <= 1 || !timestamp || !Array.isArray(commission.saleDates)) return 1;
   const date = new Date(timestamp);
   if (Number.isNaN(date.getTime())) return 1;
-  const dateKey = date.toLocaleDateString("sv-SE", { timeZone: "Asia/Bangkok" });
+  const dateKey = bangkokDateFormatter.format(date);
   const monthDay = dateKey.slice(5);
   const effectiveDateKey = commission.saleEffectiveAt ? getBangkokDateKey(commission.saleEffectiveAt) : "";
   if (effectiveDateKey && dateKey < effectiveDateKey) return 1;
@@ -180,17 +184,21 @@ function saleMultiplierForDate(commission, timestamp) {
     : 1;
 }
 
+const bangkokDateFormatter = new Intl.DateTimeFormat("sv-SE", { timeZone: "Asia/Bangkok" });
+
 function getBangkokDateKey(value) {
   const date = new Date(value);
   return Number.isNaN(date.getTime())
     ? ""
-    : date.toLocaleDateString("sv-SE", { timeZone: "Asia/Bangkok" });
+    : bangkokDateFormatter.format(date);
 }
 
 // One compact row per packer/day keeps the payroll path small while preserving
 // order counts and weekly ranking semantics used by the renderer.
 function buildPackingPayrollSummary(ecommerceRows, combos, rawCommission) {
   const detailedRows = buildPackingReadModel(ecommerceRows, combos);
+  // SKU maps and history are shared by all orders in this snapshot.
+  const preparedCommission = prepareCommission(rawCommission);
   const buckets = new Map();
   detailedRows.forEach((order) => {
     const dayKey = getBangkokDateKey(order.timestamp);
@@ -213,7 +221,8 @@ function buildPackingPayrollSummary(ecommerceRows, combos, rawCommission) {
     }
     bucket.orderCount += 1;
     bucket.totalSKU += Number(order.totalSKU || 0);
-    const commission = commissionForTimestamp(rawCommission, order.timestamp);
+    const commission = commissionForTimestamp(preparedCommission, order.timestamp);
+    const saleMultiplier = saleMultiplierForDate(commission, order.timestamp);
     const itemByLevel = new Map(bucket.items.map((item) => [item.packingLevel, item]));
     order.items.forEach((item) => {
       const level = commission.legacy
@@ -224,7 +233,7 @@ function buildPackingPayrollSummary(ecommerceRows, combos, rawCommission) {
         : Math.max(0, Number(item.packingUnits ?? item.quantity ?? 1));
       const unitPrice = commission.legacy
         ? LEGACY_PACKING_UNIT_PRICE
-        : Number(commission.rates[level] || 0) * saleMultiplierForDate(commission, order.timestamp);
+        : Number(commission.rates[level] || 0) * saleMultiplier;
       const aggregate = itemByLevel.get(level) || {
         sku: `__SUMMARY__${level}`,
         productName: `Tổng hợp ${level}`,

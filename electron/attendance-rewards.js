@@ -46,29 +46,24 @@ function parseDateKey(value) {
   return Number.isNaN(date.getTime()) ? null : `${match[1]}-${match[2]}-${match[3]}`;
 }
 
+const dateFormatter = new Intl.DateTimeFormat('en-CA', {
+  timeZone: 'Asia/Bangkok', year: 'numeric', month: '2-digit', day: '2-digit',
+});
+const partsFormatter = new Intl.DateTimeFormat('en-US', {
+  timeZone: 'Asia/Bangkok', year: 'numeric', month: '2-digit', day: '2-digit',
+  hour: '2-digit', minute: '2-digit', hour12: false,
+});
+
 function dateKeyFromTimestamp(value) {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return '';
-  return new Intl.DateTimeFormat('en-CA', {
-    timeZone: 'Asia/Bangkok',
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-  }).format(date);
+  return dateFormatter.format(date);
 }
 
 function bangkokParts(value) {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return null;
-  const parts = new Intl.DateTimeFormat('en-US', {
-    timeZone: 'Asia/Bangkok',
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    hour12: false,
-  }).formatToParts(date);
+  const parts = partsFormatter.formatToParts(date);
   const result = Object.fromEntries(parts.map((part) => [part.type, part.value]));
   return {
     date: `${result.year}-${result.month}-${result.day}`,

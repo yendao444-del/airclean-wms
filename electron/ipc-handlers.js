@@ -1,5 +1,6 @@
 const { ipcMain, dialog, shell, app, nativeImage, safeStorage } = require("electron");
 const path = require("path");
+const { selectDailyStockCheck, POLICY_VERSION: STOCK_CHECK_SELECTION_VERSION } = require("./stock-check-selection.cjs");
 require("dotenv").config({ path: path.join(__dirname, "..", ".env") });
 
 function getTrustedDevelopmentOrigin() {
@@ -266,13 +267,14 @@ const {
 } = require("./attendance-rewards");
 const { reconcileEcommerceOrderFines } = require("./ecommerce-order-fines");
 const { reconcilePrepackShortfallFines } = require("./prepack-fines");
+const { recordShiftEvents, readShiftPolicy, reconcileShiftFines, assigneeFor: shiftAssigneeFor, dayKey: shiftDayKey } = require("./handling-unit-shift-policy.cjs");
 
 // Fine reconciliation scans the shared attendance ledger and can be expensive
 // on a large order history. Keep it out of the pickup/resolve response path.
 let ecommerceFineReconciliationPromise = null;
 function scheduleEcommerceOrderFineReconciliation(reason = "action") {
   if (!prisma || ecommerceFineReconciliationPromise) return;
-  ecommerceFineReconciliationPromise = enqueueAttendanceMaintenance("ecommerce", () => reconcileEcommerceOrderFines(prisma, { now: new Date() }))
+  ecommerceFineReconciliationPromise = enqueueAttendanceMaintenance("ecommerce", () => reconcileEcommerceOrderFines(getPrismaDirectTx(), { now: new Date() }))
     .catch((error) => {
       console.warn(`[Ecommerce Fines] Background reconciliation failed (${reason}):`, error.message);
     })
@@ -309,6 +311,8 @@ else delete process.env.DIRECT_URL;
 const { PrismaClient, Prisma } = require("@prisma/client");
 const fs = require("fs");
 const { buildPackingReadModel, buildPackingPayrollSummary } = require("./packing-read-model");
+const { readPackingPayrollOrders } = require("./packing-payroll-source");
+const { createLoginDeadline, loginErrorMessage } = require("./login-deadline");
 const {
   calculateMarketplaceSlaDeadline,
   getBangkokDateParts,
@@ -561,8 +565,17 @@ setTimeout(() => void cleanupExpiredPrepackEvidence().catch((error) => console.w
 setInterval(() => void cleanupExpiredPrepackEvidence().catch((error) => console.warn("Prepack evidence cleanup error:", error?.message || error)), 24 * 60 * 60 * 1000);
 // Reconcile completed prepack days in the background so a new page visit is
 // not required for the end-of-day penalty to be recorded.
-setTimeout(() => void enqueueAttendanceMaintenance("prepack", () => reconcilePrepackShortfallFines(prisma, { now: new Date() })).catch((error) => console.warn("Prepack fine reconciliation error:", error?.message || error)), 90_000);
-setInterval(() => void enqueueAttendanceMaintenance("prepack", () => reconcilePrepackShortfallFines(prisma, { now: new Date() })).catch((error) => console.warn("Prepack fine reconciliation error:", error?.message || error)), 15 * 60 * 1000);
+setTimeout(() => void enqueueAttendanceMaintenance("prepack", () => reconcilePrepackShortfallFines(getPrismaDirectTx(), { now: new Date() })).catch((error) => console.warn("Prepack fine reconciliation error:", error?.message || error)), 90_000);
+setInterval(() => void enqueueAttendanceMaintenance("prepack", () => reconcilePrepackShortfallFines(getPrismaDirectTx(), { now: new Date() })).catch((error) => console.warn("Prepack fine reconciliation error:", error?.message || error)), 15 * 60 * 1000);
+async function maintainHandlingUnitShiftFines() {
+  try {
+    return await enqueueAttendanceMaintenance("handling-unit-shift", () => reconcileShiftFines(getPrismaDirectTx()));
+  } finally {
+    invalidateAttendanceSnapshotCaches();
+  }
+}
+setTimeout(() => void maintainHandlingUnitShiftFines().catch((error) => console.warn("Handling-unit shift fines:", error.message)), 95_000);
+setInterval(() => void maintainHandlingUnitShiftFines().catch((error) => console.warn("Handling-unit shift fines:", error.message)), 15 * 60 * 1000);
 
 // Compensation is limited to exact object keys uploaded by the current IPC
 // call. It cannot delete pre-existing evidence and is safe in data-safety mode.
@@ -7659,6 +7672,7 @@ ipcMain.handle("handlingUnits:getWorkspace", async (_event, options = {}) => {
         packagingSpecs: packagingSpecs,
         qrLabels,
         suppliers,
+        shiftCheckPolicy: blindStockCheck ? undefined : await readShiftPolicy(prisma),
         recentTransactions: blindStockCheck
           ? []
           : Array.isArray(recentTransactions)
@@ -10336,6 +10350,11 @@ async function markHandlingUnitWithdrawal(tx, code) {
 }
 
 async function appendHandlingUnitsTransactions(tx, entries) {
+  // Legacy callers pass the client instead of a transaction. Both histories
+  // must still commit together under transaction-scoped locks.
+  if (typeof tx.$transaction === "function") {
+    return tx.$transaction((transaction) => appendHandlingUnitsTransactions(transaction, entries));
+  }
   try {
     const key = "handlingUnitsTransactionsJson";
     // AppConfig là một JSON dùng chung giữa nhiều máy. Advisory transaction
@@ -10355,6 +10374,7 @@ async function appendHandlingUnitsTransactions(tx, entries) {
         ...entry,
       }),
     );
+    await recordShiftEvents(tx, nextItems);
     items = [...nextItems, ...items].slice(0, 500);
     await tx.appConfig.upsert({
       where: { key },
@@ -12905,15 +12925,6 @@ const isHandlingUnitCompletedCheckHistory = (item) =>
     String(item?.type || ""),
   );
 
-const toLocalDayKey = (value) => {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return "";
-  const year = date.getFullYear();
-  const month = String(date.getMonth() + 1).padStart(2, "0");
-  const day = String(date.getDate()).padStart(2, "0");
-  return `${year}-${month}-${day}`;
-};
-
 ipcMain.handle("handlingUnits:finalizeShiftCheck", async (_event, payload = {}) => {
   const idempotencyKey = String(payload.idempotencyKey || "").trim();
   const requestKey = idempotencyKey ? `shift-check:${idempotencyKey}` : null;
@@ -12922,7 +12933,10 @@ ipcMain.handle("handlingUnits:finalizeShiftCheck", async (_event, payload = {}) 
   }
   if (requestKey) handlingUnitPickRequests.add(requestKey);
   try {
-    requireRole("admin", "manager");
+    requireRole("admin", "manager", "staff");
+    if (currentSession.role === "staff" && currentSession.username !== shiftAssigneeFor(shiftDayKey(new Date()))) {
+      throw new Error("Bạn không phải người được phân công kiểm cuối ca hôm nay.");
+    }
     if (!prisma) throw new Error("Không kết nối được cơ sở dữ liệu kiện hàng.");
     const items = Array.isArray(payload.items) ? payload.items : [];
     if (items.length === 0 || items.length > 100) {
@@ -12973,7 +12987,9 @@ ipcMain.handle("handlingUnits:finalizeShiftCheck", async (_event, payload = {}) 
         const parsed = JSON.parse(historyConfig?.value || "[]");
         history = Array.isArray(parsed) ? parsed : [];
       } catch {}
-      const todayKey = toLocalDayKey(new Date());
+      const todayKey = shiftDayKey(new Date());
+      const shiftPolicy = await readShiftPolicy(tx);
+      const outstandingCodes = new Set(shiftPolicy.outstanding.map((entry) => entry.code));
       const checked = [];
       const historyEntries = [];
 
@@ -13002,13 +13018,13 @@ ipcMain.handle("handlingUnits:finalizeShiftCheck", async (_event, payload = {}) 
           .filter(
             (entry) =>
               isHandlingUnitWithdrawalHistory(entry) &&
-              (isPendingCheck || toLocalDayKey(entry.createdAt) === todayKey),
+              (isPendingCheck || shiftDayKey(entry.createdAt) === todayKey),
           )
           .reduce((latest, entry) => Math.max(latest, new Date(entry.createdAt).getTime() || 0), 0);
         const latestCheckAt = unitHistory
           .filter(isHandlingUnitCompletedCheckHistory)
           .reduce((latest, entry) => Math.max(latest, new Date(entry.createdAt).getTime() || 0), 0);
-        if (!isPendingCheck && (!latestWithdrawalAt || latestCheckAt >= latestWithdrawalAt)) {
+        if (!isPendingCheck && !outstandingCodes.has(item.code) && (!latestWithdrawalAt || latestCheckAt >= latestWithdrawalAt)) {
           throw new Error(`Kiện [${item.code}] không ở trạng thái chờ kiểm và không có lượt rút mới cần kiểm trong hôm nay.`);
         }
 
@@ -17607,6 +17623,7 @@ let mobileDailyEvidenceSender = null;
 const TASK_PENALTY_KEY_PREFIX = "dailyTaskEvidencePenalty:";
 const ASSIGNMENT_EVIDENCE_PENALTY_KEY_PREFIX = "assignmentEvidencePenalty:";
 const REJECTED_EVIDENCE_PENALTY_KEY_PREFIX = "rejectedEvidencePenalty:";
+const { isTemporarilyUnfinedTask, selectTemporarilyUnfinedPenaltyKeys } = require("./temporary-task-fines");
 const getDailyTaskReferenceCode = (taskId) =>
   `CV-${String(taskId ?? "").padStart(4, "0")}`;
 
@@ -17980,6 +17997,7 @@ function getEvidenceHistoryPayload(evidence) {
 }
 
 async function buildRejectedEvidencePenalties(task, attachments, evidence, reviewedAt, reviewedBy, rejectionReason) {
+  if (isTemporarilyUnfinedTask(task?.title)) return [];
   const recipients = await getActiveTaskRecipients(
     getTaskRecipients(task, attachments),
   );
@@ -18497,13 +18515,15 @@ async function createEvidencePenaltyIfDue(
   task,
   now = new Date(),
   knownActiveUsers,
+  knownPenaltyRows,
 ) {
+  if (isTemporarilyUnfinedTask(task?.title)) return [];
   const attachments = parseTaskAttachments(task.attachments);
   const evidence = attachments.evidence || {};
   if (!evidence.required) return null;
   if (attachments?.archive?.archived || task.status === "cancelled") return null;
   if (task.type === "assignment")
-    return createAssignmentEvidencePenaltyIfDue(task, now, knownActiveUsers);
+    return createAssignmentEvidencePenaltyIfDue(task, now, knownActiveUsers, knownPenaltyRows);
   if (!task.assignee || !isFixedAssignee(attachments)) return null;
 
   const dueAt = new Date(task.dueDate);
@@ -18544,13 +18564,14 @@ async function createEvidencePenaltyIfDue(
   // Keep legacy rows intact in safety mode. A single-recipient legacy row is
   // already the correct penalty and must not be duplicated.
   const legacyKey = `${TASK_PENALTY_KEY_PREFIX}${task.id}:${dueKey}`;
-  const legacyPenalty = await prisma.appConfig.findUnique({
-    where: { key: legacyKey },
-  });
+  const legacyPenalty = knownPenaltyRows
+    ? knownPenaltyRows.get(legacyKey)
+    : await prisma.appConfig.findUnique({ where: { key: legacyKey } });
   if (legacyPenalty && recipients.length === 1) return [];
 
   for (const [index, assignee] of recipients.entries()) {
     const key = `${TASK_PENALTY_KEY_PREFIX}${task.id}:${dueKey}:${assignee}`;
+    if (knownPenaltyRows?.has(key)) continue;
     const penalty = {
       id: key,
       taskId: task.id,
@@ -18571,6 +18592,7 @@ async function createEvidencePenaltyIfDue(
         skipDuplicates: true,
       });
       if (write.count === 0) continue;
+      knownPenaltyRows?.set(key, { key, value: JSON.stringify(penalty) });
       created.push(penalty);
       void logActivity({
         module: "daily_tasks",
@@ -18684,20 +18706,24 @@ async function repairLegacyAssignmentPenaltySchedule(
   dueAt,
   scheduleAnchor,
   now,
+  knownPenaltyRows,
 ) {
   if (DATA_SAFETY_MODE) return;
   const dueKey = dueAt.toISOString();
   const prefix = `${ASSIGNMENT_EVIDENCE_PENALTY_KEY_PREFIX}${task.id}:${dueKey}:`;
   const legacyPrefix = `${TASK_PENALTY_KEY_PREFIX}${task.id}:${dueKey}:`;
-  const records = await prisma.appConfig.findMany({
-    where: {
-      OR: [
-        { key: { startsWith: prefix } },
-        { key: { startsWith: legacyPrefix } },
-      ],
-    },
-    select: { key: true, value: true },
-  });
+  const records = knownPenaltyRows
+    ? [...knownPenaltyRows.values()].filter((row) =>
+        row.key.startsWith(prefix) || row.key.startsWith(legacyPrefix))
+    : await prisma.appConfig.findMany({
+        where: {
+          OR: [
+            { key: { startsWith: prefix } },
+            { key: { startsWith: legacyPrefix } },
+          ],
+        },
+        select: { key: true, value: true },
+      });
 
   for (const record of records) {
     let penalty;
@@ -18713,21 +18739,25 @@ async function repairLegacyAssignmentPenaltySchedule(
       // Another caller may be reconciling the same task. deleteMany is
       // intentionally idempotent when the first caller already removed it.
       await prisma.appConfig.deleteMany({ where: { key: record.key } });
+      knownPenaltyRows?.delete(record.key);
       continue;
     }
 
     if (penalty.penaltyAt !== expectedAt.toISOString()) {
-      await prisma.appConfig.updateMany({
+      const repaired = {
+        ...penalty,
+        cycle,
+        multiplier: Number(penalty?.multiplier) || cycle,
+        penaltyAt: expectedAt.toISOString(),
+      };
+      const update = await prisma.appConfig.updateMany({
         where: { key: record.key },
-        data: {
-          value: JSON.stringify({
-            ...penalty,
-            cycle,
-            multiplier: Number(penalty?.multiplier) || cycle,
-            penaltyAt: expectedAt.toISOString(),
-          }),
-        },
+        data: { value: JSON.stringify(repaired) },
       });
+      if (knownPenaltyRows) {
+        if (update.count > 0) knownPenaltyRows.set(record.key, { key: record.key, value: JSON.stringify(repaired) });
+        else knownPenaltyRows.delete(record.key);
+      }
     }
   }
 }
@@ -18736,6 +18766,7 @@ async function createAssignmentEvidencePenaltyIfDue(
   task,
   now = new Date(),
   knownActiveUsers,
+  knownPenaltyRows,
 ) {
   const attachments = parseTaskAttachments(task.attachments);
   const evidence = attachments.evidence || {};
@@ -18762,7 +18793,7 @@ async function createAssignmentEvidencePenaltyIfDue(
   if (recipients.length === 0) return [];
   const scheduleAnchor = getAssignmentPenaltyScheduleAnchor(task, dueAt);
 
-  await repairLegacyAssignmentPenaltySchedule(task, dueAt, scheduleAnchor, now);
+  await repairLegacyAssignmentPenaltySchedule(task, dueAt, scheduleAnchor, now, knownPenaltyRows);
 
   const checkpoints = getAssignmentEvidencePenaltyCheckpoints(
     scheduleAnchor,
@@ -18784,13 +18815,14 @@ async function createAssignmentEvidencePenaltyIfDue(
       // so existing fines are retained without creating a duplicate.
       const legacyKey = `${TASK_PENALTY_KEY_PREFIX}${task.id}:${dueKey}:${assignee}`;
       if (checkpoint.cycle === 1) {
-        const legacyPenalty = await prisma.appConfig.findUnique({
-          where: { key: legacyKey },
-        });
+        const legacyPenalty = knownPenaltyRows
+          ? knownPenaltyRows.get(legacyKey)
+          : await prisma.appConfig.findUnique({ where: { key: legacyKey } });
         if (legacyPenalty) continue;
       }
 
       const key = `${ASSIGNMENT_EVIDENCE_PENALTY_KEY_PREFIX}${task.id}:${dueKey}:${checkpoint.cycle}:${assignee}`;
+      if (knownPenaltyRows?.has(key)) continue;
       const penalty = {
         id: key,
         taskId: task.id,
@@ -18811,6 +18843,7 @@ async function createAssignmentEvidencePenaltyIfDue(
           skipDuplicates: true,
         });
         if (write.count === 0) continue;
+        knownPenaltyRows?.set(key, { key, value: JSON.stringify(penalty) });
         created.push(penalty);
         void logActivity({
           module: "daily_tasks",
@@ -18835,7 +18868,7 @@ function reconcileEvidencePenalties() {
   if (evidencePenaltyReconcilePromise) return evidencePenaltyReconcilePromise;
   evidencePenaltyReconcilePromise = (async () => {
     await cleanupPrematureDailyEvidencePenalties();
-    const [tasks, activeUsers] = await Promise.all([
+    const [tasks, activeUsers, penaltyRows] = await Promise.all([
       prisma.dailyTask.findMany({
         // Completed rows are included deliberately: old clients could mark a
         // proof-required task complete without uploading an image.
@@ -18856,13 +18889,22 @@ function reconcileEvidencePenalties() {
         where: { status: "active" },
         select: { username: true, fullName: true },
       }),
+      prisma.appConfig.findMany({
+        where: { OR: [
+          { key: { startsWith: TASK_PENALTY_KEY_PREFIX } },
+          { key: { startsWith: ASSIGNMENT_EVIDENCE_PENALTY_KEY_PREFIX } },
+        ] },
+        select: { key: true, value: true },
+      }),
     ]);
+    const knownPenaltyRows = new Map(penaltyRows.map((row) => [row.key, row]));
     const created = [];
     for (const task of tasks) {
       const penalties = await createEvidencePenaltyIfDue(
         task,
         new Date(),
         activeUsers,
+        knownPenaltyRows,
       );
       if (Array.isArray(penalties)) created.push(...penalties);
     }
@@ -18871,6 +18913,31 @@ function reconcileEvidencePenalties() {
   return evidencePenaltyReconcilePromise.finally(() => {
     evidencePenaltyReconcilePromise = null;
   });
+}
+
+// Retire only system penalties for the temporarily unfined Unicare task.
+// Match the stored title/detail as well as the current task ID because older
+// penalty formats did not persist taskTitle.
+async function cleanupTemporarilyUnfinedTaskPenalties() {
+  const direct = getPrismaDirectTx();
+  const [tasks, rows] = await Promise.all([
+    direct.dailyTask.findMany({
+      where: { title: { contains: "UNICARE", mode: "insensitive" } },
+      select: { id: true, title: true },
+    }),
+    direct.appConfig.findMany({
+      where: { OR: [
+        { key: { startsWith: TASK_PENALTY_KEY_PREFIX } },
+        { key: { startsWith: ASSIGNMENT_EVIDENCE_PENALTY_KEY_PREFIX } },
+        { key: { startsWith: REJECTED_EVIDENCE_PENALTY_KEY_PREFIX } },
+      ] },
+      select: { key: true, value: true },
+    }),
+  ]);
+  const taskIds = new Set(tasks.filter((task) => isTemporarilyUnfinedTask(task.title)).map((task) => Number(task.id)));
+  const keys = selectTemporarilyUnfinedPenaltyKeys(rows, taskIds);
+  if (keys.length) await direct.appConfig.deleteMany({ where: { key: { in: keys } } });
+  return keys.length;
 }
 
 async function reconcileSnapshotEvidencePenalties(now = new Date(), range = {}) {
@@ -20618,6 +20685,7 @@ ipcMain.handle("dailyTasks:listEvidencePenalties", async (_event, options = {}) 
       startDate: options.startDate,
       endDate: options.endDate,
     });
+    await cleanupTemporarilyUnfinedTaskPenalties();
     const rows = await prisma.appConfig.findMany({
       where: {
         OR: [
@@ -23496,48 +23564,37 @@ ipcMain.handle(
       const startedAt = Date.now();
       const dateFilter = getPackingDateFilter({ since, until });
       const rangeKey = `${dateFilter.gte?.toISOString() || "all"}|${dateFilter.lte?.toISOString() || "all"}`;
-      const before = await getPackingSourceRevision(dateFilter);
       const actorCacheKey = actor.role === "staff"
-        ? normalizeActorName(actor.username || actor.fullName)
+        ? JSON.stringify([actor.role, normalizeActorName(actor.username), normalizeActorName(actor.fullName)])
         : "all";
-      const cacheKey = `${rangeKey}|${before.revision}|${actorCacheKey}|${JSON.stringify(commission || {})}`;
-      const cached = packingPayrollSummaryCache.get(cacheKey);
-      if (cached) {
-        console.log(`[Perf] ecommerceExports:getPackingPayrollSummary rows=${cached.length} cached=true ms=${Date.now() - startedAt}`);
-        return { success: true, data: cached, revision: before.revision, cached: true };
-      }
-      const existingRequest = packingPayrollSummaryInFlight.get(cacheKey);
+      const requestKey = `${rangeKey}|${actorCacheKey}|${JSON.stringify(commission || {})}`;
+      // Coalesce before the revision queries, including cold-cache loads.
+      const existingRequest = packingPayrollSummaryInFlight.get(requestKey);
       if (existingRequest) return await existingRequest;
 
       const request = (async () => {
+        const revisionStartedAt = Date.now();
+        const before = await getPackingSourceRevision(dateFilter);
+        const sourceStartedAt = Date.now();
+        const cacheKey = `${rangeKey}|${before.revision}|${actorCacheKey}|${JSON.stringify(commission || {})}`;
+        const cached = packingPayrollSummaryCache.get(cacheKey);
+        if (cached) {
+          console.log(`[Perf] ecommerceExports:getPackingPayrollSummary rows=${cached.length} cached=true ms=${Date.now() - startedAt}`);
+          return { success: true, data: cached, revision: before.revision, cached: true };
+        }
         const [exports, combos] = await Promise.all([
-          prisma.ecommerceExport.findMany({
-            where: {
-              status: "completed",
-              ...(Object.keys(dateFilter).length > 0 ? { ecommerceExportDate: dateFilter } : {}),
-            },
-            select: {
-              id: true,
-              customerName: true,
-              ecommerceExportCode: true,
-              orderNumber: true,
-              ecommerceExportDate: true,
-              items: true,
-              createdBy: true,
-              pickedBy: true,
-            },
-            orderBy: [{ ecommerceExportDate: "desc" }, { id: "desc" }],
-            take: PACKING_READ_MODEL_MAX_ROWS + 1,
-          }),
+          readPackingPayrollOrders(prisma, Prisma, dateFilter, PACKING_READ_MODEL_MAX_ROWS),
           prisma.comboProduct.findMany({
             select: { sku: true, items: true, status: true },
             orderBy: { createdAt: "desc" },
           }),
         ]);
+        const sourceRowsReadyAt = Date.now();
         if (exports.length > PACKING_READ_MODEL_MAX_ROWS) {
           throw new Error(`Dữ liệu đóng gói của kỳ vượt ${PACKING_READ_MODEL_MAX_ROWS.toLocaleString("vi-VN")} đơn.`);
         }
         const after = await getPackingSourceRevision(dateFilter);
+        const validatedAt = Date.now();
         if (before.revision !== after.revision) {
           throw new Error("Dữ liệu đóng gói vừa thay đổi. Vui lòng tải lại để đối chiếu chính xác.");
         }
@@ -23547,6 +23604,7 @@ ipcMain.handle(
           status: "completed",
         }));
         const allData = buildPackingPayrollSummary(normalizedExports, combos, commission);
+        const modelReadyAt = Date.now();
         const actorKeys = [actor.username, actor.fullName]
           .map((value) => normalizeActorName(value))
           .filter(Boolean);
@@ -23560,14 +23618,20 @@ ipcMain.handle(
         while (packingPayrollSummaryCache.size > 6) {
           packingPayrollSummaryCache.delete(packingPayrollSummaryCache.keys().next().value);
         }
-        console.log(`[Perf] ecommerceExports:getPackingPayrollSummary rows=${data.length} cached=false ms=${Date.now() - startedAt}`);
+        console.log(
+          `[Perf] ecommerceExports:getPackingPayrollSummary rows=${data.length} cached=false ms=${Date.now() - startedAt}`
+          + ` revision=${sourceStartedAt - revisionStartedAt}ms`
+          + ` source=${sourceRowsReadyAt - sourceStartedAt}ms`
+          + ` validate=${validatedAt - sourceRowsReadyAt}ms`
+          + ` model=${modelReadyAt - validatedAt}ms`,
+        );
         return { success: true, data, revision: before.revision, cached: false };
       })();
-      packingPayrollSummaryInFlight.set(cacheKey, request);
+      packingPayrollSummaryInFlight.set(requestKey, request);
       try {
         return await request;
       } finally {
-        if (packingPayrollSummaryInFlight.get(cacheKey) === request) packingPayrollSummaryInFlight.delete(cacheKey);
+        if (packingPayrollSummaryInFlight.get(requestKey) === request) packingPayrollSummaryInFlight.delete(requestKey);
       }
     } catch (error) {
       console.error("Get packing payroll summary error:", error);
@@ -29945,19 +30009,21 @@ async function getAttendanceCoreSnapshot() {
     }
 
     const rows = await prisma.$queryRaw(Prisma.sql`
+      WITH source AS MATERIALIZED (
+        SELECT "value"::jsonb AS data, "updatedAt" FROM "AppConfig"
+        WHERE "key" = 'attendanceData' LIMIT 1
+      )
       SELECT jsonb_set(
-        "value"::jsonb,
+        data,
         '{lockedPeriods}',
         COALESCE((
           SELECT jsonb_agg(period_row - 'payrollSnapshot')
           FROM jsonb_array_elements(
-            COALESCE(("value"::jsonb)->'lockedPeriods', '[]'::jsonb)
+            COALESCE(data->'lockedPeriods', '[]'::jsonb)
           ) AS period_row
         ), '[]'::jsonb)
       )::text AS "value", "updatedAt"
-      FROM "AppConfig"
-      WHERE "key" = 'attendanceData'
-      LIMIT 1
+      FROM source
     `);
     const record = rows?.[0] || null;
     let data = {};
@@ -30042,7 +30108,12 @@ function startAttendanceMaintenance() {
   const task = (async () => {
     const maintenanceStartedAt = Date.now();
     try {
-      await enqueueAttendanceMaintenance("ecommerce", () => reconcileEcommerceOrderFines(prisma, { now: new Date() }));
+      await maintainHandlingUnitShiftFines();
+    } catch (error) {
+      console.warn("[Handling-unit shift fines]", error.message);
+    }
+    try {
+      await enqueueAttendanceMaintenance("ecommerce", () => reconcileEcommerceOrderFines(getPrismaDirectTx(), { now: new Date() }));
     } catch (error) {
       console.warn("[Ecommerce Fines] Không đối soát được phạt đơn TMDT:", error.message);
     } finally {
@@ -30056,7 +30127,7 @@ function startAttendanceMaintenance() {
       invalidateAttendanceSnapshotCaches();
     }
     try {
-      await enqueueAttendanceMaintenance("prepack", () => reconcilePrepackShortfallFines(prisma, { now: new Date() }));
+      await enqueueAttendanceMaintenance("prepack", () => reconcilePrepackShortfallFines(getPrismaDirectTx(), { now: new Date() }));
     } catch (error) {
       console.warn("[Prepack Fines] Không đối soát được phạt thiếu đóng gói:", error.message);
     } finally {
@@ -30476,7 +30547,7 @@ function enqueueAttendanceReconcile(options = {}) {
   const key = options.dateKey ? `date:${String(options.dateKey)}` : "all";
   const existing = attendanceReconcileInFlight.get(key);
   if (existing) return existing;
-  const task = enqueueAttendanceDataWrite(() => reconcileMissingSeasonalScheduleFines(prisma, options));
+  const task = enqueueAttendanceDataWrite(() => reconcileMissingSeasonalScheduleFines(getPrismaDirectTx(), options));
   attendanceReconcileInFlight.set(key, task);
   task.finally(() => {
     if (attendanceReconcileInFlight.get(key) === task) attendanceReconcileInFlight.delete(key);
@@ -30500,6 +30571,14 @@ function isTransactionWriteConflict(error) {
     error?.code === "P2034" ||
     /write conflict|deadlock|could not serialize/i.test(String(error?.message || ""))
   );
+}
+
+function isAttendanceAutosaveRetryableError(error) {
+  const detail = `${String(error?.message || "")} ${String(error?.meta?.error || "")}`;
+  return isTransactionWriteConflict(error)
+    || error?.code === "P2028"
+    || error?.code === "55P03"
+    || /lock timeout|transaction already closed|expired transaction/i.test(detail);
 }
 
 const waitForRetry = (attempt) =>
@@ -30527,9 +30606,14 @@ ipcMain.handle("appConfig:set", async (event, key, value, expectedUpdatedAt) => 
       config = await enqueueAttendanceDataWrite(async () => {
         let lastConflict = null;
         for (let attempt = 0; attempt < 5; attempt++) {
+          const transactionStartedAt = Date.now();
           try {
-            return await prisma.$transaction(
+            const saved = await getPrismaDirectTx().$transaction(
               async (tx) => {
+                // Waiting for another workstation's advisory lock counts toward
+                // Prisma's interactive transaction timeout. Retry a short lock
+                // wait in a fresh transaction instead of expiring mid-write.
+                await tx.$executeRaw`SET LOCAL lock_timeout = '7000ms'`;
                 await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('attendanceData'))`;
                 const current = await tx.appConfig.findUnique({ where: { key } });
                 let valueToSave = { ...(value || {}), employees: [] };
@@ -30609,17 +30693,24 @@ ipcMain.handle("appConfig:set", async (event, key, value, expectedUpdatedAt) => 
                     ...mergedFineLedger,
                   };
                 }
+                const serializedValue = JSON.stringify(valueToSave);
+                if (current?.value === serializedValue) return current;
                 return tx.appConfig.upsert({
                   where: { key },
-                  update: { value: JSON.stringify(valueToSave) },
-                  create: { key, value: JSON.stringify(valueToSave) },
+                  update: { value: serializedValue },
+                  create: { key, value: serializedValue },
                 });
               },
-              { isolationLevel: "Serializable", timeout: 10000, maxWait: 10000 },
+              { isolationLevel: "Serializable", timeout: 25000, maxWait: 10000 },
             );
+            console.info(`[Attendance autosave] attempt=${attempt + 1} transaction=${Date.now() - transactionStartedAt}ms`);
+            return saved;
           } catch (error) {
-            if (!isTransactionWriteConflict(error)) throw error;
+            if (!isAttendanceAutosaveRetryableError(error)
+              || attempt === 4
+              || (error?.code === "P2028" && attempt >= 2)) throw error;
             lastConflict = error;
+            console.warn(`[Attendance autosave] retry=${attempt + 1} code=${error?.code || "lock_busy"} transaction=${Date.now() - transactionStartedAt}ms`);
             await waitForRetry(attempt);
           }
         }
@@ -31407,7 +31498,7 @@ ipcMain.handle("attendance:updateLeaveStatus", async (event, payload = {}) => {
     // already-created absence/late fine. Reconcile both ledgers immediately so
     // the UI and payroll do not wait for the next page refresh.
     try {
-      await reconcileLateAttendanceFines(prisma, { actor: "system" });
+      await reconcileLateAttendanceFines(getPrismaDirectTx(), { actor: "system" });
     } catch (error) {
       console.warn("[Attendance Leave] Không đối soát được miễn phạt sau khi lưu nghỉ:", error.message);
     }
@@ -31965,27 +32056,7 @@ function applySameDayFullCheckExemptions(sessions) {
   return { sessions: updatedSessions, changed };
 }
 
-const DAILY_STOCK_CHECK_PRODUCT_COUNT = 3;
-const STOCK_CHECK_RISK_WINDOW_DAYS = 14;
-const STOCK_CHECK_LARGE_DIFFERENCE = 10;
-const DAILY_STOCK_CHECK_MIN_SKUS = 12;
-const DAILY_STOCK_CHECK_MAX_SKUS = 15;
-const DAILY_STOCK_CHECK_VARIANT_DIVISOR = 3;
 const TEMPORARY_DAILY_ONLY_MODE = false;
-const TEMPORARY_DAILY_PRODUCT_SCOPE = true;
-const TEMPORARY_DAILY_SCOPE_POLICY_VERSION = 4;
-
-function isTemporaryDailyStockCheckProduct(productOrItem) {
-  const name = String(
-    productOrItem?.name || productOrItem?.productName || "",
-  ).toLocaleUpperCase("vi-VN");
-  const sku = String(productOrItem?.sku || "").toLocaleUpperCase("vi-VN");
-  return (
-    (name.includes("5D") && name.includes("UNICARE")) ||
-    (name.includes("UNICARE") && name.includes("UPF") && name.includes("UV")) ||
-    sku.includes("5DUNI")
-  );
-}
 
 function isEligibleStockCheckAssignee(user) {
   return (
@@ -31994,180 +32065,9 @@ function isEligibleStockCheckAssignee(user) {
   );
 }
 
-function stockCheckScopeHash(value) {
-  return Array.from(String(value || "")).reduce(
-    (hash, character) => (hash * 31 + character.charCodeAt(0)) >>> 0,
-    0,
-  );
-}
-
-function isMandatoryFullDailyStockCheckProduct(productName, items = []) {
-  const name = String(productName || "").toLocaleUpperCase("vi-VN");
-  const sku = String(items[0]?.sku || "").toLocaleUpperCase("vi-VN");
-  return (
-    (name.includes("UNICARE") && name.includes("5D")) || sku.includes("5DUNI")
-  );
-}
-
-function selectDailyStockCheckScopeItems(items, date) {
-  const groups = new Map();
-  for (const item of items) {
-    const productName = String(item?.productName || "").trim();
-    if (!productName) continue;
-    if (!groups.has(productName)) groups.set(productName, []);
-    groups.get(productName).push(item);
-  }
-
-  const selected = [];
-  for (const [productName, groupItems] of groups) {
-    const remaining = DAILY_STOCK_CHECK_MAX_SKUS - selected.length;
-    if (remaining <= 0) break;
-    const ordered = [...groupItems].sort((left, right) =>
-      String(left?.sku || "").localeCompare(String(right?.sku || "")),
-    );
-    const quota = isMandatoryFullDailyStockCheckProduct(productName, ordered)
-      ? ordered.length
-      : Math.max(
-          1,
-          Math.ceil(ordered.length / DAILY_STOCK_CHECK_VARIANT_DIVISOR),
-        );
-    const negativeItems = ordered
-      .filter((item) => Number(item?.systemStock) < 0)
-      .slice(0, quota);
-    const selectedSkus = new Set(
-      negativeItems.map((item) => String(item?.sku || "")),
-    );
-    const startAt =
-      (stockCheckScopeHash(`${date}:${productName}`) +
-        Number(String(date).replace(/\D/g, ""))) %
-      ordered.length;
-    for (
-      let offset = 0;
-      negativeItems.length < quota && offset < ordered.length;
-      offset += 1
-    ) {
-      const item = ordered[(startAt + offset) % ordered.length];
-      if (!selectedSkus.has(String(item?.sku || ""))) {
-        negativeItems.push(item);
-        selectedSkus.add(String(item?.sku || ""));
-      }
-    }
-    selected.push(...negativeItems.slice(0, remaining));
-  }
-  return selected;
-}
-
-// One-time migration for untouched daily sessions made before the 15-SKU
-// policy. A started session is never changed, because that would discard work.
 function normalizeUntouchedDailyStockCheckScope(sessions) {
-  const today = getStockCheckTodayKey();
-  let changed = false;
-  const normalizedSessions = sessions.map((session) => {
-    const items = Array.isArray(session?.items) ? session.items : [];
-    if (
-      session?.type !== "daily" ||
-      session?.date !== today ||
-      session?.status === "completed" ||
-      isStockCheckSessionCancelled(session) ||
-      items.length <= DAILY_STOCK_CHECK_MAX_SKUS ||
-      items.some(
-        (item) =>
-          (item?.actualStock !== null && item?.actualStock !== undefined) ||
-          item?.balanced,
-      )
-    ) {
-      return session;
-    }
-    const scopedItems = selectDailyStockCheckScopeItems(items, today);
-    if (scopedItems.length >= items.length) return session;
-    changed = true;
-    return { ...session, items: scopedItems, dailyScopePolicyVersion: 1 };
-  });
-  return { sessions: normalizedSessions, changed };
-}
-
-function getLatestStockCheckVerificationBySku(sessions, today) {
-  const cutoff = new Date(`${today}T00:00:00`);
-  cutoff.setDate(cutoff.getDate() - STOCK_CHECK_RISK_WINDOW_DAYS);
-  const latestBySku = new Map();
-  const candidates = sessions
-    .filter(
-      (session) =>
-        String(session?.date || "") <= today &&
-        (session?.type === "daily" || session?.type === "weekend" || session?.type === "full") &&
-        Array.isArray(session?.items),
-    )
-    .slice()
-    .sort((left, right) => {
-      const leftKey = `${left.date || ""}|${left.completedAt || left.createdAt || ""}`;
-      const rightKey = `${right.date || ""}|${right.completedAt || right.createdAt || ""}`;
-      return rightKey.localeCompare(leftKey);
-    });
-
-  for (const session of candidates) {
-    const sessionDate = new Date(`${session.date}T00:00:00`);
-    if (Number.isNaN(sessionDate.getTime()) || sessionDate < cutoff) continue;
-    for (const item of session.items) {
-      const sku = String(item?.sku || "").trim();
-      if (!sku || latestBySku.has(sku) || item?.balanced !== true) continue;
-      const difference = Number(item.balanceDifference ?? item.difference ?? 0);
-      latestBySku.set(sku, Number.isFinite(difference) ? difference : 0);
-    }
-  }
-  return latestBySku;
-}
-
-// A risk item is deliberately selected before sales-rank/random candidates.
-// It is cleared by a later clean verification for the same SKU, while a
-// current negative balance remains critical until physically reconciled.
-function getStockCheckRiskProducts(products, sessions, today) {
-  const latestVerificationBySku = getLatestStockCheckVerificationBySku(
-    sessions,
-    today,
-  );
-  return products
-    .map((product, index) => {
-      const items = expandProductForStockCheck(product);
-      const negativeSkus = items
-        .filter((item) => Number(item.systemStock) < 0)
-        .map((item) => String(item.sku));
-      const mismatchSkus = items
-        .filter(
-          (item) =>
-            Math.abs(
-              Number(latestVerificationBySku.get(String(item.sku)) || 0),
-            ) >= STOCK_CHECK_LARGE_DIFFERENCE,
-        )
-        .map((item) => String(item.sku));
-      if (!negativeSkus.length && !mismatchSkus.length) return null;
-      const priority = negativeSkus.length ? 0 : 1;
-      const affectedSkus = Array.from(
-        new Set([...negativeSkus, ...mismatchSkus]),
-      );
-      const reason = negativeSkus.length
-        ? "Tồn âm cần kiểm khẩn"
-        : `Chênh lệch lớn (>= ${STOCK_CHECK_LARGE_DIFFERENCE}) cần kiểm lại`;
-      return { product, index, priority, affectedSkus, reason };
-    })
-    .filter(Boolean)
-    .sort(
-      (left, right) =>
-        left.priority - right.priority || left.index - right.index,
-    );
-}
-
-function applyStockCheckRiskMetadata(items, risk) {
-  if (!risk) return items;
-  const affected = new Set(risk.affectedSkus || []);
-  return items.map((item) =>
-    affected.has(String(item.sku))
-      ? {
-          ...item,
-          priorityReason: risk.reason,
-          priorityLevel: risk.priority === 0 ? "critical" : "high",
-        }
-      : item,
-  );
+  // The scheduler performs the versioned scope migration in one pass.
+  return { sessions, changed: false };
 }
 
 function expandProductForStockCheck(product) {
@@ -32250,187 +32150,53 @@ async function readCurrentStockForStockCheck(tx, sku) {
   return null;
 }
 
-// A daily session is one best-selling product plus two random products. The
-// renderer starts a session, but enforcing the minimum here makes the rule
-// durable for old sessions and for the assigned manager's first page load.
+// Use persisted counts and SKU activity so every desktop receives the same
+// bounded rotation, regardless of its local catalog or visible history.
+async function buildDailyStockCheckSelection(tx, sessions, date) {
+  const products = await tx.product.findMany({ select: productSelectForCatalog() });
+  const since = new Date(`${date}T00:00:00+07:00`);
+  const until = new Date(since);
+  until.setDate(until.getDate() + 1);
+  since.setDate(since.getDate() - 7);
+  const logs = await tx.inventoryLog.groupBy({
+    by: ["sku", "referenceType"],
+    where: { createdAt: { gte: since, lt: until }, quantity: { not: 0 } },
+    _sum: { quantity: true },
+    _count: { _all: true },
+  });
+  const activity = new Map();
+  for (const log of logs) {
+    const row = activity.get(log.sku) || { sku: log.sku, sold: 0, movements: 0 };
+    if (["POS", "TMDT"].includes(log.referenceType))
+      row.sold += Math.max(0, -Number(log._sum.quantity || 0));
+    row.movements += Number(log._count._all || 0);
+    activity.set(log.sku, row);
+  }
+  return selectDailyStockCheck({
+    items: products.flatMap(expandProductForStockCheck),
+    sessions, date, activity: [...activity.values()],
+  });
+}
+
 async function topUpTodayDailyStockCheckProducts(sessions, tx) {
   const today = getStockCheckTodayKey();
-  const fullyCheckedSkus = new Set(
-    sessions
-      .filter((session) => session?.type === "full" && session?.date === today)
-      .flatMap((session) => session.items || [])
-      .filter((item) => item?.balanced && item?.sku)
-      .map((item) => String(item.sku)),
-  );
-  const candidates = await tx.product.findMany({
-    select: productSelectForCatalog(),
-    orderBy: { createdAt: "asc" },
-  });
-  if (TEMPORARY_DAILY_PRODUCT_SCOPE) {
-    const temporaryScopeItems = candidates
-      .filter(isTemporaryDailyStockCheckProduct)
-      .flatMap(expandProductForStockCheck);
-    const temporaryScopeSkus = new Set(
-      temporaryScopeItems.map((item) => String(item.sku)),
-    );
-    let temporaryScopeChanged = false;
-    const temporaryScopeSessions = sessions.map((session) => {
-      if (
-        session?.type !== "daily" ||
-        session?.date !== today ||
-        session?.status === "completed" ||
-        isStockCheckSessionCancelled(session)
-      ) {
-        return session;
-      }
-      const items = Array.isArray(session.items) ? session.items : [];
-      const hasStarted = items.some(
-        (item) =>
-          (item?.actualStock !== null && item?.actualStock !== undefined) ||
-          item?.balanced,
-      );
-      if (hasStarted || !temporaryScopeItems.length) return session;
-      const alreadyMatches =
-        items.length === temporaryScopeItems.length &&
-        items.every((item) => temporaryScopeSkus.has(String(item?.sku || "")));
-      if (
-        alreadyMatches &&
-        session.dailyScopePolicyVersion === TEMPORARY_DAILY_SCOPE_POLICY_VERSION
-      ) {
-        return session;
-      }
-      temporaryScopeChanged = true;
-      return {
-        ...session,
-        items: temporaryScopeItems,
-        dailyScopePolicyVersion: TEMPORARY_DAILY_SCOPE_POLICY_VERSION,
-      };
-    });
-    return { sessions: temporaryScopeSessions, changed: temporaryScopeChanged };
-  }
-
-  const alwaysCheckUnicare = candidates.find((product) =>
-    isMandatoryFullDailyStockCheckProduct(
-      product?.name,
-      expandProductForStockCheck(product),
-    ),
-  );
-  const riskProducts = getStockCheckRiskProducts(candidates, sessions, today);
-  const riskByProductName = new Map(
-    riskProducts.map((risk) => [String(risk.product?.name || "").trim(), risk]),
-  );
-  let changed = false;
-  const updatedSessions = sessions.map((session) => {
-    if (
-      session?.type !== "daily" ||
-      session?.date !== today ||
-      session?.status === "completed" ||
-      isStockCheckSessionCancelled(session)
-    )
-      return session;
-    const items = Array.isArray(session.items) ? session.items : [];
-    // A generated daily scope is immutable once a physical count has been
-    // entered. Only repair an untouched scope that violates the 12-15 SKU
-    // policy or that omitted the mandatory 5D UNICARE product.
-    if (
-      !items.length ||
-      items.some(
-        (item) =>
-          (item?.actualStock !== null && item?.actualStock !== undefined) ||
-          item?.balanced,
-      )
-    )
-      return session;
-    const exemptedSkus = new Set([
-      ...fullyCheckedSkus,
-      ...(session.fullCheckExemptions || []).map((item) =>
-        String(item?.sku || ""),
-      ),
-    ]);
-    const priorityProducts = riskProducts.filter((risk) => {
-      const productName = String(risk.product?.name || "").trim();
-      const availableItems = expandProductForStockCheck(risk.product).filter(
-        (item) => !exemptedSkus.has(String(item.sku)),
-      );
-      return productName && availableItems.length > 0;
-    });
-    const mandatoryItems = alwaysCheckUnicare
-      ? expandProductForStockCheck(alwaysCheckUnicare).filter(
-          (item) => !exemptedSkus.has(String(item.sku)),
-        )
-      : [];
-    const currentSkus = new Set(items.map((item) => String(item?.sku || "")));
-    const hasMandatoryFullScope =
-      !mandatoryItems.length ||
-      mandatoryItems.every((item) => currentSkus.has(String(item.sku)));
-    const isValidScope =
-      items.length >= DAILY_STOCK_CHECK_MIN_SKUS &&
-      items.length <= DAILY_STOCK_CHECK_MAX_SKUS &&
-      hasMandatoryFullScope;
-    if (isValidScope) return session;
-
-    const productScore = (product) =>
-      stockCheckScopeHash(`${today}:${product?.name || product?.sku || ""}`);
-    const orderedProducts = [
-      ...(alwaysCheckUnicare ? [alwaysCheckUnicare] : []),
-      ...priorityProducts.map((risk) => risk.product),
-      ...candidates
-        .slice()
-        .sort((left, right) => productScore(left) - productScore(right)),
-    ].filter((product, index, list) => {
-      const key = String(product?.id || product?.sku || product?.name || "");
-      return (
-        key &&
-        list.findIndex(
-          (entry) =>
-            String(entry?.id || entry?.sku || entry?.name || "") === key,
-        ) === index
-      );
-    });
-    const availableItems = orderedProducts.flatMap((product) =>
-      applyStockCheckRiskMetadata(
-        expandProductForStockCheck(product).filter(
-          (item) => !exemptedSkus.has(String(item.sku)),
-        ),
-        riskByProductName.get(String(product?.name || "").trim()),
-      ),
-    );
-    // Carry-over items are obligations from yesterday and must never be
-    // replaced. Keep them first, then add today's mandatory/risk/rotation
-    // scope until the daily minimum is reached.
-    const generatedItems = selectDailyStockCheckScopeItems(
-      availableItems,
-      today,
-    );
-    const scopedItems = items.slice();
-    const selectedSkus = new Set(
-      scopedItems.map((item) => String(item?.sku || "")),
-    );
-    for (const item of generatedItems) {
-      if (scopedItems.length >= DAILY_STOCK_CHECK_MAX_SKUS) break;
-      if (!selectedSkus.has(String(item.sku))) {
-        scopedItems.push(item);
-        selectedSkus.add(String(item.sku));
-      }
-    }
-    if (scopedItems.length < DAILY_STOCK_CHECK_MIN_SKUS) {
-      for (const item of availableItems) {
-        if (
-          scopedItems.length >= DAILY_STOCK_CHECK_MIN_SKUS ||
-          scopedItems.length >= DAILY_STOCK_CHECK_MAX_SKUS
-        )
-          break;
-        if (!selectedSkus.has(String(item.sku))) {
-          scopedItems.push(item);
-          selectedSkus.add(String(item.sku));
-        }
-      }
-    }
-    if (!scopedItems.length) return session;
-    changed = true;
-    return { ...session, items: scopedItems, dailyScopePolicyVersion: 3 };
-  });
-  return { sessions: updatedSessions, changed };
+  const needsSelection = session =>
+    session?.type === "daily" && session.date === today &&
+    !["completed", "cancelled"].includes(session.status) &&
+    (session.dailyScopePolicyVersion !== STOCK_CHECK_SELECTION_VERSION || !session.items?.length) &&
+    !(session.items || []).some(item => item.actualStock != null || item.balanced);
+  if (isStockCheckSaturday() || !sessions.some(needsSelection))
+    return { sessions, changed: false };
+  const selection = await buildDailyStockCheckSelection(tx, sessions, today);
+  if (!selection.items.length) return { sessions, changed: false };
+  return {
+    changed: true,
+    sessions: sessions.map(session => needsSelection(session) ? {
+      ...session, items: selection.items,
+      dailyScopePolicyVersion: selection.policyVersion,
+      selectionWarnings: selection.warnings,
+    } : session),
+  };
 }
 
 async function requireStockCheckConversion(tx, productName) {
@@ -33006,12 +32772,6 @@ ipcMain.handle("stockCheck:ensureDailySession", async (event, payload = {}) => {
     if (!isPrivilegedStockCheckSession() && getBangkokHour() < 17) {
       throw new Error("Kiểm hàng ngày chỉ mở từ 17:00 đối với non-admin.");
     }
-    const requestedItems = Array.isArray(payload.items)
-      ? payload.items.filter(isTemporaryDailyStockCheckProduct)
-      : [];
-    if (!requestedItems.length)
-      throw new Error("Chưa có SKU để tạo phiên kiểm.");
-
     const result = await getPrismaDirectTx().$transaction(
       async (tx) => {
         await lockStockCheckSessions(tx);
@@ -33045,11 +32805,12 @@ ipcMain.handle("stockCheck:ensureDailySession", async (event, payload = {}) => {
               "Phiên kiểm hàng ngày hôm nay đã được quản trị viên hủy.",
             );
           }
-          if (carried.changed || repaired.changed)
-            await writeStockCheckSessions(sessions, tx);
+          const scoped = await topUpTodayDailyStockCheckProducts(sessions, tx);
+          if (carried.changed || repaired.changed || scoped.changed)
+            await writeStockCheckSessions(scoped.sessions, tx);
           return {
-            session: existing,
-            changed: carried.changed || repaired.changed,
+            session: scoped.sessions.find(session => session.id === existing.id),
+            changed: carried.changed || repaired.changed || scoped.changed,
           };
         }
 
@@ -33107,8 +32868,9 @@ ipcMain.handle("stockCheck:ensureDailySession", async (event, payload = {}) => {
         const assignee = linkedAssignee
           || managers[(previousIndex + 1 + managers.length) % managers.length];
 
+        const selection = await buildDailyStockCheckSelection(tx, sessions, today);
         const uniqueSkus = new Set();
-        const items = requestedItems
+        const items = selection.items
           .slice(0, 1000)
           .map((item) => {
             const sku = String(item?.sku || "").trim();
@@ -33158,6 +32920,8 @@ ipcMain.handle("stockCheck:ensureDailySession", async (event, payload = {}) => {
           createdAt: now.toISOString(),
           createdBy: currentSession.username,
           autoAssigned: true,
+          dailyScopePolicyVersion: selection.policyVersion,
+          selectionWarnings: selection.warnings,
         };
         sessions = [...sessions, session].slice(-90);
         await writeStockCheckSessions(sessions, tx);
@@ -35132,13 +34896,14 @@ ipcMain.handle("users:completePasswordReset", async (_event, email, code, newPas
 ipcMain.handle(
   "users:login",
   async (event, username, password, rememberMe = false) => {
+    const deadline = createLoginDeadline();
     try {
       if (!prisma) throw new Error("Prisma not available");
       const normalizedUsername =
         typeof username === "string" ? username.trim() : "";
-      const user = await prisma.user.findUnique({
+      const user = await deadline.wait(() => prisma.user.findUnique({
         where: { username: normalizedUsername },
-      });
+      }));
       if (!user || user.status !== "active") {
         return {
           success: false,
@@ -35162,25 +34927,25 @@ ipcMain.handle(
         typeof user.password === "string" && user.password.startsWith("$2");
       let passwordValid = false;
       if (isHashed) {
-        passwordValid = await bcrypt.compare(password, user.password);
+        passwordValid = await deadline.wait(() => bcrypt.compare(password, user.password));
       } else {
         // Backward compatible: plaintext password cũ → auto-upgrade sang hash
         passwordValid = user.password === password;
         if (passwordValid) {
-          const hashed = await bcrypt.hash(password, 10);
-          await prisma.user.update({
+          const hashed = await deadline.wait(() => bcrypt.hash(password, 10));
+          await deadline.wait(() => prisma.user.update({
             where: { id: user.id },
             data: {
               password: hashed,
               passwordChangedAt: new Date(),
               forcePasswordChange: false,
             },
-          });
+          }));
           console.log(`🔒 Auto-upgraded password for user: ${user.username}`);
         }
       }
       if (!passwordValid) {
-        await recordFailedLogin(user);
+        await deadline.wait(() => recordFailedLogin(user));
         return {
           success: false,
           error: "Tên đăng nhập hoặc mật khẩu không đúng.",
@@ -35234,11 +34999,19 @@ ipcMain.handle(
           previousPasswordHash: consumedTemporaryPasswordHash,
         };
       } else {
-        authenticatedUser = await prisma.user.update({
+        authenticatedUser = await deadline.wait(() => prisma.user.update({
           where: { id: user.id },
           data: { loginFailedAttempts: 0, loginLockedUntil: null },
-        });
+        }));
       }
+      // Publish the session only after all awaited work succeeds. A timed-out
+      // read/token request must not create a late backend login.
+      const rememberToken =
+        rememberMe && authenticatedUser.role === "admin" && !isPasswordRotationRequired(authenticatedUser)
+          ? await deadline.wait(() => issueRememberToken(authenticatedUser.id))
+          : null;
+      if (rememberToken) storeSecureRememberToken(rememberToken);
+      else clearSecureRememberToken();
       // Lưu session phía backend
       currentSession = {
         id: authenticatedUser.id,
@@ -35264,21 +35037,13 @@ ipcMain.handle(
         recordName: user.username,
         userName: user.username,
       });
-      const rememberToken =
-        rememberMe &&
-        authenticatedUser.role === "admin" &&
-        !currentSession.mustChangePassword
-          ? await issueRememberToken(authenticatedUser.id)
-          : null;
-      if (rememberToken) storeSecureRememberToken(rememberToken);
-      else clearSecureRememberToken();
       return {
         success: true,
         data: sanitizeUserForClient(authenticatedUser),
       };
     } catch (error) {
       console.error("❌ Login error:", error);
-      return { success: false, error: error.message };
+      return { success: false, error: loginErrorMessage(error) };
     }
   },
 );
@@ -40127,7 +39892,7 @@ ipcMain.handle("attendance:recognize", async (event, { image }) => {
       }
     }
 
-    const fineResult = await reconcileLateAttendanceFines(prisma, {
+    const fineResult = await reconcileLateAttendanceFines(getPrismaDirectTx(), {
       logIds: [log.id],
       actor: "system",
     });
@@ -40665,14 +40430,22 @@ ipcMain.handle(
 
 // Đối soát toàn bộ lịch sử để bù các khoản phạt đi muộn từng bị sót.
 ipcMain.handle("attendance:reconcileLateFines", async () => {
+  const startedAt = Date.now();
   try {
     requireRole("admin");
-    const result = await reconcileLateAttendanceFines(prisma, {
+    const result = await reconcileLateAttendanceFines(getPrismaDirectTx(), {
       useHistoricalRates: true,
       repairReconciledAmounts: true,
       actor: currentSession.username,
+      includeLedger: true,
+      readOnlyProbe: true,
     });
+    if (result.ledger) {
+      const now = new Date();
+      result.ledger.extraFines = result.ledger.extraFines.filter(fine => !isPrematureMissingScheduleFine(fine, now));
+    }
     invalidateAttendanceSnapshotCaches();
+    console.log(`[Perf] attendance:reconcileLateFines ms=${Date.now() - startedAt} checked=${result.checked}`);
     return { success: true, data: result };
   } catch (err) {
     console.error("❌ attendance:reconcileLateFines error:", err.message);

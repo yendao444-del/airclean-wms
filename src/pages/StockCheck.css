@@ -4,7 +4,17 @@
 }
 
 .stock-check-legacy-grid {
-  display: none !important;
+  grid-template-columns: 240px minmax(0, 1fr) !important;
+}
+
+@media (max-width: 1000px) {
+  .stock-check-legacy-grid {
+    grid-template-columns: minmax(0, 1fr) !important;
+  }
+  .stock-check-legacy-grid > aside {
+    position: static !important;
+    min-height: auto !important;
+  }
 }
 
 .stock-check-module-nav {

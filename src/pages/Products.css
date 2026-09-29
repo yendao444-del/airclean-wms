@@ -9,12 +9,22 @@
 
 /* =================RESPONSIVE PAGE CONTAINER================= */
 /* Đảm bảo không có overflow horizontal trên page */
-body {
-    overflow-x: hidden;
-}
-
 .products-search {
     width: min(100%, 520px);
+}
+
+.products-page {
+    min-width: 0;
+    container: products / inline-size;
+}
+
+.products-mobile-sku {
+    display: block;
+    width: 100%;
+    color: #00ab56;
+    font-size: 12px;
+    font-weight: 600;
+    overflow-wrap: anywhere;
 }
 
 .products-card {
@@ -46,12 +56,12 @@ body {
     flex-wrap: wrap;
 }
 
-/* Ant Design table responsive */
-.ant-table-wrapper {
+/* Keep overflow inside the product list instead of affecting other pages. */
+.products-page .ant-table-wrapper {
     overflow-x: auto;
 }
 
-.ant-card {
+.products-page .ant-card {
     overflow-x: auto;
 }
 
@@ -162,7 +172,7 @@ body {
 }
 
 /* Hiển thị chỉ trên màn hình nhỏ */
-@media (max-width: 767px) {
+@container products (max-width: 850px) {
     .products-card .ant-card-body {
         padding: 12px 8px;
     }
@@ -171,23 +181,99 @@ body {
         width: 100%;
     }
 
-    .products-table .ant-table-thead > tr > th,
-    .products-table .ant-table-tbody > tr > td {
-        padding: 10px 8px;
+    .products-table .ant-table-content,
+    .products-table .ant-table-container {
+        overflow-x: visible !important;
     }
 
-    .products-table .ant-table-tbody > tr > td:first-of-type {
-        font-size: 13px;
+    .products-table .ant-table-content > table {
+        display: block;
+        width: 100% !important;
+        min-width: 0 !important;
     }
 
-    .products-page-actions {
-        width: 100%;
-        gap: 6px !important;
+    .products-table .ant-table-content > table > colgroup,
+    .products-table .ant-table-thead {
+        display: none;
     }
 
-    .products-page-actions .ant-btn {
-        flex: 1 1 auto;
-        min-width: 112px;
+    .products-table .ant-table-tbody {
+        display: block;
+    }
+
+    .products-table .ant-table-tbody > tr.ant-table-row {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 8px;
+        margin-bottom: 12px;
+        padding: 12px;
+        border: 1px solid #e6e9ed;
+        border-radius: 12px;
+        background: #fff;
+    }
+
+    .products-table .ant-table-tbody > tr.ant-table-row > td {
+        display: block;
+        padding: 0;
+        border: 0;
+        background: transparent;
+    }
+
+    .products-table .ant-table-tbody > tr.ant-table-row > .ant-table-selection-column,
+    .products-table .ant-table-tbody > tr.ant-table-row > .ant-table-row-expand-icon-cell {
+        flex: 0 0 32px;
+        text-align: center;
+    }
+
+    .products-table .ant-table-tbody > tr.ant-table-row > .products-cell-name {
+        flex: 1 1 calc(100% - 96px);
+        min-width: 0;
+        font-size: 14px;
+    }
+
+    .products-cell-name > div {
+        flex-wrap: wrap;
+    }
+
+    .products-table .ant-table-tbody > tr.ant-table-row > .products-cell-price,
+    .products-table .ant-table-tbody > tr.ant-table-row > .products-cell-stock {
+        flex: 1 1 calc(50% - 8px);
+        min-width: 0;
+    }
+
+    .products-cell-price::before,
+    .products-cell-stock::before {
+        display: block;
+        margin-bottom: 4px;
+        color: #667085;
+        font-size: 11px;
+        font-weight: 500;
+    }
+
+    .products-cell-price::before { content: 'Giá bán'; }
+    .products-cell-stock::before { content: 'Tồn kho'; }
+
+    .products-table .ant-table-tbody > tr.ant-table-row > .products-cell-actions {
+        flex: 1 1 100%;
+        text-align: right;
+        border-top: 1px solid #eef0f2;
+        padding-top: 8px;
+    }
+
+    .products-table .ant-table-tbody > tr.ant-table-expanded-row {
+        display: block;
+        margin: -4px 0 12px;
+    }
+
+    .products-table .ant-table-tbody > tr.ant-table-expanded-row > td {
+        display: block;
+        padding: 0 !important;
+        border: 0;
+    }
+
+    .products-table .ant-table-pagination {
+        justify-content: center;
     }
 
     .hide-on-small {
@@ -205,14 +291,42 @@ body {
         gap: 12px !important;
     }
 
+    .variant-header-grid { display: none !important; }
+
     /* Tăng spacing cho form trên mobile */
     .variant-form-grid>* {
         width: 100% !important;
     }
 
     /* Tối ưu expanded row scrolling */
-    .ant-table-expanded-row>td {
-        padding: 8px !important;
+    .products-page .ant-table-expanded-row>td { padding: 8px !important; }
+}
+
+@media (max-width: 767px) {
+    .products-page-actions {
+        width: 100%;
+        gap: 6px !important;
+    }
+
+    .products-page-actions .ant-btn {
+        flex: 1 1 auto;
+        min-width: 112px;
+    }
+
+    .products-form-pair,
+    .products-bulk-grid,
+    .products-combo-grid,
+    .variant-form-grid {
+        grid-template-columns: 1fr !important;
+        gap: 8px !important;
+    }
+
+    .products-form-pair { display: grid; }
+    .products-variants-list { max-height: none !important; }
+
+    .products-editor-modal .ant-modal-body {
+        max-height: calc(100dvh - 150px);
+        overflow-y: auto;
     }
 }
 
@@ -222,6 +336,14 @@ body {
     /* Variant grid chuyển sang 2 columns trên tablet */
     .variant-form-grid {
         grid-template-columns: 1fr 1fr !important;
+    }
+}
+
+@media (min-width: 768px) {
+    .products-form-pair {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 16px;
     }
 }
 
@@ -236,12 +358,6 @@ body {
         padding: 8px 4px;
     }
 
-    .products-table .ant-table-thead > tr > th,
-    .products-table .ant-table-tbody > tr > td {
-        padding: 8px 6px;
-        font-size: 12px;
-    }
-
     .products-table .ant-pagination {
         flex-wrap: wrap;
         gap: 6px;
@@ -252,18 +368,18 @@ body {
     }
 
     /* Giảm font size cho mobile */
-    .ant-table {
+    .products-table .ant-table {
         font-size: 12px;
     }
 
     /* Compact padding cho các nút */
-    .ant-btn-lg {
+    .products-page .ant-btn-lg {
         padding: 6px 12px !important;
         font-size: 14px !important;
     }
 
     /* Tối ưu Title */
-    .ant-typography h2 {
+    .products-page .ant-typography h2 {
         font-size: 20px !important;
     }
 }

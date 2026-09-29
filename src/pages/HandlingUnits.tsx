@@ -9,6 +9,7 @@ import {
   Input,
   InputNumber,
   Modal,
+  Popover,
   QRCode,
   Radio,
   Segmented,
@@ -145,6 +146,17 @@ type Workspace = {
   suppliers: Array<{ id: number; code?: string; name: string }>;
   locations: LocationItem[];
   recentTransactions: any[];
+  shiftCheckPolicy?: {
+    date: string;
+    effectiveDate: string;
+    fineAmount: number;
+    assignedTo: string;
+    nextAssignedTo: string;
+    deadline: string;
+    todayRemaining: number;
+    outstanding: Array<{ code: string; requiredAt: string; date: string }>;
+    trackedCodes: string[];
+  };
 };
 type ShiftCheckCandidate = {
   unit: UnitRow;
@@ -225,11 +237,7 @@ const locationFor = (unit: UnitRow) =>
   [unit.location?.zone, unit.location?.rack].filter(Boolean).join(" · ") ||
   "Chưa phân khu";
 const isWithdrawalTransaction = (item: any) =>
-  !/kiểm cuối ca|kiểm khớp|kiểm lệch/i.test(String(item?.type || "")) &&
-  (Number(item?.quantity) < 0 ||
-    /rút hàng|rút\s+\d+|chuyển khu đóng gói|chuyển hàng lẻ|chuyển chờ xuất kho/i.test(
-      `${item?.type || ""} ${item?.note || ""}`,
-    ));
+  /^(rút hàng|lấy hàng|chuyển khu đóng gói|chuyển hàng lẻ|chuyển chờ xuất kho|chuyển khu kiểm hàng)/i.test(String(item?.type || ""));
 const historyDescriptionFor = (item: any) =>
   isWithdrawalTransaction(item) ? "Đã rút" : item?.note || item?.destination || "--";
 const statusFor = (status: string) =>
@@ -423,10 +431,7 @@ const formatHistoryTime = (value?: string) => {
 const localDayKey = (value: string | number | Date) => {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return "";
-  const year = date.getFullYear();
-  const month = String(date.getMonth() + 1).padStart(2, "0");
-  const day = String(date.getDate()).padStart(2, "0");
-  return `${year}-${month}-${day}`;
+  return date.toLocaleDateString("sv-SE", { timeZone: "Asia/Bangkok" });
 };
 
 const isCompletedCheckTransaction = (item: any) =>
@@ -1133,7 +1138,8 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
             : [];
           const qrLabels = Array.isArray(rawData.qrLabels) ? rawData.qrLabels : [];
           const suppliers = Array.isArray(rawData.suppliers) ? rawData.suppliers : [];
-          const responseSignature = JSON.stringify({ catalog, register, recentTransactions, packagingSpecs, qrLabels, suppliers });
+          const shiftCheckPolicy = rawData.shiftCheckPolicy;
+          const responseSignature = JSON.stringify({ catalog, register, recentTransactions, packagingSpecs, qrLabels, suppliers, shiftCheckPolicy });
           handlingUnitsWorkspaceCache = { catalog, register, recentTransactions };
           if (responseSignature === workspaceResponseSignatureRef.current) return;
           workspaceResponseSignatureRef.current = responseSignature;
@@ -1145,6 +1151,7 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
             packagingSpecs,
             qrLabels,
             suppliers,
+            shiftCheckPolicy,
           }));
           setSelectedSku((current) =>
             catalog.some((item) => item.sku === current)
@@ -2323,9 +2330,14 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
   }, [workspace.recentTransactions]);
 
   const shiftCheckCandidates = useMemo<ShiftCheckCandidate[]>(() => {
-    const todayKey = localDayKey(new Date());
+    const todayKey = workspace.shiftCheckPolicy?.date || localDayKey(new Date());
+    const outstanding = new Map((workspace.shiftCheckPolicy?.outstanding || []).map((entry) => [entry.code, entry]));
+    const trackedCodes = new Set(workspace.shiftCheckPolicy?.trackedCodes || []);
     return workspace.register
       .map((unit) => {
+        if (unit.status === "Đã tách" || unit.status === "split") return null;
+        const code = unit.id.trim().toUpperCase();
+        const obligation = outstanding.get(code);
         const history = transactionsByUnitId.get(unit.id.trim().toUpperCase()) || [];
         const isPendingCheck = unit.status === "Chờ kiểm" || unit.status === "pending_check";
         const latestCompletedCheck = history
@@ -2346,7 +2358,7 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
         // A pending package remains actionable across day boundaries. The old
         // today-only filter made carried-over pending packages disappear from
         // the end-of-shift badge even though they still blocked the same SKU.
-        if (!isPendingCheck && withdrawals.length === 0) return null;
+        if (!isPendingCheck && !obligation && (trackedCodes.has(code) || withdrawals.length === 0)) return null;
         return {
           unit,
           withdrawalCount: withdrawals.length,
@@ -2357,22 +2369,23 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
           lastWithdrawalAt: withdrawals.reduce(
             (latest, item) =>
               Math.max(latest, new Date(item.createdAt || 0).getTime() || 0),
-            isPendingCheck ? new Date(unit.updatedAt || 0).getTime() || 0 : 0,
+            obligation ? new Date(obligation.requiredAt).getTime() : isPendingCheck ? new Date(unit.updatedAt || 0).getTime() || 0 : 0,
           ),
         };
       })
       .filter((item): item is ShiftCheckCandidate => Boolean(item))
       .sort((a, b) => b.lastWithdrawalAt - a.lastWithdrawalAt);
-  }, [workspace.register, transactionsByUnitId]);
+  }, [workspace.register, workspace.shiftCheckPolicy, transactionsByUnitId]);
 
   const mandatoryShiftCheckCandidates = useMemo(
     () => shiftCheckCandidates.filter(({ unit }) => unit.status === "Chờ kiểm" || unit.status === "pending_check"),
     [shiftCheckCandidates],
   );
 
-  const visibleShiftCheckCandidates = shiftCheckScope === "mandatory"
+  const scopedShiftCheckCandidates = shiftCheckScope === "mandatory"
     ? mandatoryShiftCheckCandidates
     : shiftCheckCandidates;
+  const visibleShiftCheckCandidates = scopedShiftCheckCandidates.slice(0, 100);
 
   const openShiftCheck = (scope: "all" | "mandatory" = "all") => {
     const candidates = scope === "mandatory"
@@ -3179,6 +3192,47 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
           <b>Quản lý kiện hàng</b>
         </Flex>
         <Flex align="center" gap={8}>
+          {workspace.shiftCheckPolicy && (
+            <Popover
+              trigger="click"
+              placement="bottomRight"
+              title="Phân công kiểm cuối ca"
+              content={
+                <div style={{ maxWidth: "min(300px, calc(100vw - 48px))" }}>
+                  <p><b>Hôm nay:</b> {workspace.shiftCheckPolicy.assignedTo}</p>
+                  <p><b>Ngày mai:</b> {workspace.shiftCheckPolicy.nextAssignedTo}</p>
+                  <p>Hạn kiểm: <b>23:59</b> (giờ Việt Nam).</p>
+                  <p>
+                    Từ 30/09/2026, chưa hoàn thành kiểm cuối ca:
+                    {' '}<b>{fmt(workspace.shiftCheckPolicy.fineAmount)}đ/người/ngày</b>, không tính theo số kiện.
+                  </p>
+                  <Typography.Paragraph type="secondary">
+                    Kiện chưa kiểm chuyển sang ngày tiếp theo. Kết quả độc lập với Kiểm hàng trong Quản lý kho.
+                  </Typography.Paragraph>
+                </div>
+              }
+            >
+              <button
+                type="button"
+                className="hu-shift-assignee"
+                aria-label={`Người phụ trách kiểm cuối ca hôm nay: ${workspace.shiftCheckPolicy.assignedTo}`}
+              >
+                <span className="hu-shift-assignee-avatar" aria-hidden="true">
+                  {workspace.shiftCheckPolicy.assignedTo.trim().charAt(0).toUpperCase()}
+                </span>
+                <span className="hu-shift-assignee-text">
+                  <span className="hu-shift-assignee-label">Phụ trách kiểm</span>
+                  <span className="hu-shift-assignee-name">{workspace.shiftCheckPolicy.assignedTo}</span>
+                  <span className="hu-shift-assignee-fine">
+                    Phạt {fmt(workspace.shiftCheckPolicy.fineAmount)}đ nếu quá hạn
+                  </span>
+                </span>
+                <svg width="12" height="12" viewBox="0 0 12 12" fill="none" className="hu-shift-assignee-chevron" aria-hidden="true">
+                  <path d="M2.5 4.5L6 8L9.5 4.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+              </button>
+            </Popover>
+          )}
           <Tooltip title="Sơ đồ 2D & quản lý vị trí khu vực kho">
             <Button
               size="small"
@@ -3400,7 +3454,7 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
                 <div className="hu-header-right hu-selected-actions">
                   {shiftCheckCandidates.length > 0 && (
                     <Tooltip
-                      title={`${shiftCheckCandidates.length} kiện có lượt rút chưa đối chiếu; chỉ kiện Chờ kiểm mới bắt buộc chốt`}
+                      title={`${shiftCheckCandidates.length} kiện chưa đối chiếu. Từ 30/09/2026 phải kiểm cuối ca trước hết ngày; kiện Chờ kiểm cần chốt ngay để tiếp tục thao tác.`}
                     >
                       <Button
                         icon={<CheckCircleOutlined />}
@@ -4761,7 +4815,7 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
               <small>
                 {shiftCheckScope === "mandatory"
                   ? "Chỉ gồm các kiện đang ở trạng thái Chờ kiểm"
-                  : "Đối chiếu các kiện đã phát sinh rút hàng hôm nay và chưa kiểm"}
+                  : "Đối chiếu các kiện cần kiểm hôm nay, gồm cả kiện chưa kiểm từ ngày trước"}
               </small>
             </div>
           </div>
@@ -4790,9 +4844,12 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
           message={shiftCheckScope === "mandatory" ? "Nhập số lượng thực tế để chốt kiện" : "Nhập số lượng đếm thực tế trong từng kiện"}
           description={shiftCheckScope === "mandatory"
             ? "Kiện chỉ được mở lại thao tác sau khi đã chốt số thực tế."
-            : "Kiểm cuối ca là bước đối chiếu; nếu thực tế khác tồn dự kiến, hệ thống sẽ yêu cầu lý do và ghi một giao dịch điều chỉnh riêng vào lịch sử."}
+            : "Từ 30/09/2026, phải hoàn thành trước hết ngày (23:59); chưa hoàn thành phạt người được phân công 50.000đ/ngày. Nếu lệch tồn, cần ghi lý do điều chỉnh. Kết quả không thay thế Kiểm hàng trong Quản lý kho."}
           style={{ marginBottom: 14 }}
         />
+        {scopedShiftCheckCandidates.length > 100 && (
+          <Alert type="info" showIcon style={{ marginBottom: 14 }} message={`Đang kiểm 100/${scopedShiftCheckCandidates.length} kiện. Sau khi chốt đợt này, tiếp tục kiểm các kiện còn lại.`} />
+        )}
         <Table
           rowKey={(item) => item.unit.id}
           dataSource={visibleShiftCheckCandidates}

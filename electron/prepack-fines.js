@@ -1,4 +1,4 @@
-const PREPACK_FINE_EFFECTIVE_DATE = "2026-09-23";
+const PREPACK_FINE_EFFECTIVE_DATE = "2026-09-30";
 const PREPACK_FINE_CUTOFF_HOUR = 24;
 const PREPACK_SHORTFALL_RATIO_NUMERATOR = 9;
 const PREPACK_SHORTFALL_RATIO_DENOMINATOR = 10;
@@ -77,10 +77,10 @@ async function reconcilePrepackShortfallFines(prisma, options = {}) {
 
   const effectiveDate = String(options.effectiveDate || PREPACK_FINE_EFFECTIVE_DATE);
   const evaluationNow = options.now || new Date();
-  const targetDates = options.dateKey
+  const targetDates = (options.dateKey
     ? [String(options.dateKey)]
-    : completedDates(evaluationNow, effectiveDate);
-  if (!targetDates.length) return { created: [], checked: 0 };
+    : completedDates(evaluationNow, effectiveDate))
+    .filter((dateKey) => dateKey >= effectiveDate && new Date(evaluationNow) >= bangkokEndOfDay(dateKey));
 
   return prisma.$transaction(async (tx) => {
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('attendanceData'))`;
@@ -94,6 +94,25 @@ async function reconcilePrepackShortfallFines(prisma, options = {}) {
     const deletedIds = new Set(fineAuditLog
       .filter((entry) => entry?.action === "delete" && entry?.before?.id)
       .map((entry) => String(entry.before.id)));
+    // The policy now starts on Wednesday 30/09. Withdraw only fines that
+    // this reconciler generated before that date, including older installs.
+    const isPreEffectiveFine = (fine) => fine?.source === "prepack-shortfall"
+      && String(fine.attendanceDate || bangkokDateKey(fine.date)) < effectiveDate;
+    const preEffectiveFines = existingFines.filter(isPreEffectiveFine);
+    const removedFineIds = new Set(preEffectiveFines
+      .map((fine) => fine.id)
+      .filter(Boolean)
+      .map(String));
+    if (!targetDates.length) {
+      if (preEffectiveFines.length) {
+        await tx.appConfig.upsert({
+          where: { key: "attendanceData" },
+          update: { value: JSON.stringify({ ...attendanceData, extraFines: existingFines.filter((fine) => !isPreEffectiveFine(fine)) }) },
+          create: { key: "attendanceData", value: JSON.stringify({ ...attendanceData, extraFines: existingFines.filter((fine) => !isPreEffectiveFine(fine)) }) },
+        });
+      }
+      return { created: [], removed: [...removedFineIds], checked: 0 };
+    }
 
     const latestDate = targetDates[targetDates.length - 1];
     const batches = await tx.prepackBatch.findMany({
@@ -145,7 +164,6 @@ async function reconcilePrepackShortfallFines(prisma, options = {}) {
     }
 
     const groupedViolations = new Map();
-    const removedFineIds = new Set();
     for (const dateKey of targetDates) {
       const endOfDay = bangkokEndOfDay(dateKey);
       for (const batch of activeBatches) {
@@ -200,7 +218,7 @@ async function reconcilePrepackShortfallFines(prisma, options = {}) {
       });
     }
 
-    const nextFines = existingFines.filter((fine) => !removedFineIds.has(String(fine?.id)));
+    const nextFines = existingFines.filter((fine) => !isPreEffectiveFine(fine) && !removedFineIds.has(String(fine?.id)));
     if (created.length || nextFines.length !== existingFines.length) {
       const nextData = {
         ...attendanceData,

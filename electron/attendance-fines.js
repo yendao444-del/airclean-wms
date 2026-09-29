@@ -9,10 +9,12 @@ const DEFAULT_ATTENDANCE_CONFIG = {
     morningStart: '08:00',
     afternoonStart: '13:30',
 };
-const { calculateAttendanceRewardSummary } = require('./attendance-rewards');
+const { calculateAttendanceRewardSummary, resolveEmployeeId } = require('./attendance-rewards');
 const { validScheduleForSession } = require('./attendance-schedule-fines');
+const { readLateFineSnapshot } = require('./attendance-fine-snapshot');
 
 let reconcileQueue = Promise.resolve();
+const overviewReadsInFlight = new WeakMap();
 
 function normalizeIdentity(value) {
     return String(value || '')
@@ -106,11 +108,20 @@ function getHistoricalAmount(fines, employeesById, employee, levelKey, logDate, 
 }
 
 async function reconcileLateAttendanceFinesNow(prisma, options = {}) {
+    if (options.readOnlyProbe && typeof prisma.$queryRaw === 'function') {
+        const snapshot = await readLateFineSnapshot(prisma, options);
+        if (snapshot) {
+            const plan = calculateLateAttendanceFinePlan(snapshot.data, snapshot.logs, options);
+            if (!plan.patch) return plan.result;
+        }
+        // The probe never authorizes a write. Re-read and recompute after locking.
+    }
     // Reconciliation used to read and then replace the entire JSON document
     // outside a transaction. That allowed another attendance edit to be lost
     // and caused the safety guard to disable automatic fine creation. Keep the
     // same JSON format, but serialize the read/merge/write under one lock.
     return prisma.$transaction(async (tx) => {
+        await tx.$executeRaw`SET LOCAL lock_timeout = '7000ms'`;
         await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${'attendanceData'}))`;
 
         // Payroll snapshots can make attendanceData several megabytes. Late-fine
@@ -118,19 +129,20 @@ async function reconcileLateAttendanceFinesNow(prisma, options = {}) {
         // transferring every historical snapshot over the Supabase connection.
         const configRow = typeof tx.$queryRaw === 'function'
             ? (await tx.$queryRaw`
-                SELECT jsonb_set(
-                    "value"::jsonb,
-                    '{lockedPeriods}',
-                    COALESCE((
-                        SELECT jsonb_agg(period_row - 'payrollSnapshot')
-                        FROM jsonb_array_elements(
-                            COALESCE(("value"::jsonb)->'lockedPeriods', '[]'::jsonb)
-                        ) AS period_row
-                    ), '[]'::jsonb)
+                WITH source AS MATERIALIZED (
+                    SELECT "value"::jsonb AS data FROM "AppConfig"
+                    WHERE "key" = 'attendanceData' LIMIT 1
+                )
+                SELECT jsonb_build_object(
+                    'config', data->'config',
+                    'employees', data->'employees',
+                    'extraFines', data->'extraFines',
+                    'fineAuditLog', data->'fineAuditLog',
+                    'fineWaivers', data->'fineWaivers',
+                    'workSchedules', data->'workSchedules',
+                    'leaveRecords', data->'leaveRecords'
                 )::text AS "value"
-                FROM "AppConfig"
-                WHERE "key" = 'attendanceData'
-                LIMIT 1
+                FROM source
             `)?.[0]
             : await tx.appConfig.findUnique({ where: { key: 'attendanceData' } });
         if (!configRow) return { created: [], updated: [], waived: [], skippedDeleted: 0, unmatched: [], checked: 0 };
@@ -142,16 +154,6 @@ async function reconcileLateAttendanceFinesNow(prisma, options = {}) {
             throw new Error('Dữ liệu cấu hình chấm công không hợp lệ');
         }
 
-        const config = { ...DEFAULT_ATTENDANCE_CONFIG, ...(attendanceData.config || {}) };
-        const employees = Array.isArray(attendanceData.employees) ? attendanceData.employees : [];
-        const employeesById = new Map(employees.map(employee => [Number(employee.id), employee]));
-        const existingFines = Array.isArray(attendanceData.extraFines) ? attendanceData.extraFines : [];
-        const fineAuditLog = Array.isArray(attendanceData.fineAuditLog) ? attendanceData.fineAuditLog : [];
-        const fineWaivers = Array.isArray(attendanceData.fineWaivers) ? attendanceData.fineWaivers : [];
-        const deletedFines = fineAuditLog
-            .filter(entry => entry?.action === 'delete' && entry?.before)
-            .map(entry => entry.before);
-
         const logs = await tx.attendanceLog.findMany({
             where: {
                 checkType: { in: ['morning_in', 'afternoon_in'] },
@@ -161,12 +163,53 @@ async function reconcileLateAttendanceFinesNow(prisma, options = {}) {
             },
             orderBy: { timestamp: 'asc' },
         });
+        const { result, patch } = calculateLateAttendanceFinePlan(attendanceData, logs, options);
+        if (patch) {
+            if (typeof tx.$queryRaw === 'function') {
+                // Only fine branches change; payroll snapshots stay untouched.
+                await tx.$executeRaw`
+                    UPDATE "AppConfig"
+                    SET "value" = jsonb_set(
+                        jsonb_set(
+                            jsonb_set("value"::jsonb, '{extraFines}', ${JSON.stringify(patch.extraFines)}::jsonb, true),
+                            '{fineWaivers}', ${JSON.stringify(patch.fineWaivers)}::jsonb, true
+                        ), '{fineAuditLog}', ${JSON.stringify(patch.fineAuditLog)}::jsonb, true
+                    )::text, "updatedAt" = NOW()
+                    WHERE "key" = 'attendanceData'
+                `;
+            } else {
+                await tx.appConfig.update({
+                    where: { key: 'attendanceData' },
+                    data: { value: JSON.stringify({ ...attendanceData, ...patch }) },
+                });
+            }
+        }
+        return result;
+    }, { isolationLevel: 'Serializable', timeout: 30000, maxWait: 10000 });
+}
+
+function calculateLateAttendanceFinePlan(attendanceData, logs, options = {}) {
+        const config = { ...DEFAULT_ATTENDANCE_CONFIG, ...(attendanceData.config || {}) };
+        const employees = Array.isArray(attendanceData.employees) ? attendanceData.employees : [];
+        const employeesById = new Map(employees.map(employee => [Number(employee.id), employee]));
+        const existingFines = Array.isArray(attendanceData.extraFines) ? attendanceData.extraFines : [];
+        const fineAuditLog = Array.isArray(attendanceData.fineAuditLog) ? attendanceData.fineAuditLog : [];
+        const fineWaivers = Array.isArray(attendanceData.fineWaivers) ? attendanceData.fineWaivers : [];
+        let ledger = { extraFines: existingFines, fineAuditLog };
+        let patch = null;
+        const deletedFines = fineAuditLog
+            .filter(entry => entry?.action === 'delete' && entry?.before)
+            .map(entry => entry.before);
 
         // Dữ liệu cũ từng cho phép nhiều log cùng ca. Chỉ lần vào đầu tiên mới dùng để tính phạt.
         const firstLogs = new Map();
+        const rewardLogsByEmployee = new Map();
         for (const log of logs) {
             const key = `${normalizeIdentity(log.faceId)}|${log.date}|${log.checkType}`;
             if (!firstLogs.has(key)) firstLogs.set(key, log);
+            const employeeId = resolveEmployeeId(log, employees);
+            if (!rewardLogsByEmployee.has(employeeId)) rewardLogsByEmployee.set(employeeId, []);
+            rewardLogsByEmployee.get(employeeId).push(log);
         }
 
         const created = [];
@@ -228,15 +271,16 @@ async function reconcileLateAttendanceFinesNow(prisma, options = {}) {
             )) || waived.some((waiver) => (
                 Number(waiver.empId) === Number(employee.id) && waiver.periodKey === periodKey
             ));
-            const logsThroughThisCheckIn = logs.filter((candidate) => (
-                new Date(candidate.timestamp).getTime() <= new Date(log.timestamp).getTime()
-            ));
             const rewardSummary = waiverAlreadyUsed
                 ? null
                 : calculateAttendanceRewardSummary({
                     employee,
                     employees,
-                    logs: logsThroughThisCheckIn,
+                    // Preserve reward identity rules, but avoid rescanning every
+                    // other employee's history for each late check-in.
+                    logs: (rewardLogsByEmployee.get(Number(employee.id)) || []).filter((candidate) => (
+                        new Date(candidate.timestamp).getTime() <= timestamp.getTime()
+                    )),
                     workSchedules: attendanceData.workSchedules || [],
                     leaveRecords: attendanceData.leaveRecords || [],
                     fineWaivers,
@@ -339,45 +383,46 @@ async function reconcileLateAttendanceFinesNow(prisma, options = {}) {
                         note: `Tự động dùng lượt miễn phạt chuyên cần cho log #${item.fine.attendanceLogId}: ${item.reason}`,
                     })),
                 ];
-            if (typeof tx.$queryRaw === 'function') {
-                // Update only the fine branches so historical payroll snapshots
-                // remain byte-for-byte intact without a large DB round trip.
-                await tx.$executeRaw`
-                    UPDATE "AppConfig"
-                    SET "value" = jsonb_set(
-                            jsonb_set(
-                                jsonb_set("value"::jsonb, '{extraFines}', ${JSON.stringify(nextExtraFines)}::jsonb, true),
-                                '{fineWaivers}', ${JSON.stringify(nextFineWaivers)}::jsonb, true
-                            ),
-                            '{fineAuditLog}', ${JSON.stringify(nextFineAuditLog)}::jsonb, true
-                        )::text,
-                        "updatedAt" = NOW()
-                    WHERE "key" = 'attendanceData'
-                `;
-            } else {
-                await tx.appConfig.update({
-                    where: { key: 'attendanceData' },
-                    data: {
-                        value: JSON.stringify({
-                            ...attendanceData,
-                            extraFines: nextExtraFines,
-                            fineWaivers: nextFineWaivers,
-                            fineAuditLog: nextFineAuditLog,
-                        }),
-                    },
-                });
-            }
+            patch = { extraFines: nextExtraFines, fineWaivers: nextFineWaivers, fineAuditLog: nextFineAuditLog };
+            ledger = { extraFines: nextExtraFines, fineAuditLog: nextFineAuditLog };
         }
 
-        return { created, updated, waived, skippedDeleted, unmatched, checked: firstLogs.size };
-    }, { isolationLevel: 'Serializable', timeout: 15000, maxWait: 10000 });
+        return { patch, result: { created, updated, waived, skippedDeleted, unmatched, checked: firstLogs.size,
+            ...(options.includeLedger ? { ledger } : {}),
+        } };
 }
 
 function reconcileLateAttendanceFines(prisma, options = {}) {
-    const run = () => reconcileLateAttendanceFinesNow(prisma, options);
+    let requests;
+    const requestKey = JSON.stringify(options);
+    if (options.readOnlyProbe) {
+        requests = overviewReadsInFlight.get(prisma);
+        if (!requests) overviewReadsInFlight.set(prisma, requests = new Map());
+        const existing = requests.get(requestKey);
+        if (existing) return existing;
+    }
+    const run = async () => {
+        for (let attempt = 0; ; attempt += 1) {
+            try {
+                return await reconcileLateAttendanceFinesNow(prisma, options);
+            } catch (error) {
+                // Retry only rolled-back conflicts/expiry, with a fresh locked read.
+                const retryable = error?.code === 'P2034'
+                    || (error?.code === 'P2028' && /expired|already closed/i.test(error.message))
+                    || ['55P03', '40001', '40P01'].includes(error?.meta?.code);
+                if (!retryable || attempt >= 1) throw error;
+                await new Promise(resolve => setTimeout(resolve, 250));
+            }
+        }
+    };
     const result = reconcileQueue.then(run, run);
     reconcileQueue = result.then(() => undefined, () => undefined);
+    if (requests) {
+        requests.set(requestKey, result);
+        const clear = () => { if (requests.get(requestKey) === result) requests.delete(requestKey); };
+        void result.then(clear, clear);
+    }
     return result;
 }
 
-module.exports = { getEmployeeForLog, normalizeIdentity, reconcileLateAttendanceFines };
+module.exports = { getEmployeeForLog, normalizeIdentity, reconcileLateAttendanceFines, calculateLateAttendanceFinePlan };

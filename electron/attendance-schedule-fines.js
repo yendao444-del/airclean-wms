@@ -133,7 +133,20 @@ async function reconcileMissingSeasonalScheduleFines(prisma, options = {}) {
       try {
         const result = await prisma.$transaction(async (tx) => {
         await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('attendanceData'))`;
-        const configRow = await tx.appConfig.findUnique({ where: { key: 'attendanceData' } });
+        // Keep large payroll snapshots in PostgreSQL. Reconciliation needs
+        // only these fields and must not rewrite unrelated attendance data.
+        const configRows = await tx.$queryRaw`
+            SELECT jsonb_build_object(
+                'employees', "value"::jsonb->'employees',
+                'workSchedules', "value"::jsonb->'workSchedules',
+                'leaveRecords', "value"::jsonb->'leaveRecords',
+                'extraFines', "value"::jsonb->'extraFines',
+                'fineAuditLog', "value"::jsonb->'fineAuditLog',
+                'config', "value"::jsonb->'config'
+            )::text AS "value"
+            FROM "AppConfig" WHERE "key" = 'attendanceData'
+        `;
+        const configRow = configRows[0];
         if (!configRow) return { created: [], removed: [], checked: 0 };
 
         let attendanceData = {};
@@ -144,11 +157,18 @@ async function reconcileMissingSeasonalScheduleFines(prisma, options = {}) {
         const existingFines = Array.isArray(attendanceData.extraFines) ? attendanceData.extraFines : [];
         const fineAuditLog = Array.isArray(attendanceData.fineAuditLog) ? attendanceData.fineAuditLog : [];
         const deletedIds = deletedFineIds(fineAuditLog);
+        const targetDates = options.dateKey ? [String(options.dateKey)] : dateRangeThroughToday(evaluationNow);
+        const latestLogDate = options.dateKey ? String(options.dateKey) : dateKeyFromTimestamp(evaluationNow);
         const logs = await tx.attendanceLog.findMany({
-            where: { date: { gte: POLICY_EFFECTIVE_DATE }, checkType: { in: ['morning_in', 'morning_out', 'afternoon_in', 'evening_out'] } },
+            where: {
+                date: options.dateKey
+                    ? String(options.dateKey)
+                    : { gte: POLICY_EFFECTIVE_DATE, lte: latestLogDate },
+                checkType: { in: ['morning_in', 'morning_out', 'afternoon_in', 'evening_out'] },
+            },
+            select: { faceId: true, userName: true, date: true, timestamp: true, checkType: true },
             orderBy: { timestamp: 'asc' },
         });
-        const targetDates = options.dateKey ? [String(options.dateKey)] : dateRangeThroughToday(evaluationNow);
         const created = [];
         const removed = [];
         const updated = [];
@@ -276,8 +296,13 @@ async function reconcileMissingSeasonalScheduleFines(prisma, options = {}) {
             ...created,
         ];
         if (created.length || removed.length || updated.length) {
-            attendanceData = { ...attendanceData, extraFines: nextFines };
-            await tx.appConfig.update({ where: { key: 'attendanceData' }, data: { value: JSON.stringify(attendanceData) } });
+            const patch = JSON.stringify({ extraFines: nextFines });
+            await tx.$executeRaw`
+                UPDATE "AppConfig"
+                SET "value" = ("value"::jsonb || ${patch}::jsonb)::text,
+                    "updatedAt" = CURRENT_TIMESTAMP
+                WHERE "key" = 'attendanceData'
+            `;
         }
         return { created, removed, updated, checked: targetDates.length };
         }, { isolationLevel: 'Serializable', timeout: 15000, maxWait: 10000 });

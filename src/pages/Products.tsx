@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
 import {
     Card,
     Button,
@@ -33,6 +33,18 @@ interface GoodsCompany {
 }
 
 export default function ProductsPage() {
+    const pageRef = useRef<HTMLDivElement>(null);
+    const [contentWidth, setContentWidth] = useState(0);
+    const isNarrow = contentWidth < 1250;
+    const isCardLayout = contentWidth < 850;
+
+    useEffect(() => {
+        const page = pageRef.current;
+        if (!page) return;
+        const observer = new ResizeObserver(([entry]) => setContentWidth(entry.contentRect.width));
+        observer.observe(page);
+        return () => observer.disconnect();
+    }, []);
     const currentUser = useCurrentUser();
     const { user } = useAuth();
     const { setHeaderExtra, clearHeaderExtra } = usePageHeader();
@@ -778,13 +790,15 @@ export default function ProductsPage() {
     const columns = [
         {
             title: 'Tên sản phẩm',
+            className: 'products-cell-name',
             dataIndex: 'name',
             key: 'name',
             width: 200,
             minWidth: 150,
             render: (text: string, record: Product) => (
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <div className="products-name-content" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                     <span style={{ color: '#262626', fontWeight: 500 }}>{text}</span>
+                    {isCardLayout && <small className="products-mobile-sku">{record.sku}</small>}
                     {record.isCombo && (
                         <Tag
                             style={{
@@ -808,6 +822,7 @@ export default function ProductsPage() {
             key: 'variants',
             width: 220,
             minWidth: 180,
+            responsive: ['sm'] as Breakpoint[],
             render: (variants: string | null, record: Product) => {
                 // Ẩn nếu row đang expand
                 if (expandedRowKeys.includes(record.id)) return null;
@@ -841,6 +856,7 @@ export default function ProductsPage() {
             key: 'sku',
             width: 120,
             minWidth: 100,
+            responsive: ['sm'] as Breakpoint[],
             render: (text: string, record: Product) => {
                 if (expandedRowKeys.includes(record.id)) return null;
                 return <strong style={{ color: '#00ab56' }}>{text}</strong>;
@@ -889,6 +905,7 @@ export default function ProductsPage() {
         },
         {
             title: 'Giá bán',
+            className: 'products-cell-price',
             dataIndex: 'price',
             key: 'price',
             width: 120,
@@ -935,6 +952,7 @@ export default function ProductsPage() {
         },
         {
             title: '📦 Tồn kho',
+            className: 'products-cell-stock',
             dataIndex: 'stock',
             key: 'stock',
             width: 130,
@@ -1023,10 +1041,11 @@ export default function ProductsPage() {
         },
         {
             title: 'Thao tác',
+            className: 'products-cell-actions',
             key: 'actions',
             width: 120,
             minWidth: 100,
-            fixed: 'right' as const,
+            fixed: isNarrow ? undefined : 'right' as const,
             onCell: () => ({
                 onClick: (event) => event.stopPropagation(),
             }),
@@ -1099,7 +1118,7 @@ export default function ProductsPage() {
 
 
     return (
-        <div>
+        <div ref={pageRef} className={`products-page${isCardLayout ? ' products-page--cards' : ''}`}>
             {/* Search Bar - Responsive */}
             <div className="products-search" style={{ marginBottom: 16 }}>
                 <Input.Search
@@ -1126,7 +1145,10 @@ export default function ProductsPage() {
             >
                 <Table
                     className="products-table"
-                    columns={columns}
+                    columns={isNarrow ? columns.filter(column =>
+                        ['name', 'sku', 'price', 'stock', 'actions'].includes(column.key)
+                        || (contentWidth >= 1180 && column.key === 'variants')
+                    ) : columns}
                     dataSource={filteredProducts}
                     rowKey="id"
                     loading={loading}
@@ -1135,7 +1157,7 @@ export default function ProductsPage() {
                         showSizeChanger: true,
                         showTotal: (total) => searchText ? `Tìm thấy ${total} / ${products.length} sản phẩm` : `Tổng ${total} sản phẩm`,
                     }}
-                    scroll={{ x: 'max-content' }}
+                    scroll={isNarrow ? undefined : { x: 'max-content' }}
                     rowSelection={{
                         selectedRowKeys,
                         onChange: (selectedKeys) => {
@@ -1539,6 +1561,7 @@ export default function ProductsPage() {
 
             <Modal
                 title={editingProduct ? '✏️ Sửa sản phẩm' : '➕ Thêm sản phẩm mới'}
+                className="products-editor-modal"
                 open={modalVisible}
                 onCancel={() => setModalVisible(false)}
                 footer={null}
@@ -1558,7 +1581,7 @@ export default function ProductsPage() {
                     }}
                 >
                     {/* SKU + Barcode on same row */}
-                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+                    <div className="products-form-pair">
                         <Form.Item
                             label="Mã SKU"
                             name="sku"
@@ -1631,7 +1654,7 @@ export default function ProductsPage() {
                     {/* Hide price/stock when variants exist - each variant has its own */}
                     {variants.length === 0 && (
                         <>
-                            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+                            <div className="products-form-pair">
                                 <Form.Item
                                     label="Giá vốn"
                                     name="cost"
@@ -1658,7 +1681,7 @@ export default function ProductsPage() {
                                 </Form.Item>
                             </div>
 
-                            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+                            <div className="products-form-pair">
                                 <Form.Item
                                     label={
                                         <span>
@@ -1718,7 +1741,7 @@ export default function ProductsPage() {
                                 Sản phẩm chưa có phân loại. Click "+ Thêm màu" để thêm.
                             </div>
                         ) : (
-                            <div style={{ maxHeight: 350, overflowY: 'auto' }}>
+                            <div className="products-variants-list" style={{ maxHeight: 350, overflowY: 'auto' }}>
                                 {/* Column Headers - Responsive */}
                                 <div className="variant-header-grid" style={{
                                     display: 'grid',
@@ -1750,7 +1773,7 @@ export default function ProductsPage() {
                                     <div style={{ marginBottom: 8, fontSize: 12, color: '#1890ff', fontWeight: 600 }}>
                                         📋 Áp dụng hàng loạt cho tất cả phân loại
                                     </div>
-                                    <div style={{
+                                <div className="products-bulk-grid" style={{
                                         display: 'grid',
                                         gridTemplateColumns: '1.2fr 0.9fr 0.9fr 0.7fr 1.3fr',
                                         gap: 8,
@@ -1972,7 +1995,7 @@ export default function ProductsPage() {
                                                         </div>
 
                                                         {/* Combo Details Grid */}
-                                                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 8 }}>
+                                                        <div className="products-combo-grid" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 8 }}>
                                                             <div>
                                                                 <div style={{ fontSize: 11, marginBottom: 4, color: '#8c8c8c' }}>Giá nhập</div>
                                                                 <InputNumber

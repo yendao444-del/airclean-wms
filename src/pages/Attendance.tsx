@@ -1,10 +1,21 @@
 import { useState, useMemo, useCallback, useRef, useEffect, useTransition, forwardRef, useImperativeHandle, cloneElement, isValidElement } from 'react';
 import AttendancePackingChart from '../components/AttendancePackingChart';
+import { awaitPackingRequest, packingRequestIdentity } from '../lib/packingRequest';
 import { Medal } from '@phosphor-icons/react';
 import { useCurrentUser } from '../lib/hooks/useCurrentUser';
 import { useAuth } from '../contexts/AuthContext';
 import { usePageHeader } from '../contexts/PageHeaderContext';
 import type { AttendanceRewardSummary } from '../types/electron';
+import {
+    VAT_FIRST_FINE_AFTER_DAYS,
+    VAT_FINE_POLICY_EFFECTIVE_AT,
+    countVatChargeableDays,
+    getVatFineAmount,
+    getVatFineDate,
+    getVatFineId,
+    getVatFineStage,
+    isVatFineOnSchedule,
+} from '../lib/vatFineSchedule';
 import {
     STOCK_CHECK_MISSING_FINE_ENABLED,
     STOCK_CHECK_MISSING_FINE,
@@ -181,6 +192,7 @@ interface FineRecord {
     detail: string;
     amount: number;
     date?: string; // ISO string — ngày tạo phạt
+    attendanceDate?: string;
     source?: string; // nguồn tạo phạt
     disabled?: boolean;
     taskId?: number | string;
@@ -887,6 +899,15 @@ const normalizeAttendanceText = (value?: string | null) =>
         .replace(/\s+/g, ' ')
         .trim();
 
+const isTemporarilyExcludedFine = (fine: Partial<FineRecord>) => {
+    if (fine.source === 'prepack-shortfall') {
+        const dateKey = String(fine.attendanceDate || (fine.date && dayjs(fine.date).format('YYYY-MM-DD')) || '');
+        return dateKey < '2026-09-30';
+    }
+    return String(fine.source || '').startsWith('daily_task_')
+        && normalizeAttendanceText(`${(fine as any).taskTitle || ''} ${fine.detail || ''}`).includes('tach kien 5d unicare');
+};
+
 const isSameEmployeeId = (left: unknown, right: unknown) => {
     const leftId = Number(left);
     const rightId = Number(right);
@@ -1074,12 +1095,6 @@ const fmtCompactMoney = (v: number) => {
 };
 
 // Hoa hồng đóng gói tính theo số gói thực tế trên từng dòng đơn hàng.
-const VAT_OVERDUE_FINE_FIRST_AMOUNT = 30000;
-const VAT_OVERDUE_FINE_STAGE_INCREMENT = 10000;
-const VAT_FIRST_FINE_AFTER_DAYS = 5;
-// 10/08 is the final submission day. The first automatic VAT fine may only
-// be created from 00:00 on 11/08.
-const VAT_FINE_POLICY_EFFECTIVE_AT = dayjs('2026-08-11T00:00:00');
 const RETURN_OVERDUE_FINE_FIRST_AMOUNT = 30000;
 const RETURN_OVERDUE_FINE_DAILY_INCREMENT = 10000;
 const RETURN_FIRST_FINE_AFTER_DAYS = 10;
@@ -1152,59 +1167,6 @@ const getRefundFineStage = (refundAt: dayjs.Dayjs, now = dayjs()) => {
 const getRefundFineId = (refundId: number, refundAt: dayjs.Dayjs, stage: number) => {
     const penaltyDate = getRefundFineDate(refundAt, stage);
     return `refund-overdue-${refundId}-stage-${stage}-workday-${penaltyDate.format('YYYYMMDD')}`;
-};
-
-// Sunday is not a VAT penalty day. The 5-day grace period remains unchanged;
-// if a fine date lands on Sunday it moves to the next chargeable day, and the
-// later escalation schedule continues through Monday-Saturday.
-const addVatChargeableDays = (start: dayjs.Dayjs, count: number) => {
-    let cursor = start.startOf('day');
-    let added = 0;
-    while (added < Math.max(0, count)) {
-        cursor = cursor.add(1, 'day');
-        if (cursor.day() !== 0) added += 1;
-    }
-    return cursor;
-};
-
-const getVatFirstFineAt = (purchaseAt: dayjs.Dayjs) => {
-    // VAT deadlines are calendar-day based, not based on the purchase time.
-    // A receipt dated 06/08 remains valid through 10/08 and is first fined
-    // at 00:00 on 11/08.
-    const normalFirstFineAt = purchaseAt.startOf('day').add(VAT_FIRST_FINE_AFTER_DAYS, 'day');
-    const effectiveFirstFineAt = normalFirstFineAt.isBefore(VAT_FINE_POLICY_EFFECTIVE_AT)
-        ? VAT_FINE_POLICY_EFFECTIVE_AT
-        : normalFirstFineAt;
-    return effectiveFirstFineAt.day() === 0 ? effectiveFirstFineAt.add(1, 'day') : effectiveFirstFineAt;
-};
-
-const getVatFineStage = (purchaseAt: dayjs.Dayjs, now = dayjs()) => {
-    const firstFineAt = getVatFirstFineAt(purchaseAt);
-    if (now.isBefore(firstFineAt)) return 0;
-    let stage = 0;
-    while (stage < 366 && !now.isBefore(getVatFineDate(purchaseAt, stage + 1))) stage += 1;
-    return stage;
-};
-
-const getVatFineDate = (purchaseAt: dayjs.Dayjs, stage: number) => {
-    const delayDays = stage <= 3 ? (stage - 1) * 2 : stage + 1;
-    return addVatChargeableDays(getVatFirstFineAt(purchaseAt), delayDays);
-};
-
-const getVatFineAmount = (stage: number) =>
-    VAT_OVERDUE_FINE_FIRST_AMOUNT + (Math.max(1, stage) - 1) * VAT_OVERDUE_FINE_STAGE_INCREMENT;
-
-const getVatFineId = (purchaseId: number, purchaseAt: dayjs.Dayjs, stage: number) => {
-    const baseId = stage === 1 ? `vat-overdue-${purchaseId}` : `vat-overdue-${purchaseId}-stage-${stage}`;
-    const legacyFirstFineAt = purchaseAt.startOf('day').add(VAT_FIRST_FINE_AFTER_DAYS, 'day');
-    const effectiveLegacyFirstFineAt = legacyFirstFineAt.isBefore(VAT_FINE_POLICY_EFFECTIVE_AT)
-        ? VAT_FINE_POLICY_EFFECTIVE_AT
-        : legacyFirstFineAt;
-    const legacyDate = effectiveLegacyFirstFineAt.add(stage <= 3 ? (stage - 1) * 2 : stage + 1, 'day');
-    const correctedDate = getVatFineDate(purchaseAt, stage);
-    return correctedDate.isSame(legacyDate, 'day')
-        ? baseId
-        : `${baseId}-workday-${correctedDate.format('YYYYMMDD')}`;
 };
 
 const getRequiredCompanyVatEntries = (purchase: PurchaseVatTracking) => {
@@ -4653,9 +4615,17 @@ export default function Attendance() {
                 let dbAuditLog = fineAuditLogStateRef.current;
 
                 if (isAdmin && api.attendance?.reconcileLateFines) {
+                    const reconcileStartedAt = performance.now();
                     const reconcileResult = await api.attendance.reconcileLateFines();
+                    console.info('[Attendance:load] late-fine reconcile ms:', Math.round(performance.now() - reconcileStartedAt));
                     if (!reconcileResult?.success) {
                         console.error('Lỗi đối soát phạt đi muộn:', reconcileResult?.error);
+                    } else if (Array.isArray(reconcileResult.data?.ledger?.extraFines)
+                        && Array.isArray(reconcileResult.data?.ledger?.fineAuditLog)) {
+                        // The ledger is from the committed reconciliation snapshot;
+                        // avoid reading the large attendance document a second time.
+                        dbFines = reconcileResult.data.ledger.extraFines;
+                        dbAuditLog = reconcileResult.data.ledger.fineAuditLog;
                     } else {
                         const latest = api.attendance?.getInitialData
                             ? await api.attendance.getInitialData()
@@ -4914,13 +4884,38 @@ export default function Attendance() {
     const packingLoadCountRef = useRef(0);
     const loadPackingPromiseRef = useRef<{
         key: string;
+        summaryOnly: boolean;
+        policyKey: string;
         sinceMs: number;
         untilMs: number;
         promise: Promise<PackingOrderLog[]>;
     } | null>(null);
     const [packingReadyKey, setPackingReadyKey] = useState('');
+    const [packingReadyPolicy, setPackingReadyPolicy] = useState('');
     const [packingLoadError, setPackingLoadError] = useState('');
     const [packingOrdersLoading, setPackingOrdersLoading] = useState(false);
+
+    const packingCommission = useMemo(() => {
+        const commission = normalizePackingCommission(config.packingCommission);
+        const expandSkuLevels = (source: Record<string, string>) => {
+            const expanded = { ...source };
+            packingCatalog.forEach(product => {
+                const parentLevel = source[normalizePackingSku(product.sku)];
+                if (!parentLevel) return;
+                product.memberSkus.forEach(sku => { expanded[normalizePackingSku(sku)] = parentLevel; });
+            });
+            return expanded;
+        };
+        return {
+            ...commission,
+            skuLevels: expandSkuLevels(commission.skuLevels),
+            history: (commission.history || []).map(version => ({
+                ...version,
+                skuLevels: expandSkuLevels(version.skuLevels),
+            })),
+        };
+    }, [config.packingCommission, packingCatalog]);
+    const packingPolicyKey = useMemo(() => JSON.stringify(packingCommission), [packingCommission]);
 
     useEffect(() => {
         if (activeTab !== 'packaging') return;
@@ -4937,6 +4932,8 @@ export default function Attendance() {
         const requestStartMs = dayjs(sinceVal).startOf('day').valueOf();
         const requestEndMs = dayjs(untilVal).endOf('day').valueOf();
         const requestKey = `${requestStartMs}-${requestEndMs}`;
+        const summaryOnly = Boolean(options?.summaryOnly);
+        const requestIdentity = packingRequestIdentity(requestKey, summaryOnly, packingPolicyKey);
         const filterRequestedRange = (rows: PackingOrderLog[]) => rows.filter(order => {
             const timestamp = Date.parse(order.timestamp);
             return Number.isFinite(timestamp) && timestamp >= requestStartMs && timestamp <= requestEndMs;
@@ -4952,11 +4949,12 @@ export default function Attendance() {
                     if (oldestKey) packingOrderCacheRef.current.delete(oldestKey);
                 }
             }
-            if (packingRequestKeyRef.current === requestKey) {
+            if (packingRequestKeyRef.current === requestIdentity) {
                 packingOrderLogsRef.current = sorted;
                 startBackgroundTransition(() => {
                     setPackingOrderLogsData(sorted);
                     setPackingReadyKey(requestKey);
+                    setPackingReadyPolicy(packingPolicyKey);
                     setPackingLoadError('');
                 });
             }
@@ -4964,12 +4962,12 @@ export default function Attendance() {
         };
         // A stale background refresh must never replace the range the user is
         // currently viewing.
-        if (options?.silent && packingRequestKeyRef.current !== requestKey) {
+        if (options?.silent && packingRequestKeyRef.current !== requestIdentity) {
             return packingOrderLogsRef.current;
         }
-        if (!options?.silent) packingRequestKeyRef.current = requestKey;
+        if (!options?.silent) packingRequestKeyRef.current = requestIdentity;
 
-        if (loadPackingPromiseRef.current?.key === requestKey) {
+        if (loadPackingPromiseRef.current?.key === requestIdentity) {
             console.log('[PACKING] Await existing loading promise');
             try {
                 return await loadPackingPromiseRef.current.promise;
@@ -4985,6 +4983,8 @@ export default function Attendance() {
         const widerRequest = loadPackingPromiseRef.current;
         if (!options?.force
             && widerRequest
+            && !summaryOnly && !widerRequest.summaryOnly
+            && widerRequest.policyKey === packingPolicyKey
             && widerRequest.sinceMs <= requestStartMs
             && widerRequest.untilMs >= requestEndMs) {
             try {
@@ -4997,13 +4997,14 @@ export default function Attendance() {
 
         // Reopening the same period should not parse thousands of orders again.
         // Silent revision refreshes intentionally bypass this cache below.
-        if (!options?.silent && !options?.strict && !options?.force) {
+        if (!summaryOnly && !options?.silent && !options?.strict && !options?.force) {
             const cached = packingOrderCacheRef.current.get(requestKey);
             if (cached) {
                 packingOrderLogsRef.current = cached;
                 startBackgroundTransition(() => {
                     setPackingOrderLogsData(cached);
                     setPackingReadyKey(requestKey);
+                    setPackingReadyPolicy(packingPolicyKey);
                     setPackingLoadError('');
                 });
                 // Show cached data immediately, then validate it in the background.
@@ -5034,6 +5035,7 @@ export default function Attendance() {
                     startBackgroundTransition(() => {
                         setPackingOrderLogsData([]);
                         setPackingReadyKey(requestKey);
+                        setPackingReadyPolicy(packingPolicyKey);
                         setPackingLoadError('');
                     });
                     return [];
@@ -5045,11 +5047,10 @@ export default function Attendance() {
 
             // A timeout is not an empty business result. Keep the last known
             // successful data so a transient failure cannot erase payroll.
-            const withTimeout = (p: Promise<any>, label: string, ms = 10000) =>
-                Promise.race([
-                    p.then(r => { console.log(`[PACKING] ✅ ${label}:`, r?.data?.length || 0); return r; }),
-                    new Promise((_, reject) => setTimeout(() => reject(`${label} TIMEOUT (${ms}ms)`), ms))
-                ]).catch(e => { console.warn(`[PACKING] ⚠️ ${label} failed:`, e); return { success: false, error: String(e) }; });
+            const withTimeout = (p: Promise<any>, label: string) =>
+                awaitPackingRequest(p, label)
+                    .then(r => { console.log(`[PACKING] ✅ ${label}:`, r?.data?.length || 0); return r; })
+                    .catch(e => { console.warn(`[PACKING] ⚠️ ${label} failed:`, e); return { success: false, error: String(e) }; });
 
             if (options?.summaryOnly && api.ecommerceExports.getPackingPayrollSummary) {
                 const summaryRes = await withTimeout(
@@ -5213,14 +5214,18 @@ export default function Attendance() {
         } catch (error) {
             console.error('Lỗi tải dữ liệu đơn hàng:', error);
             const errorMessage = error instanceof Error ? error.message : 'Không thể tải dữ liệu đơn đóng gói.';
-            if (!options?.silent && packingRequestKeyRef.current === requestKey) setPackingLoadError(errorMessage);
-            if (!options?.silent) message.error(errorMessage);
+            if (!options?.silent && packingRequestKeyRef.current === requestIdentity) {
+                setPackingLoadError(errorMessage);
+                message.error(errorMessage);
+            }
             throw error;
         }
         })();
 
         loadPackingPromiseRef.current = {
-            key: requestKey,
+            key: requestIdentity,
+            summaryOnly,
+            policyKey: packingPolicyKey,
             sinceMs: requestStartMs,
             untilMs: requestEndMs,
             promise: task,
@@ -5235,7 +5240,7 @@ export default function Attendance() {
             if (options?.strict) throw error;
             return packingOrderLogsRef.current;
         } finally {
-            if (loadPackingPromiseRef.current?.key === requestKey) loadPackingPromiseRef.current = null;
+            if (loadPackingPromiseRef.current?.promise === task) loadPackingPromiseRef.current = null;
             if (!options?.silent) {
                 packingLoadCountRef.current = Math.max(0, packingLoadCountRef.current - 1);
                 setPackingOrdersLoading(packingLoadCountRef.current > 0);
@@ -5534,17 +5539,14 @@ export default function Attendance() {
         };
     }, [isDbLoaded, overviewDateRange, activeTab, fineSourcesRangeKey, logFinesPerf]);
 
-    // Packing is independent from the auxiliary fine sources. Start it as soon
-    // as the overview mounts. The IPC call is asynchronous, so deferring it
-    // behind requestIdleCallback only adds latency to the payroll readiness gate
-    // without reducing database work or changing the rendered result.
+    // Packing is independent from the auxiliary fine sources, but summarized
+    // income needs the catalog's parent/variant SKU expansion before calculation.
     useEffect(() => {
         // The summary endpoint computes historical commission values in the
-        // main process, so wait for the core snapshot that contains the active
-        // commission history instead of capturing the default rates.
-        if (activeTab !== 'overview' || !isCoreSnapshotReady) return;
+        // main process, so wait for the active history and complete SKU mapping.
+        if (activeTab !== 'overview' || !isCoreSnapshotReady || !packingCatalogReady) return;
         void loadPackingOrders(getPackingLoadStart(overviewDateRange[0]).toISOString(), { range: overviewDateRange, summaryOnly: true });
-    }, [activeTab, isCoreSnapshotReady, overviewDateRange, config.packingCommission]);
+    }, [activeTab, isCoreSnapshotReady, overviewDateRange, packingPolicyKey, packingCatalogReady]);
 
     // Đóng gói dùng khoảng tuần riêng; không thay đổi kỳ tháng của các tab còn lại.
     useEffect(() => {
@@ -5658,6 +5660,23 @@ export default function Attendance() {
         };
     }, [isDbLoaded, activeTab, packingDateRange]);
 
+    const vatPurchaseById = useMemo(
+        () => new Map(purchaseVatTracking.map(purchase => [Number(purchase.id), purchase])),
+        [purchaseVatTracking],
+    );
+    const isVatFineOutsideSchedule = useCallback((fine: Partial<FineRecord>) => {
+        if (fine.source !== 'purchase_vat_overdue' || !fine.id || !fine.date) return false;
+        const fineAt = dayjs(fine.date);
+        if (!fineAt.isValid()) return false;
+        if (fineAt.day() === 0) return true;
+        const idMatch = String(fine.id).match(/^vat-overdue-(\d+)(?:-stage-(\d+))?/);
+        if (!idMatch) return false;
+        const purchase = vatPurchaseById.get(Number(idMatch[1]));
+        if (!purchase) return false;
+        const purchaseAt = dayjs(purchase.purchaseDate || purchase.createdAt);
+        return purchaseAt.isValid() && !isVatFineOnSchedule(purchaseAt, fineAt, Number(idMatch[2] || 1));
+    }, [vatPurchaseById]);
+
     // Gộp finesData gốc + extraFines
     const autoVatOverdueFines = useMemo(() => {
         return purchaseVatTracking.flatMap((purchase) => {
@@ -5707,12 +5726,11 @@ export default function Attendance() {
 
     // Correct invalid automatic VAT deductions without touching manual fines:
     // - pre-policy rows;
-    // - rows whose old calendar schedule differs from the Sunday-free schedule;
+    // - rows whose old calendar schedule counted Sunday in the VAT grace period;
     // - rows created after every real goods company had already uploaded VAT
     //   or selected THHT/no-VAT. Stale "Chưa chọn công ty" data is ignored.
     useEffect(() => {
         if (!isAdmin || !isDbLoaded || employees.length === 0) return;
-        const purchaseById = new Map(purchaseVatTracking.map(purchase => [purchase.id, purchase]));
         const invalidFines = extraFines.filter(fine => {
             if (fine.source !== 'purchase_vat_overdue' || !fine.id || !fine.date) return false;
             const fineAt = dayjs(fine.date);
@@ -5720,11 +5738,9 @@ export default function Attendance() {
             if (fineAt.isBefore(VAT_FINE_POLICY_EFFECTIVE_AT)) return true;
             const idMatch = String(fine.id).match(/^vat-overdue-(\d+)(?:-stage-(\d+))?/);
             if (!idMatch) return false;
-            const purchase = purchaseById.get(Number(idMatch[1]));
+            const purchase = vatPurchaseById.get(Number(idMatch[1]));
             if (!purchase) return false;
-            const stage = Number(idMatch[2] || 1);
-            const purchaseAt = dayjs(purchase.purchaseDate || purchase.createdAt);
-            if (purchaseAt.isValid() && !fineAt.isSame(getVatFineDate(purchaseAt, stage), 'day')) return true;
+            if (isVatFineOutsideSchedule(fine)) return true;
             return isCompanyVatComplete(purchase, fineAt);
         });
         const invalidFineIds = new Set(invalidFines.map(fine => fine.id).filter(Boolean));
@@ -5740,19 +5756,20 @@ export default function Attendance() {
             changedBy: actor.username,
             changedByName: actor.displayName,
             before: fine,
-            note: 'Hệ thống gỡ khoản phạt VAT sai: bỏ Chủ nhật và chỉ xét công ty thực sự có hàng trong phiếu.',
+            note: 'Hệ thống gỡ khoản phạt VAT sai: không tính Chủ nhật trong 5 ngày chờ và chỉ xét công ty thực sự có hàng trong phiếu.',
         }));
         const nextAuditLog = [...fineAuditLog, ...correctionLogs];
         setExtraFines(nextFines);
         setFineAuditLog(nextAuditLog);
         void persistAttendanceSnapshotNow({ extraFines: nextFines, fineAuditLog: nextAuditLog });
-    }, [isAdmin, isDbLoaded, employees.length, extraFines, fineAuditLog, purchaseVatTracking, persistAttendanceSnapshotNow]);
+    }, [isAdmin, isDbLoaded, employees.length, extraFines, fineAuditLog, vatPurchaseById, isVatFineOutsideSchedule, persistAttendanceSnapshotNow]);
 
     // VAT fines are historical events. Once an overdue row has appeared in
     // payroll, persist it as an ordinary fine; uploading the invoice later
     // must not erase the already-recorded deduction.
     useEffect(() => {
         if (!isAdmin || !isDbLoaded || employees.length === 0 || autoVatOverdueFines.length === 0) return;
+        if (extraFines.some(isVatFineOutsideSchedule)) return;
         const existingIds = new Set(extraFines
             .filter(fine => fine.source === 'purchase_vat_overdue' && (!fine.date || !dayjs(fine.date).isBefore(VAT_FINE_POLICY_EFFECTIVE_AT)))
             .map(fine => fine.id)
@@ -5777,7 +5794,7 @@ export default function Attendance() {
         setExtraFines(nextFines);
         setFineAuditLog(nextAuditLog);
         void persistAttendanceSnapshotNow({ extraFines: nextFines, fineAuditLog: nextAuditLog });
-    }, [isAdmin, isDbLoaded, employees.length, autoVatOverdueFines, extraFines, fineAuditLog, persistAttendanceSnapshotNow]);
+    }, [isAdmin, isDbLoaded, employees.length, autoVatOverdueFines, extraFines, fineAuditLog, isVatFineOutsideSchedule, persistAttendanceSnapshotNow]);
 
     const autoReturnOverdueFines = useMemo(() => {
         return returnOverdueTracking.flatMap((record) => {
@@ -5934,6 +5951,7 @@ export default function Attendance() {
         const officialEmployees = employees.filter(emp => emp.type === 'Official');
 
         return dailyTaskTracking.flatMap((task: any) => {
+            if (normalizeAttendanceText(task?.title).includes('tach kien 5d unicare')) return [];
             if (!task || task.type !== 'assignment' || !['pending', 'in_progress'].includes(task.status)) return [];
             if (!task.assignee || !task.dueDate) return [];
             try {
@@ -5975,6 +5993,7 @@ export default function Attendance() {
     const autoEvidenceOverdueFines = useMemo(() => {
         const officialEmployees = employees.filter(emp => emp.type === 'Official');
         return evidencePenaltyRecords.flatMap((penalty: any) => {
+            if (normalizeAttendanceText(`${penalty?.taskTitle || ''} ${penalty?.detail || ''}`).includes('tach kien 5d unicare')) return [];
             const penaltyAt = dayjs(penalty.penaltyAt);
             if (!penaltyAt.isValid() || !inOverviewRange(penaltyAt.toISOString())) return [];
             // assignee of a fixed task is the username selected from Settings > Administration.
@@ -6138,6 +6157,8 @@ export default function Attendance() {
                 .filter(Boolean));
             const rows = [...finesData, ...extraFines, ...autoVatOverdueFines.filter(fine => !fine.id || !persistedVatIds.has(fine.id)), ...autoReturnOverdueFines.filter(fine => !fine.id || !persistedReturnIds.has(fine.id)), ...autoRefundOverdueFines.filter(fine => !fine.id || !persistedRefundIds.has(fine.id)), ...autoDeadlineOverdueFines, ...autoEvidenceOverdueFines, ...autoStockCheckMissingFines]
                 .map(applyFineOverride)
+                .filter(f => !isTemporarilyExcludedFine(f))
+                .filter(f => !isVatFineOutsideSchedule(f))
                 .filter(f => !getFineRecordKeys(f).some(key => deletedFineKeys.has(key)))
                 // Auto VAT fines made before the approved rollout are invalid;
                 // preserve their audit data but do not show/deduct them.
@@ -6182,7 +6203,7 @@ export default function Attendance() {
             result.push(...vatRows.values());
             return result;
         },
-        [extraFines, fineAuditLog, returnOverdueTracking, autoVatOverdueFines, autoReturnOverdueFines, autoRefundOverdueFines, autoDeadlineOverdueFines, autoEvidenceOverdueFines, autoStockCheckMissingFines, applyFineOverride]
+        [extraFines, fineAuditLog, returnOverdueTracking, autoVatOverdueFines, autoReturnOverdueFines, autoRefundOverdueFines, autoDeadlineOverdueFines, autoEvidenceOverdueFines, autoStockCheckMissingFines, applyFineOverride, isVatFineOutsideSchedule]
     );
 
     // Helper: lọc theo overviewDateRange
@@ -6249,26 +6270,6 @@ export default function Attendance() {
         const attendance = liveOverviewAttendanceBonuses.filter(bonus => !allIds.has(bonus.id));
         return [...liveOverviewBonuses, ...weekly, ...attendance];
     }, [liveOverviewAttendanceBonuses, liveOverviewBonuses, liveOverviewWeeklyBonuses]);
-    const packingCommission = useMemo(() => {
-        const commission = normalizePackingCommission(config.packingCommission);
-        const expandSkuLevels = (source: Record<string, string>) => {
-            const expanded = { ...source };
-            packingCatalog.forEach(product => {
-                const parentLevel = source[normalizePackingSku(product.sku)];
-                if (!parentLevel) return;
-                product.memberSkus.forEach(sku => { expanded[normalizePackingSku(sku)] = parentLevel; });
-            });
-            return expanded;
-        };
-        return {
-            ...commission,
-            skuLevels: expandSkuLevels(commission.skuLevels),
-            history: (commission.history || []).map(version => ({
-                ...version,
-                skuLevels: expandSkuLevels(version.skuLevels),
-            })),
-        };
-    }, [config.packingCommission, packingCatalog]);
 
     const currentLockedPeriod = useMemo(() => lockedPeriods.find(lp =>
         dayjs(lp.start).isSame(overviewDateRange[0], 'day') &&
@@ -6388,6 +6389,7 @@ export default function Attendance() {
     const overviewAttendanceReady = isBackgroundSyncComplete && overviewAttendanceLogsReady;
     const packingExpectedKey = `${getPackingLoadStart(overviewDateRange[0]).valueOf()}-${overviewDateRange[1].endOf('day').valueOf()}`;
     const isPackingDataReady = packingReadyKey === packingExpectedKey
+        && packingReadyPolicy === packingPolicyKey
         && !packingLoadError
         && (activeTab !== 'packaging' || packingCatalogReady);
     const isPayrollDataReady = isCoreSnapshotReady && (isCurrentPeriodLocked
@@ -9201,6 +9203,8 @@ const openConfigModal = () => {
         ];
         const vatRows = new Map<string, any>();
         const combinedFines = combinedFinesRaw.filter(fine => {
+            if (isTemporarilyExcludedFine(fine)) return false;
+            if (isVatFineOutsideSchedule(fine)) return false;
             const detailText = String(fine.detail || '');
             const isVatFine = fine.source === 'purchase_vat_overdue'
                 || String(fine.type || '').toLocaleLowerCase('vi-VN').includes('vat')
@@ -9258,30 +9262,33 @@ const openConfigModal = () => {
         const filteredFines = effectiveFineEmployeeFilter === 'all'
             ? scopedFines
             : scopedFines.filter(f => f.empId === effectiveFineEmployeeFilter);
-        const isEcommerceOverdueFine = (fine: any) => (
-            fine?.source === 'ecommerce_overdue'
-            || fine?.type === 'Đơn TMDT trễ hạn'
-        );
+        const getEcommerceFineKind = (fine: any): 'overdue' | 'mismatch' | null => {
+            if (fine?.source === 'ecommerce_overdue' || fine?.type === 'Đơn TMDT trễ hạn') return 'overdue';
+            if (fine?.source === 'ecommerce_mismatch' || fine?.type === 'Đơn TMDT cần kiểm tra quá ngày') return 'mismatch';
+            return null;
+        };
         const tableFines = (() => {
             const rows: any[] = [];
             const groups = new Map<string, any>();
             filteredFines.forEach((fine: any) => {
-                if (!isEcommerceOverdueFine(fine)) {
+                const kind = getEcommerceFineKind(fine);
+                if (!kind) {
                     rows.push(fine);
                     return;
                 }
-                const key = `${fine.empId}|${fine.source || 'ecommerce_overdue'}`;
+                const key = `${fine.empId}|${kind}`;
                 let group = groups.get(key);
                 if (!group) {
                     group = {
                         key: `ecommerce-group-${key}`,
                         empId: fine.empId,
                         empName: fine.empName,
-                        type: 'Đơn TMDT trễ hẹn',
+                        type: kind === 'overdue' ? 'Đơn TMDT trễ hẹn' : 'Đơn TMDT cần kiểm tra quá ngày',
                         source: fine.source,
                         date: fine.date,
                         amount: 0,
                         isEcommerceGroup: true,
+                        ecommerceKind: kind,
                         ecommerceDetails: [],
                     };
                     groups.set(key, group);
@@ -9334,7 +9341,7 @@ const openConfigModal = () => {
             );
             const purchaseAt = dayjs(purchase?.purchaseDate || purchase?.createdAt);
             if (purchaseAt.isValid()) {
-                return Math.max(VAT_FIRST_FINE_AFTER_DAYS, dayjs().startOf('day').diff(purchaseAt.startOf('day'), 'day'));
+                return Math.max(VAT_FIRST_FINE_AFTER_DAYS, countVatChargeableDays(purchaseAt, dayjs()));
             }
 
             const savedDays = Number(detail.match(/quá hạn\s+(\d+)\s+ngày/i)?.[1]);
@@ -9428,7 +9435,7 @@ const openConfigModal = () => {
                             expandedRowRender: (record: any) => (
                                 <div style={{ padding: '4px 12px 8px 36px', display: 'flex', flexDirection: 'column', gap: 5 }}>
                                     <Text type="secondary" style={{ fontSize: 11, fontWeight: 700 }}>
-                                        Chi tiết {record.ecommerceDetails.length} đơn TMDT trễ hẹn:
+                                        Chi tiết {record.ecommerceDetails.length} đơn TMDT {record.ecommerceKind === 'overdue' ? 'trễ hẹn' : 'cần kiểm tra quá ngày'}:
                                     </Text>
                                     {record.ecommerceDetails.map((fine: any) => (
                                         <div key={fine.id || `${fine.orderNumber}-${fine.date}`} style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'center', fontSize: 12 }}>
@@ -9446,17 +9453,17 @@ const openConfigModal = () => {
                         }}
                         columns={[
                             {
-                                title: 'Nhân viên', dataIndex: 'empName', key: 'name', width: 130,
+                                title: 'Nhân viên', dataIndex: 'empName', key: 'name', width: 115,
                                 render: (n: string) => <Text strong style={{ whiteSpace: 'normal', overflowWrap: 'anywhere' }}>{n}</Text>,
                             },
                             {
-                                title: 'Lỗi vi phạm', dataIndex: 'type', key: 'type', width: 120,
+                                title: 'Lỗi vi phạm', dataIndex: 'type', key: 'type', width: 110,
                                 render: (t: string, record: any) => record.isEcommerceGroup
-                                    ? <Space size={5} wrap><Tag color="volcano" style={{ margin: 0, fontWeight: 700, fontSize: 10 }}>TMDT TRỄ HẸN</Tag><Badge count={record.ecommerceDetails.length} color="#fa541c" /></Space>
+                                    ? <Space size={5} wrap><Tag color="volcano" style={{ margin: 0, fontWeight: 700, fontSize: 10 }}>{record.ecommerceKind === 'overdue' ? 'TMDT TRỄ HẸN' : 'TMDT CẦN KIỂM TRA'}</Tag><Badge count={record.ecommerceDetails.length} color="#fa541c" /></Space>
                                     : <Tag color="error" style={{ margin: 0, fontWeight: 700, fontSize: 10, textTransform: 'uppercase', whiteSpace: 'normal', lineHeight: 1.3 }}>{t}</Tag>,
                             },
                             {
-                                title: 'Trạng thái', key: 'status', width: 110,
+                                title: 'Trạng thái', key: 'status', width: 100,
                                 render: (_: unknown, record: any) => record.isEcommerceGroup ? (
                                     <Text type="secondary" style={{ fontSize: 12 }}>{record.ecommerceDetails.every((fine: any) => fine.isWaived) ? 'Đã miễn toàn bộ' : 'Đang áp dụng'}</Text>
                                 ) : record.isWaived ? (
@@ -9473,7 +9480,7 @@ const openConfigModal = () => {
                                 })(),
                             },
                             {
-                                title: 'Thời gian', dataIndex: 'date', key: 'date', width: 100,
+                                title: 'Thời gian', dataIndex: 'date', key: 'date', width: 95,
                                 render: (date: string) => {
                                     const d = date ? dayjs(date) : null;
                                     if (!d?.isValid()) return <Text type="secondary">-</Text>;
@@ -9486,7 +9493,7 @@ const openConfigModal = () => {
                                 },
                             },
                             {
-                                title: 'Chi tiết', dataIndex: 'detail', key: 'detail', width: 270,
+                                title: 'Chi tiết', dataIndex: 'detail', key: 'detail', width: 235,
                                 className: 'att-fines-detail-column',
                                 render: (d: string, record: any) => {
                                     if (record.isEcommerceGroup) {
@@ -9494,7 +9501,7 @@ const openConfigModal = () => {
                                         return (
                                             <div style={fineDetailCellStyle}>
                                                 <Text style={{ color: '#595959', fontWeight: 600 }}>
-                                                    {record.ecommerceDetails.length} đơn trễ SLA · chia đều cho nhân sự chính thức
+                                                    {record.ecommerceDetails.length} đơn {record.ecommerceKind === 'overdue' ? 'trễ SLA' : 'cần kiểm tra quá ngày'} · chia đều cho nhân sự chính thức
                                                 </Text>
                                                 <Text type="secondary" style={{ display: 'block', marginTop: 3, fontSize: 11 }}>
                                                     {waivedCount > 0 ? `${waivedCount}/${record.ecommerceDetails.length} đơn đã miễn phạt` : 'Bấm mũi tên để xem danh sách đơn'}
@@ -9725,7 +9732,7 @@ const openConfigModal = () => {
                             },
                             {
                                 title: <Text style={{ color: '#ff4d4f' }}>Số tiền trừ</Text>,
-                                dataIndex: 'amount', key: 'amount', width: 110, align: 'right' as const,
+                                dataIndex: 'amount', key: 'amount', width: 115, align: 'right' as const,
                                 render: (v: number, record: any) => record.isEcommerceGroup
                                     ? (record.amount > 0 ? <Text strong style={{ color: '#ff4d4f', whiteSpace: 'nowrap' }}>- {fmt(record.amount)}</Text> : <Text strong style={{ color: '#389e0d', whiteSpace: 'nowrap' }}>0 đ</Text>)
                                     : record.isWaived
@@ -9733,7 +9740,8 @@ const openConfigModal = () => {
                                     : <Text strong style={{ color: '#ff4d4f', whiteSpace: 'nowrap' }}>- {fmt(v)}</Text>,
                             },
                             {
-                                title: '', key: 'actions', width: 60, align: 'center' as const,
+                                title: '', key: 'actions', width: 84, align: 'center' as const,
+                                className: 'att-fines-actions-column',
                                 render: (_: any, record: any) => {
                                     if (!isAdmin || isCurrentPeriodLocked || record.isWaived || record.isEcommerceGroup) return null;
                                     return (

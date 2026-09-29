@@ -1004,6 +1004,18 @@
     vertical-align: middle;
 }
 
+.attendance-module .att-fines-table .ant-table-thead > tr > th,
+.attendance-module .att-fines-table .ant-table-tbody > tr > td {
+    padding-right: 8px !important;
+    padding-left: 8px !important;
+}
+
+.attendance-module .att-fines-table .ant-table-cell.att-fines-actions-column {
+    padding-right: 4px !important;
+    padding-left: 4px !important;
+    white-space: nowrap;
+}
+
 .att-emp-name {
     font-weight: 900;
     color: #111827;

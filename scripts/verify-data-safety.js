@@ -413,7 +413,9 @@ requireText(ipc, 'line.location = normalizeHandlingLocation(label.location || {}
 requireText(ipc, 'buildRendererHandlingOperationKey(', 'Handling-unit renderer idempotency keys are missing');
 requireText(ipc, 'posOrderOperation:', 'POS durable idempotency claim is missing');
 requireText(posPage, 'idempotencyKey: paymentOperationKeyRef.current', 'POS renderer must send a stable idempotency key');
-requireText(handlingUnitsPage, 'if (!isPendingCheck && withdrawals.length === 0) return null;', 'End-of-shift count must include pending packages carried over from earlier days');
+requireText(handlingUnitsPage, 'if (!isPendingCheck && !obligation && (trackedCodes.has(code) || withdrawals.length === 0)) return null;', 'End-of-shift count must retain pending packages and durable carried-over obligations');
+requireText(ipc, 'await recordShiftEvents(tx, nextItems);', 'End-of-shift evidence must persist atomically with package history');
+requireText(ipc, '!outstandingCodes.has(item.code)', 'End-of-shift submission must accept durable obligations beyond the rolling history');
 requireText(ipc, 'DATA_SAFETY_MUTABLE_CONFIG_KEYS', 'Narrow mutable AppConfig allowlist is missing');
 requireText(preload, 'const appConfigWriteTails = new Map();', 'AppConfig writes must be serialized per key in preload');
 requireText(preload, 'hasRevision ? appConfigRevisions.get(key) : undefined', 'AppConfig writes must include the last read revision');
