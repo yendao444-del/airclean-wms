@@ -1,8 +1,10 @@
-const ECOMMERCE_ORDER_FINE_TOTAL = 10000;
+const ECOMMERCE_ORDER_FINE_TOTAL = 20000;
 const ECOMMERCE_OFFICIAL_RECIPIENTS = 2;
 // The policy starts on 23/09/2026; violations dated before that day are
 // grandfathered out and must not be recreated by reconciliation.
 const ECOMMERCE_FINE_EFFECTIVE_DATE = "2026-09-23";
+// The amount changes from 24/09/2026. Existing ledger rows are never rewritten.
+const ECOMMERCE_FINE_RATE_EFFECTIVE_DATE = "2026-09-24";
 
 function bangkokDateKey(value) {
   const date = new Date(value);
@@ -95,7 +97,10 @@ async function reconcileEcommerceOrderFines(prisma, options = {}) {
     const deletedIds = deletedFineIds(attendanceData.fineAuditLog);
     const created = [];
     const auditEntries = [];
-    const split = splitFine(ECOMMERCE_ORDER_FINE_TOTAL, officialEmployees);
+    const fineTotal = bangkokDateKey(now) >= ECOMMERCE_FINE_RATE_EFFECTIVE_DATE
+      ? ECOMMERCE_ORDER_FINE_TOTAL
+      : ECOMMERCE_ORDER_FINE_TOTAL / 2;
+    const split = splitFine(fineTotal, officialEmployees);
 
     const addViolation = (order, kind, date, detail) => {
       const id = `fine-ecommerce-${kind}-${order.id}-${ECOMMERCE_FINE_EFFECTIVE_DATE}`;
@@ -191,5 +196,6 @@ async function reconcileEcommerceOrderFines(prisma, options = {}) {
 module.exports = {
   ECOMMERCE_ORDER_FINE_TOTAL,
   ECOMMERCE_OFFICIAL_RECIPIENTS,
+  ECOMMERCE_FINE_RATE_EFFECTIVE_DATE,
   reconcileEcommerceOrderFines,
 };

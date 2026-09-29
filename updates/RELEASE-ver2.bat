@@ -107,18 +107,8 @@ rmdir /S /Q "release4\win-unpacked\resources\app\dist" 2>nul
 xcopy "dist\*" "release4\win-unpacked\resources\app\dist\" /E /I /Y /Q >nul 2>&1
 
 echo    Copy electron\ ...
-if exist "%APPDATA%\quan-ly-ban-hang-desktop\gdrive-token.json" (
-    copy /Y "%APPDATA%\quan-ly-ban-hang-desktop\gdrive-token.json" "electron\gdrive-token.json" >nul 2>&1
-    echo    [OK] Auto-copy gdrive-token.json moi nhat tu AppData vao electron/
-) else (
-    if not exist "electron\gdrive-token.json" (
-        echo    [!] CANH BAO: Khong co gdrive-token.json - Google Drive upload se THAT BAI tren production!
-        echo        Chay reauth-gdrive.bat truoc khi build.
-    ) else (
-        echo    [!] Khong co token AppData, dang dung token hien co trong electron/.
-    )
-)
-call node scripts\verify-gdrive-release-token.cjs "electron\gdrive-token.json"
+:: Google authorization is held by the shared Cloudflare backend.
+call node --check electron\drive-backend.js
 if errorlevel 1 (
     pause
     exit /b 1
@@ -183,7 +173,7 @@ rem Never publish development database/service credentials in a patch.
 del /Q "!PATCH_TEMP!\resources\app\electron\config.js" 2>nul
 del /Q "!PATCH_TEMP!\resources\app\electron\supabase-storage.json" 2>nul
 del /Q "!PATCH_TEMP!\resources\app\electron\gdrive-credentials.json" 2>nul
-call node scripts\verify-gdrive-release-token.cjs "!PATCH_TEMP!\resources\app\electron\gdrive-token.json"
+call node scripts\prepare-drive-backend-stage.cjs "!PATCH_TEMP!\resources\app\electron"
 if errorlevel 1 (
     rmdir /S /Q "!PATCH_TEMP!" 2>nul
     pause

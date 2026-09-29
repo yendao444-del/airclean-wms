@@ -13,6 +13,39 @@ body {
     overflow-x: hidden;
 }
 
+.products-search {
+    width: min(100%, 520px);
+}
+
+.products-card {
+    min-width: 0;
+}
+
+.products-card .ant-card-body {
+    min-width: 0;
+    padding: 20px;
+}
+
+.products-table {
+    min-width: 0;
+}
+
+.products-table .ant-table-container {
+    max-width: 100%;
+}
+
+.products-table .ant-table-cell {
+    overflow-wrap: anywhere;
+}
+
+.products-table .ant-table-thead > tr > th {
+    white-space: nowrap;
+}
+
+.products-page-actions {
+    flex-wrap: wrap;
+}
+
 /* Ant Design table responsive */
 .ant-table-wrapper {
     overflow-x: auto;
@@ -130,6 +163,33 @@ body {
 
 /* Hiển thị chỉ trên màn hình nhỏ */
 @media (max-width: 767px) {
+    .products-card .ant-card-body {
+        padding: 12px 8px;
+    }
+
+    .products-search {
+        width: 100%;
+    }
+
+    .products-table .ant-table-thead > tr > th,
+    .products-table .ant-table-tbody > tr > td {
+        padding: 10px 8px;
+    }
+
+    .products-table .ant-table-tbody > tr > td:first-of-type {
+        font-size: 13px;
+    }
+
+    .products-page-actions {
+        width: 100%;
+        gap: 6px !important;
+    }
+
+    .products-page-actions .ant-btn {
+        flex: 1 1 auto;
+        min-width: 112px;
+    }
+
     .hide-on-small {
         display: none !important;
     }
@@ -167,6 +227,29 @@ body {
 
 /* Tối ưu cho màn hình nhỏ hơn */
 @media (max-width: 480px) {
+
+    .products-card {
+        border-radius: 8px;
+    }
+
+    .products-card .ant-card-body {
+        padding: 8px 4px;
+    }
+
+    .products-table .ant-table-thead > tr > th,
+    .products-table .ant-table-tbody > tr > td {
+        padding: 8px 6px;
+        font-size: 12px;
+    }
+
+    .products-table .ant-pagination {
+        flex-wrap: wrap;
+        gap: 6px;
+    }
+
+    .products-table .ant-pagination-options {
+        margin-inline-start: 0;
+    }
 
     /* Giảm font size cho mobile */
     .ant-table {

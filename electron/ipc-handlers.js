@@ -252,6 +252,7 @@ const { reconcileLateAttendanceFines } = require("./attendance-fines");
 const {
   CUTOFF_HOUR: ATTENDANCE_SCHEDULE_CUTOFF_HOUR,
   deadlineFor: attendanceScheduleDeadlineFor,
+  isPrematureMissingScheduleFine,
   normalizeIdentity: normalizeAttendanceScheduleIdentity,
   reconcileMissingSeasonalScheduleFines,
 } = require("./attendance-schedule-fines");
@@ -265,6 +266,21 @@ const {
 } = require("./attendance-rewards");
 const { reconcileEcommerceOrderFines } = require("./ecommerce-order-fines");
 const { reconcilePrepackShortfallFines } = require("./prepack-fines");
+
+// Fine reconciliation scans the shared attendance ledger and can be expensive
+// on a large order history. Keep it out of the pickup/resolve response path.
+let ecommerceFineReconciliationPromise = null;
+function scheduleEcommerceOrderFineReconciliation(reason = "action") {
+  if (!prisma || ecommerceFineReconciliationPromise) return;
+  ecommerceFineReconciliationPromise = enqueueAttendanceMaintenance("ecommerce", () => reconcileEcommerceOrderFines(prisma, { now: new Date() }))
+    .catch((error) => {
+      console.warn(`[Ecommerce Fines] Background reconciliation failed (${reason}):`, error.message);
+    })
+    .finally(() => {
+      invalidateAttendanceSnapshotCaches();
+      ecommerceFineReconciliationPromise = null;
+    });
+}
 
 // 📦 Offline Queue — lưu scan khi mất mạng, sync lại khi có mạng
 const offlineQueue = require("./offline-queue");
@@ -410,9 +426,6 @@ function readJsonFile(filePath) {
 function loadDailyEvidenceR2Config() {
   const userDataPath = app.getPath("userData");
   const saved = readJsonFile(path.join(userDataPath, "r2-daily-evidence-bootstrap.json"));
-  const bundled = readJsonFile(
-    path.join(__dirname, "r2-daily-evidence-bootstrap.json"),
-  );
   // Existing test installations already have a device credential. Reuse it
   // only as a migration fallback; new installations should provide the
   // dedicated runtime file or environment variables.
@@ -422,7 +435,6 @@ function loadDailyEvidenceR2Config() {
       process.env.R2_DAILY_EVIDENCE_ENDPOINT ||
         config.R2_DAILY_EVIDENCE_ENDPOINT ||
         saved.endpoint ||
-        bundled.endpoint ||
         "https://dby-pos-daily-evidence.zicky-iluv.workers.dev",
     )
       .trim()
@@ -432,8 +444,6 @@ function loadDailyEvidenceR2Config() {
         config.R2_DAILY_EVIDENCE_KEY ||
         saved.key ||
         saved.accessKey ||
-        bundled.key ||
-        bundled.accessKey ||
         legacy.testKey ||
         "",
     ).trim(),
@@ -447,9 +457,10 @@ function getDailyEvidenceR2UnavailableMessage() {
 }
 
 async function requestDailyEvidenceR2(objectKey, options = {}) {
-  if (!dailyEvidenceR2Config.endpoint || !dailyEvidenceR2Config.key) {
+  if (!dailyEvidenceR2Config.endpoint) {
     throw new Error(getDailyEvidenceR2UnavailableMessage());
   }
+  const grant = await getSharedDriveBackend().getSessionGrant();
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 20_000);
   try {
@@ -458,7 +469,7 @@ async function requestDailyEvidenceR2(objectKey, options = {}) {
       {
         ...options,
         headers: {
-          authorization: `Bearer ${dailyEvidenceR2Config.key}`,
+          authorization: `Bearer ${grant}`,
           ...(options.headers || {}),
         },
         signal: controller.signal,
@@ -550,8 +561,8 @@ setTimeout(() => void cleanupExpiredPrepackEvidence().catch((error) => console.w
 setInterval(() => void cleanupExpiredPrepackEvidence().catch((error) => console.warn("Prepack evidence cleanup error:", error?.message || error)), 24 * 60 * 60 * 1000);
 // Reconcile completed prepack days in the background so a new page visit is
 // not required for the end-of-day penalty to be recorded.
-setTimeout(() => void reconcilePrepackShortfallFines(prisma, { now: new Date() }).catch((error) => console.warn("Prepack fine reconciliation error:", error?.message || error)), 90_000);
-setInterval(() => void reconcilePrepackShortfallFines(prisma, { now: new Date() }).catch((error) => console.warn("Prepack fine reconciliation error:", error?.message || error)), 15 * 60 * 1000);
+setTimeout(() => void enqueueAttendanceMaintenance("prepack", () => reconcilePrepackShortfallFines(prisma, { now: new Date() })).catch((error) => console.warn("Prepack fine reconciliation error:", error?.message || error)), 90_000);
+setInterval(() => void enqueueAttendanceMaintenance("prepack", () => reconcilePrepackShortfallFines(prisma, { now: new Date() })).catch((error) => console.warn("Prepack fine reconciliation error:", error?.message || error)), 15 * 60 * 1000);
 
 // Compensation is limited to exact object keys uploaded by the current IPC
 // call. It cannot delete pre-existing evidence and is safe in data-safety mode.
@@ -764,7 +775,7 @@ const bcrypt = lazyRequire("bcryptjs");
 // GOOGLE DRIVE + TELEGRAM — HĐĐT BACKUP
 // ========================================
 
-const GDRIVE_FOLDER_ID = config.GDRIVE_FOLDER_ID;
+const GDRIVE_FOLDER_ID = "invoice-root";
 const TELEGRAM_BOT_TOKEN = config.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_CHAT_ID = config.TELEGRAM_CHAT_ID;
 
@@ -858,6 +869,25 @@ function ensureGoogleTokenPath() {
 }
 
 function getDriveClient() {
+  return getSharedDriveBackend();
+}
+
+let sharedDriveBackend = null;
+
+function getSharedDriveBackend() {
+  if (!sharedDriveBackend) {
+    const { createDriveBackend } = require("./drive-backend");
+    const { endpoint } = require("./drive-backend-config.json");
+    sharedDriveBackend = createDriveBackend({
+      endpoint,
+      getPrisma: () => prisma,
+      getSession: () => currentSession,
+    });
+  }
+  return sharedDriveBackend;
+}
+
+function getLegacyLocalDriveClient() {
   try {
     if (!OAUTH_CLIENT_ID || !OAUTH_CLIENT_SECRET) {
       driveLastErrorMessage =
@@ -2068,12 +2098,7 @@ async function reauthenticateGoogleDrive() {
 }
 
 ipcMain.handle("googleDrive:reauthenticate", async () => {
-  try {
-    return await reauthenticateGoogleDrive();
-  } catch (error) {
-    console.error("[Drive] Re-authentication failed:", error?.message || error);
-    return { success: false, error: error?.message || "Không thể kết nối lại Google Drive." };
-  }
+  return { success: false, error: "Google Drive dung chung do admin xac thuc tren may dev. Hay thu upload lai sau khi admin ket noi lai." };
 });
 
 // Creating a Drive client does not prove that its OAuth token is still valid.
@@ -2098,7 +2123,7 @@ async function ensureDriveReady() {
   } catch (initialError) {
     let error = initialError;
     if (
-      isGoogleReauthError(initialError) &&
+      !sharedDriveBackend && isGoogleReauthError(initialError) &&
       restoreBundledGoogleTokenAfterAuthFailure()
     ) {
       try {
@@ -21927,6 +21952,11 @@ let dailyTaskMaintenancePromise = null;
 function scheduleDailyTaskMaintenance() {
   if (dailyTaskMaintenancePromise) return;
 
+  // Daily evidence reconciliation is background maintenance. Delay it until
+  // the first screen has completed its critical reads so a cold DB connection
+  // cannot compete with Attendance/Dashboard startup queries.
+  const startupDelayMs = 8000;
+
   if (DATA_SAFETY_MODE) {
     // Penalty reconciliation is append-only and safe to run while the wider
     // maintenance jobs remain disabled by data-safety mode.
@@ -21946,7 +21976,7 @@ function scheduleDailyTaskMaintenance() {
         .finally(() => {
           dailyTaskMaintenancePromise = null;
         });
-    }, 250);
+    }, startupDelayMs);
     return;
   }
 
@@ -21977,7 +22007,7 @@ function scheduleDailyTaskMaintenance() {
       .finally(() => {
         dailyTaskMaintenancePromise = null;
       });
-  }, 250);
+  }, startupDelayMs);
 }
 
 let dailyTaskResetPromise = null;
@@ -24948,9 +24978,6 @@ ipcMain.handle("ecommerceExports:completePickup", async (event, id, data = {}) =
   const pickupStartedAt = Date.now();
   try {
     requireRole("admin", "manager");
-    // Capture a mismatch that crossed midnight before pickup clears its
-    // mismatchAt marker during the completion transaction.
-    await reconcileEcommerceOrderFines(prisma, { now: new Date() });
     const result = await execEcommerceExportUpdate(id, data, {
       snapshotPickup: true,
     });
@@ -24976,6 +25003,7 @@ ipcMain.handle("ecommerceExports:completePickup", async (event, id, data = {}) =
         recordId: record.id,
       });
     }
+    scheduleEcommerceOrderFineReconciliation("completePickup");
     return {
       success: true,
       skipped: !!result.skipped,
@@ -24991,12 +25019,9 @@ ipcMain.handle("ecommerceExports:completePickup", async (event, id, data = {}) =
 ipcMain.handle("ecommerceExports:resolveMismatch", async (event, id, data = {}) => {
   try {
     requireRole("admin", "manager");
-    // Resolve any overnight mismatch fine before this action changes the
-    // record to completed/cancelled and removes its active mismatch marker.
-    await reconcileEcommerceOrderFines(prisma, { now: new Date() });
     const action = String(data?.action || "").trim().toLowerCase();
     if (action === "pickup") {
-      return await (async () => {
+      const response = await (async () => {
         const result = await execEcommerceExportUpdate(id, data, { snapshotPickup: true, allowMismatchPickup: true });
         if (!result.skipped) {
           const items = typeof result.data.items === "string"
@@ -25018,6 +25043,8 @@ ipcMain.handle("ecommerceExports:resolveMismatch", async (event, id, data = {}) 
         }
         return { success: true, skipped: !!result.skipped, reason: result.reason, data: result.data };
       })();
+      scheduleEcommerceOrderFineReconciliation("resolveMismatch.pickup");
+      return response;
     }
     if (action !== "cancel") throw new Error("Thao tác đối soát không hợp lệ.");
     if (!prisma) throw new Error("Prisma not available");
@@ -25050,6 +25077,7 @@ ipcMain.handle("ecommerceExports:resolveMismatch", async (event, id, data = {}) 
         recordId: result.data.id,
       });
     }
+    scheduleEcommerceOrderFineReconciliation("resolveMismatch.cancel");
     return { success: true, skipped: !!result.skipped, reason: result.reason, data: result.data };
   } catch (error) {
     console.error("Resolve ecommerce mismatch error:", error);
@@ -27795,12 +27823,17 @@ async function resolvePrepackProduct(payload) {
 }
 
 ipcMain.handle("prepack:list", async (_event, filters = {}) => {
+  const startedAt = Date.now();
   try {
     const actor = await getCurrentActor();
     if (!prisma.prepackBatch) throw new Error("Cần cập nhật Prisma Client cho Đóng gói sẵn.");
     const requestedStatus = String(filters?.status || "").trim();
-    const where = {};
-    if (requestedStatus && requestedStatus !== "all") where.status = requestedStatus;
+    // Cancelled targets are soft-deleted so old reports remain auditable, but
+    // they must never appear in the active target list again.
+    const where = { status: { not: "cancelled" } };
+    if (requestedStatus && requestedStatus !== "all") {
+      where.status = requestedStatus === "cancelled" ? { not: "cancelled" } : requestedStatus;
+    }
     if (!["admin", "manager"].includes(actor.role)) where.packerUsername = actor.username;
     const evidenceStartDate = filters?.evidenceStartDate ? new Date(filters.evidenceStartDate) : null;
     const evidenceEndDate = filters?.evidenceEndDate ? new Date(filters.evidenceEndDate) : null;
@@ -27822,16 +27855,18 @@ ipcMain.handle("prepack:list", async (_event, filters = {}) => {
       take: 300,
     });
     const drafts = workDateKey ? await getPrepackDraftConfig() : {};
+    const data = rows.map((row) => ({
+      ...mapPrepackBatch(row),
+      draftQty: workDateKey ? (drafts[`${workDateKey}:${row.id}`]?.quantity ?? null) : null,
+      draftUpdatedAt: workDateKey ? (drafts[`${workDateKey}:${row.id}`]?.updatedAt || null) : null,
+    }));
+    console.log(`[Perf] prepack:list rows=${data.length} ms=${Date.now() - startedAt}`);
     return {
       success: true,
-      data: rows.map((row) => ({
-        ...mapPrepackBatch(row),
-        draftQty: workDateKey ? (drafts[`${workDateKey}:${row.id}`]?.quantity ?? null) : null,
-        draftUpdatedAt: workDateKey ? (drafts[`${workDateKey}:${row.id}`]?.updatedAt || null) : null,
-      })),
+      data,
     };
   } catch (error) {
-    console.error("Prepack list error:", error);
+    console.error(`Prepack list error after ${Date.now() - startedAt}ms:`, error);
     return { success: false, error: getPrepackErrorMessage(error) };
   }
 });
@@ -27874,6 +27909,7 @@ ipcMain.handle("prepack:saveDraft", async (_event, payload = {}) => {
 // Keep this read model separate from current targets so editing a target cannot
 // erase the fact that an employee reported it on a previous day.
 ipcMain.handle("prepack:history", async (_event, filters = {}) => {
+  const startedAt = Date.now();
   try {
     const actor = await getCurrentActor();
     if (!prisma.dailyTask) throw new Error("Cần cập nhật Prisma Client cho lịch sử Đóng gói sẵn.");
@@ -27882,6 +27918,14 @@ ipcMain.handle("prepack:history", async (_event, filters = {}) => {
     const tasks = await prisma.dailyTask.findMany({
       where: {
         attachments: { contains: "prepackReport" },
+      },
+      select: {
+        id: true,
+        title: true,
+        status: true,
+        completedAt: true,
+        createdAt: true,
+        attachments: true,
       },
       orderBy: { createdAt: "desc" },
       take: 500,
@@ -27946,9 +27990,10 @@ ipcMain.handle("prepack:history", async (_event, filters = {}) => {
         evidenceSubmittedAt: attachments?.evidence?.submittedAt || null,
       }];
     });
+    console.log(`[Perf] prepack:history tasks=${tasks.length} rows=${history.length} ms=${Date.now() - startedAt}`);
     return { success: true, data: history };
   } catch (error) {
-    console.error("Prepack history error:", error);
+    console.error(`Prepack history error after ${Date.now() - startedAt}ms:`, error);
     return { success: false, error: getPrepackErrorMessage(error) };
   }
 });
@@ -29850,6 +29895,19 @@ let attendanceReadCache = null;
 let attendanceSnapshotReadInFlight = null;
 let attendanceCoreReadCache = null;
 let attendanceCoreReadInFlight = null;
+let attendanceMaintenanceInFlight = null;
+
+function nextPrematureFineVisibilityAt(fines) {
+  let next = null;
+  for (const fine of Array.isArray(fines) ? fines : []) {
+    if (!isPrematureMissingScheduleFine(fine, new Date())) continue;
+    const idMatch = String(fine?.id || "").match(/^fine-attendance-schedule-\d+-(\d{4}-\d{2}-\d{2})$/);
+    const dateKey = String(fine?.attendanceDate || idMatch?.[1] || "");
+    const visibility = new Date(`${dateKey}T19:00:00+07:00`).getTime();
+    if (Number.isFinite(visibility) && (next === null || visibility < next)) next = visibility;
+  }
+  return next;
+}
 
 function invalidateAttendanceSnapshotCaches() {
   attendanceReadCache = null;
@@ -29879,7 +29937,9 @@ async function getAttendanceCoreSnapshot() {
         select: { updatedAt: true },
       });
       const revisionKey = revision?.updatedAt?.toISOString() || null;
-      if (revisionKey === attendanceCoreReadCache.updatedAt) {
+      const visibilityBoundary = attendanceCoreReadCache.nextFineVisibilityAt;
+      const visibilityStillValid = !visibilityBoundary || Date.now() < visibilityBoundary;
+      if (attendanceCoreReadCache && revisionKey === attendanceCoreReadCache.updatedAt && visibilityStillValid) {
         return { data: attendanceCoreReadCache.data, updatedAt: revisionKey, cached: true };
       }
     }
@@ -29906,8 +29966,18 @@ async function getAttendanceCoreSnapshot() {
     } catch {
       throw new Error("Dữ liệu chấm công hiện hành không hợp lệ.");
     }
+    // Do not paint a stale no-registration fine before the workday closes.
+    // Background reconciliation still removes it from the shared ledger.
+    const nextFineVisibilityAt = nextPrematureFineVisibilityAt(data.extraFines);
+    if (Array.isArray(data.extraFines)) {
+      const now = new Date();
+      data = {
+        ...data,
+        extraFines: data.extraFines.filter((fine) => !isPrematureMissingScheduleFine(fine, now)),
+      };
+    }
     const updatedAt = record?.updatedAt?.toISOString?.() || null;
-    attendanceCoreReadCache = { data, updatedAt };
+    attendanceCoreReadCache = { data, updatedAt, nextFineVisibilityAt };
     return { data, updatedAt, cached: false };
   })();
   attendanceCoreReadInFlight = request;
@@ -29930,7 +30000,7 @@ async function getAttendanceDataSnapshot() {
         select: { updatedAt: true },
       });
       const revisionKey = revision?.updatedAt?.toISOString() || null;
-      if (revisionKey === attendanceReadCache.updatedAt) {
+      if (attendanceReadCache && revisionKey === attendanceReadCache.updatedAt) {
         return { data: attendanceReadCache.data, updatedAt: revisionKey, cached: true };
       }
     }
@@ -29950,6 +30020,7 @@ async function getAttendanceDataSnapshot() {
     attendanceCoreReadCache = {
       data: stripAttendancePayrollSnapshots(data),
       updatedAt,
+      nextFineVisibilityAt: nextPrematureFineVisibilityAt(data.extraFines),
     };
     return { data, updatedAt, cached: false };
   })();
@@ -29960,6 +30031,44 @@ async function getAttendanceDataSnapshot() {
   } finally {
     if (attendanceSnapshotReadInFlight === request) attendanceSnapshotReadInFlight = null;
   }
+}
+
+// A single Attendance window can request the core snapshot more than once
+// while the renderer mounts, reconciles, and refreshes the fine ledger. Keep
+// the historical maintenance pass single-flight so concurrent requests do not
+// contend on the shared attendanceData transaction.
+function startAttendanceMaintenance() {
+  if (attendanceMaintenanceInFlight) return attendanceMaintenanceInFlight;
+  const task = (async () => {
+    const maintenanceStartedAt = Date.now();
+    try {
+      await enqueueAttendanceMaintenance("ecommerce", () => reconcileEcommerceOrderFines(prisma, { now: new Date() }));
+    } catch (error) {
+      console.warn("[Ecommerce Fines] Không đối soát được phạt đơn TMDT:", error.message);
+    } finally {
+      invalidateAttendanceSnapshotCaches();
+    }
+    try {
+      await enqueueAttendanceReconcile({ now: new Date() });
+    } catch (error) {
+      console.warn("[Attendance Schedule] Không đối soát được phạt thiếu khai báo:", error.message);
+    } finally {
+      invalidateAttendanceSnapshotCaches();
+    }
+    try {
+      await enqueueAttendanceMaintenance("prepack", () => reconcilePrepackShortfallFines(prisma, { now: new Date() }));
+    } catch (error) {
+      console.warn("[Prepack Fines] Không đối soát được phạt thiếu đóng gói:", error.message);
+    } finally {
+      invalidateAttendanceSnapshotCaches();
+      console.log(`[Perf] attendance maintenance ms=${Date.now() - maintenanceStartedAt}`);
+    }
+  })();
+  attendanceMaintenanceInFlight = task;
+  task.finally(() => {
+    if (attendanceMaintenanceInFlight === task) attendanceMaintenanceInFlight = null;
+  }).catch(() => undefined);
+  return task;
 }
 
 ipcMain.handle("policies:getCurrent", async () => {
@@ -30118,35 +30227,9 @@ ipcMain.handle("attendance:getInitialData", async () => {
     requireRole("admin", "manager", "staff");
     if (!prisma) throw new Error("Prisma not available");
     const snapshot = await getAttendanceCoreSnapshot();
-    // Order/SLA and seasonal reconciliations scan or rewrite the shared
-    // attendance ledger. They are maintenance work and must not block the
-    // first Attendance paint; invalidate the read caches after each write so
-    // the next refresh observes the newly reconciled ledger.
-    void (async () => {
-      const maintenanceStartedAt = Date.now();
-      try {
-        await reconcileEcommerceOrderFines(prisma, { now: new Date() });
-      } catch (error) {
-        console.warn("[Ecommerce Fines] Không đối soát được phạt đơn TMDT:", error.message);
-      } finally {
-        invalidateAttendanceSnapshotCaches();
-      }
-      try {
-        await reconcileMissingSeasonalScheduleFines(prisma, { now: new Date() });
-      } catch (error) {
-        console.warn("[Attendance Schedule] Không đối soát được phạt thiếu khai báo:", error.message);
-      } finally {
-        invalidateAttendanceSnapshotCaches();
-        console.log(`[Perf] attendance maintenance ms=${Date.now() - maintenanceStartedAt}`);
-      }
-      try {
-        await reconcilePrepackShortfallFines(prisma, { now: new Date() });
-      } catch (error) {
-        console.warn("[Prepack Fines] Không đối soát được phạt thiếu đóng gói:", error.message);
-      } finally {
-        invalidateAttendanceSnapshotCaches();
-      }
-    })();
+    // Historical reconciliation is maintenance work. It runs single-flight
+    // after the core snapshot is available and never blocks first paint.
+    void startAttendanceMaintenance();
     console.log(`[Perf] attendance:getInitialData ms=${Date.now() - startedAt} cached=${snapshot.cached}`);
     return {
       success: true,
@@ -30247,7 +30330,7 @@ ipcMain.handle("attendance:updateWorkSchedule", async (_event, payload = {}) => 
       });
       return { workSchedules: nextSchedules };
     }, { isolationLevel: "Serializable", timeout: 10000, maxWait: 10000 }));
-    await reconcileMissingSeasonalScheduleFines(prisma, { dateKey: date, now: new Date() });
+    await enqueueAttendanceReconcile({ dateKey: date, now: new Date() });
     void logActivity({
       module: "attendance",
       action: "UPDATE_WORK_SCHEDULE",
@@ -30299,11 +30382,116 @@ ipcMain.handle("appConfig:get", async (event, key) => {
 });
 
 let attendanceDataWriteTail = Promise.resolve();
+const attendanceReconcileInFlight = new Map();
+const attendanceMaintenanceInFlightByKey = new Map();
 
-function enqueueAttendanceDataWrite(write) {
-  const task = attendanceDataWriteTail.then(write, write);
+function attendanceFineKey(fine) {
+  if (!fine) return "";
+  if (fine.id) return `id:${String(fine.id)}`;
+  return [fine.empId, fine.type, fine.detail, fine.amount, fine.date]
+    .map((value) => String(value ?? "").trim().toLowerCase())
+    .join("|");
+}
+
+function attendanceFineKeys(fine) {
+  const keys = new Set();
+  const id = String(fine?.id || "").trim();
+  if (id) keys.add(`id:${id}`);
+  const content = attendanceFineKey({ ...fine, id: undefined });
+  if (content) keys.add(content);
+  return keys;
+}
+
+function mergeAttendanceFineLedger(currentData, incomingData) {
+  const currentLogs = Array.isArray(currentData?.fineAuditLog) ? currentData.fineAuditLog : [];
+  const incomingLogs = Array.isArray(incomingData?.fineAuditLog) ? incomingData.fineAuditLog : [];
+  const currentLogIds = new Set(currentLogs.map((log) => String(log?.id || "")).filter(Boolean));
+  const newLogs = incomingLogs.filter((log) => log?.id && !currentLogIds.has(String(log.id)));
+  const touched = new Set();
+  const deleted = new Set();
+  for (const log of newLogs) {
+    for (const target of [log.before, log.after]) {
+      for (const key of attendanceFineKeys(target)) touched.add(key);
+    }
+    if (log.action === "delete") {
+      for (const key of attendanceFineKeys(log.before)) deleted.add(key);
+    }
+  }
+
+  const currentFines = Array.isArray(currentData?.extraFines) ? currentData.extraFines : [];
+  const incomingFines = Array.isArray(incomingData?.extraFines) ? incomingData.extraFines : [];
+  const incomingByKey = new Map();
+  incomingFines.forEach((fine) => attendanceFineKeys(fine).forEach((key) => incomingByKey.set(key, fine)));
+  const merged = new Map();
+  currentFines.forEach((fine) => {
+    const keys = attendanceFineKeys(fine);
+    if ([...keys].some((key) => deleted.has(key))) return;
+    const incoming = [...keys].map((key) => incomingByKey.get(key)).find(Boolean);
+    const touchedByNewLog = [...keys].some((key) => touched.has(key));
+    merged.set(attendanceFineKey(fine), touchedByNewLog && incoming ? incoming : fine);
+  });
+  incomingFines.forEach((fine) => {
+    const keys = attendanceFineKeys(fine);
+    if (![...keys].some((key) => touched.has(key)) || [...keys].some((key) => deleted.has(key))) return;
+    if (!currentFines.some((current) => [...attendanceFineKeys(current)].some((key) => keys.has(key)))) {
+      merged.set(attendanceFineKey(fine), fine);
+    }
+  });
+
+  const hasNewFineAudit = newLogs.length > 0;
+  return {
+    extraFines: [...merged.values()],
+    fineAuditLog: hasNewFineAudit ? [...currentLogs, ...newLogs] : currentLogs,
+    fineOverrides: hasNewFineAudit
+      ? { ...(currentData?.fineOverrides || {}), ...(incomingData?.fineOverrides || {}) }
+      : (currentData?.fineOverrides || {}),
+  };
+}
+
+function enqueueAttendanceDataWrite(write, { maxQueueWaitMs } = {}) {
+  let expired = false;
+  let timer;
+  const run = () => {
+    clearTimeout(timer);
+    // An expired request must never mutate data later when the queue drains.
+    if (expired) return;
+    return write();
+  };
+  const task = attendanceDataWriteTail.then(run, run);
   // Keep the queue alive even when a caller receives a rejected write.
   attendanceDataWriteTail = task.catch(() => undefined);
+  if (!Number.isFinite(maxQueueWaitMs)) return task;
+  const queueTimeout = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      expired = true;
+      reject(new Error("Bảng công đang bận lưu dữ liệu. Chưa thực hiện thao tác này, vui lòng thử lại."));
+    }, maxQueueWaitMs);
+  });
+  return Promise.race([task, queueTimeout]);
+}
+
+// Reconciliation writes the same shared JSON document as user actions. Put it
+// behind the write queue and coalesce duplicate requests for the same scope.
+function enqueueAttendanceReconcile(options = {}) {
+  const key = options.dateKey ? `date:${String(options.dateKey)}` : "all";
+  const existing = attendanceReconcileInFlight.get(key);
+  if (existing) return existing;
+  const task = enqueueAttendanceDataWrite(() => reconcileMissingSeasonalScheduleFines(prisma, options));
+  attendanceReconcileInFlight.set(key, task);
+  task.finally(() => {
+    if (attendanceReconcileInFlight.get(key) === task) attendanceReconcileInFlight.delete(key);
+  }).catch(() => undefined);
+  return task;
+}
+
+function enqueueAttendanceMaintenance(key, work) {
+  const existing = attendanceMaintenanceInFlightByKey.get(key);
+  if (existing) return existing;
+  const task = enqueueAttendanceDataWrite(work);
+  attendanceMaintenanceInFlightByKey.set(key, task);
+  task.finally(() => {
+    if (attendanceMaintenanceInFlightByKey.get(key) === task) attendanceMaintenanceInFlightByKey.delete(key);
+  }).catch(() => undefined);
   return task;
 }
 
@@ -30342,11 +30530,14 @@ ipcMain.handle("appConfig:set", async (event, key, value, expectedUpdatedAt) => 
           try {
             return await prisma.$transaction(
               async (tx) => {
+                await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('attendanceData'))`;
                 const current = await tx.appConfig.findUnique({ where: { key } });
                 let valueToSave = { ...(value || {}), employees: [] };
+                let currentValueForFineMerge = null;
                 if (current?.value) {
                   try {
                     const currentValue = JSON.parse(current.value);
+                    currentValueForFineMerge = currentValue;
                     valueToSave = {
                       ...(value || {}),
                       employees: Array.isArray(currentValue?.employees)
@@ -30410,6 +30601,13 @@ ipcMain.handle("appConfig:set", async (event, key, value, expectedUpdatedAt) => 
                       };
                     }
                   } catch {}
+                }
+                if (currentValueForFineMerge) {
+                  const mergedFineLedger = mergeAttendanceFineLedger(currentValueForFineMerge, valueToSave);
+                  valueToSave = {
+                    ...valueToSave,
+                    ...mergedFineLedger,
+                  };
                 }
                 return tx.appConfig.upsert({
                   where: { key },
@@ -30817,15 +31015,29 @@ ipcMain.handle("attendance:deleteFine", async (event, payload = {}) => {
     if (kind === 'manual' && !fineId) throw new Error("Thiếu mã khoản phạt thủ công.");
     if (kind === 'system' && !overrideKey) throw new Error("Thiếu khóa khoản phạt hệ thống.");
 
+    const actor = { username: currentSession.username, fullName: currentSession.fullName };
+    const startedAt = Date.now();
+    let transactionStartedAt;
     const result = await enqueueAttendanceDataWrite(async () => {
+      transactionStartedAt = Date.now();
       let lastConflict = null;
-      for (let attempt = 0; attempt < 5; attempt++) {
+      for (let attempt = 0; attempt < 2; attempt++) {
         try {
           return await getPrismaDirectTx().$transaction(async (tx) => {
+            await tx.$executeRaw`SET LOCAL lock_timeout = '3000ms'`;
+            await tx.$executeRaw`SET LOCAL statement_timeout = '8000ms'`;
             await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('attendanceData'))`;
-            const row = await tx.appConfig.findUnique({ where: { key: "attendanceData" } });
-            let attendanceData = {};
-            try { attendanceData = JSON.parse(row?.value || "{}"); } catch {}
+            // Leave payroll snapshots in PostgreSQL; only transfer the fine ledger.
+            const rows = await tx.$queryRaw`
+              SELECT jsonb_build_object(
+                'extraFines', "value"::jsonb->'extraFines',
+                'fineOverrides', "value"::jsonb->'fineOverrides',
+                'fineAuditLog', "value"::jsonb->'fineAuditLog'
+              )::text AS "value"
+              FROM "AppConfig" WHERE "key" = 'attendanceData' FOR UPDATE
+            `;
+            if (!rows.length) throw new Error("Không tìm thấy dữ liệu Bảng công. Vui lòng tải lại.");
+            const attendanceData = JSON.parse(rows[0].value);
 
             let extraFines = Array.isArray(attendanceData.extraFines) ? attendanceData.extraFines : [];
             const fineOverrides = attendanceData.fineOverrides && typeof attendanceData.fineOverrides === "object"
@@ -30833,10 +31045,12 @@ ipcMain.handle("attendance:deleteFine", async (event, payload = {}) => {
               : {};
             const fineAuditLog = Array.isArray(attendanceData.fineAuditLog) ? [...attendanceData.fineAuditLog] : [];
 
+            let deletedFine = fine;
             if (kind === 'manual') {
               if (!extraFines.some((item) => String(item?.id || '') === fineId)) {
                 throw new Error("Khoản phạt đã bị xóa hoặc không còn tồn tại.");
               }
+              deletedFine = extraFines.find((item) => String(item?.id || '') === fineId);
               extraFines = extraFines.filter((item) => String(item?.id || '') !== fineId);
             } else {
               fineOverrides[overrideKey] = { ...fine, disabled: true };
@@ -30846,20 +31060,21 @@ ipcMain.handle("attendance:deleteFine", async (event, payload = {}) => {
               id: `flog-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
               action: 'delete',
               timestamp: new Date().toLocaleString('vi-VN', { timeZone: 'Asia/Bangkok' }),
-              changedBy: currentSession.username,
-              changedByName: currentSession.fullName || currentSession.username,
-              before: fine,
+              changedBy: actor.username,
+              changedByName: actor.fullName || actor.username,
+              before: deletedFine,
               note: String(payload?.audit?.note || `Xóa khoản phạt: ${fine.type} — ${fine.amount}`).slice(0, 2000),
             });
 
-            const nextAttendanceData = { ...attendanceData, extraFines, fineOverrides, fineAuditLog };
-            await tx.appConfig.upsert({
-              where: { key: "attendanceData" },
-              update: { value: JSON.stringify(nextAttendanceData) },
-              create: { key: "attendanceData", value: JSON.stringify(nextAttendanceData) },
-            });
+            const patch = JSON.stringify({ extraFines, fineOverrides, fineAuditLog });
+            await tx.$executeRaw`
+              UPDATE "AppConfig"
+              SET "value" = ("value"::jsonb || ${patch}::jsonb)::text,
+                  "updatedAt" = CURRENT_TIMESTAMP
+              WHERE "key" = 'attendanceData'
+            `;
             return { extraFines, fineOverrides, fineAuditLog };
-          }, { isolationLevel: "Serializable", timeout: 15000, maxWait: 10000 });
+          }, { isolationLevel: "Serializable", timeout: 12000, maxWait: 3000 });
         } catch (error) {
           if (!isTransactionWriteConflict(error)) throw error;
           lastConflict = error;
@@ -30867,19 +31082,24 @@ ipcMain.handle("attendance:deleteFine", async (event, payload = {}) => {
         }
       }
       throw lastConflict || new Error("Khoản phạt đang được cập nhật ở máy khác. Hãy thử lại.");
-    });
+    }, { maxQueueWaitMs: 15000 });
+    invalidateAttendanceSnapshotCaches();
+    console.info(`[Attendance deleteFine] queue=${transactionStartedAt - startedAt}ms transaction=${Date.now() - transactionStartedAt}ms`);
 
     void logActivity({
       module: "attendance",
       action: "DELETE_FINE",
       description: `Xóa khoản phạt ${fine.type} của nhân viên ${fine.empId}`,
       recordName: fineId || overrideKey,
-      userName: currentSession.username,
+      userName: actor.username,
       severity: "WARNING",
     }).catch((error) => console.warn("Không thể ghi audit xóa phạt:", error.message));
     return { success: true, data: result };
   } catch (error) {
     console.error("❌ attendance:deleteFine error:", error);
+    if (/lock timeout|statement timeout|could not serialize|deadlock/i.test(String(error?.message || "")) || error?.code === "P2034" || error?.code === "P2028") {
+      return { success: false, error: "Database Bảng công đang bận. Không thể hoàn tất xóa phạt; vui lòng tải lại bảng và thử lại." };
+    }
     return { success: false, error: error.message };
   }
 });
@@ -31192,7 +31412,7 @@ ipcMain.handle("attendance:updateLeaveStatus", async (event, payload = {}) => {
       console.warn("[Attendance Leave] Không đối soát được miễn phạt sau khi lưu nghỉ:", error.message);
     }
     try {
-      await reconcileMissingSeasonalScheduleFines(prisma, { dateKey: date, now: new Date() });
+      await enqueueAttendanceReconcile({ dateKey: date, now: new Date() });
     } catch (error) {
       console.warn("[Attendance Leave] Không đối soát được phạt vắng sau khi lưu nghỉ:", error.message);
     }
@@ -33172,8 +33392,8 @@ ipcMain.handle(
 
       const result = await getPrismaDirectTx().$transaction(
         async (tx) => {
-          await lockStockCheckSessions(tx);
           await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('attendanceData'))`;
+          await lockStockCheckSessions(tx);
           const [sessionRecord, attendanceRecord] = await Promise.all([
             tx.appConfig.findUnique({ where: { key: "stockCheckSessionsV2" } }),
             tx.appConfig.findUnique({ where: { key: "attendanceData" } }),
@@ -35064,6 +35284,7 @@ ipcMain.handle(
 );
 
 ipcMain.handle("users:logout", async (event, rememberToken) => {
+  if (sharedDriveBackend) await sharedDriveBackend.revoke().catch(() => {});
   stopMobileDailyEvidenceSession();
   const tokenToRevoke = readSecureRememberToken() || rememberToken;
   await revokeRememberToken(tokenToRevoke).catch(() => {});
@@ -39910,7 +40131,7 @@ ipcMain.handle("attendance:recognize", async (event, { image }) => {
       logIds: [log.id],
       actor: "system",
     });
-    void reconcileMissingSeasonalScheduleFines(prisma, { dateKey: today, now: new Date() })
+    void enqueueAttendanceReconcile({ dateKey: today, now: new Date() })
       .catch((error) => console.warn("[Attendance Schedule] Không đối soát được phạt thiếu khai báo:", error.message));
     const lateFine = fineResult.created[0] || null;
     const waivedLate = fineResult.waived?.[0] || null;

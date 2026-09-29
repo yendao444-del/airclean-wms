@@ -481,6 +481,7 @@ export default function EcommerceExportPage() {
     const [unmatchedScans, setUnmatchedScans] = useState<{ trackingId: string; scannedAt: string }[]>([]);
     const [slaNow, setSlaNow] = useState(() => Date.now());
     const [operationalCounts, setOperationalCounts] = useState({ total: 0, pending: 0, completed: 0, mismatch: 0, overdue: 0, cancelled: 0 });
+    const [resolvingMismatchIds, setResolvingMismatchIds] = useState<Set<number>>(new Set());
     const unmatchedDateRef = useRef(dayjs().format('YYYY-MM-DD')); // Ngày hiện tại để auto-reset
 
 
@@ -996,6 +997,8 @@ export default function EcommerceExportPage() {
     };
 
     const handleResolveMismatch = async (record: EcommerceExport, action: 'cancel' | 'pickup') => {
+        if (resolvingMismatchIds.has(record.id)) return;
+        setResolvingMismatchIds(previous => new Set(previous).add(record.id));
         try {
             const result = await window.electronAPI.ecommerceExports.resolveMismatch(record.id, {
                 action,
@@ -1011,11 +1014,26 @@ export default function EcommerceExportPage() {
             } else {
                 message.success(action === 'cancel' ? 'Đã xác nhận đơn hủy trên sàn.' : 'Đã xác nhận pickup thành công.');
             }
-            await loadEcommerceExports(true);
+            // Remove the resolved mismatch immediately. The authoritative
+            // reload continues in the background and repairs any race/error.
+            const nextRecords = exportsRef.current.filter(item => item.id !== record.id);
+            if (statusFilterRef.current === 'all' && result.data) {
+                nextRecords.push(result.data as EcommerceExport);
+            }
+            exportsRef.current = nextRecords;
+            rebuildTrackingMap(nextRecords);
+            setEcommerceExports(nextRecords);
+            void loadEcommerceExports(true);
             void loadOperationalCounts();
         } catch (error) {
             console.error('Resolve ecommerce mismatch error:', error);
             message.error('Không thể xử lý đơn cần đối soát.');
+        } finally {
+            setResolvingMismatchIds(previous => {
+                const next = new Set(previous);
+                next.delete(record.id);
+                return next;
+            });
         }
     };
 
@@ -2885,6 +2903,7 @@ Thời gian: ${currentTime}`;
                             key: 'confirm-pickup',
                             icon: <CheckCircleOutlined />,
                             label: 'Vẫn chờ lấy hàng - xác nhận pickup',
+                            disabled: resolvingMismatchIds.has(record.id),
                             onClick: () => handleResolveMismatch(record, 'pickup'),
                         },
                         {
@@ -2892,6 +2911,7 @@ Thời gian: ${currentTime}`;
                             icon: <CloseCircleOutlined />,
                             label: 'Đã hủy trên sàn',
                             danger: true,
+                            disabled: resolvingMismatchIds.has(record.id),
                             onClick: () => handleResolveMismatch(record, 'cancel'),
                         },
                     ];
@@ -2911,6 +2931,7 @@ Thời gian: ${currentTime}`;
                                 <Button
                                     size="small"
                                     className="ecommerce-review-button"
+                                    loading={resolvingMismatchIds.has(record.id)}
                                     aria-label={`Xử lý đơn cần kiểm tra ${record.orderNumber || record.ecommerceExportCode || record.id}`}
                                 >
                                     Cần kiểm tra <DownOutlined />

@@ -45,6 +45,14 @@ function normalizeUsername(value) {
   return String(value || "").trim().toLocaleLowerCase("vi-VN");
 }
 
+function hasApprovedLeaveForDate(leaveRecords, employeeId, dateKey) {
+  return (leaveRecords || []).some((leave) => (
+    Number(leave?.empId) === Number(employeeId)
+    && leave?.date === dateKey
+    && !leave?.unpaid
+  ));
+}
+
 function fineId(employeeId, dateKey) {
   return `fine-prepack-shortfall-${employeeId}-${dateKey}`;
 }
@@ -80,6 +88,7 @@ async function reconcilePrepackShortfallFines(prisma, options = {}) {
     let attendanceData = {};
     try { attendanceData = JSON.parse(configRow?.value || "{}"); } catch {}
     const employees = Array.isArray(attendanceData.employees) ? attendanceData.employees : [];
+    const leaveRecords = Array.isArray(attendanceData.leaveRecords) ? attendanceData.leaveRecords : [];
     const existingFines = Array.isArray(attendanceData.extraFines) ? [...attendanceData.extraFines] : [];
     const fineAuditLog = Array.isArray(attendanceData.fineAuditLog) ? [...attendanceData.fineAuditLog] : [];
     const deletedIds = new Set(fineAuditLog
@@ -136,12 +145,18 @@ async function reconcilePrepackShortfallFines(prisma, options = {}) {
     }
 
     const groupedViolations = new Map();
+    const removedFineIds = new Set();
     for (const dateKey of targetDates) {
       const endOfDay = bangkokEndOfDay(dateKey);
       for (const batch of activeBatches) {
         if (new Date(batch.createdAt).getTime() > endOfDay.getTime()) continue;
         const employee = employees.find((item) => normalizeUsername(item?.username) === normalizeUsername(batch.packerUsername));
         if (!employee || !batch.packerUsername) continue;
+        if (hasApprovedLeaveForDate(leaveRecords, employee.id, dateKey)) {
+          // An approved leave excuses the employee for the whole prepack workday.
+          removedFineIds.add(fineId(Number(employee.id), dateKey));
+          continue;
+        }
         const report = latestReports.get(`${dateKey}:${batch.id}`);
         const reportedQty = report?.quantity ?? 0;
         if (!isShortfall(batch.requestedQty, reportedQty)) continue;
@@ -185,10 +200,11 @@ async function reconcilePrepackShortfallFines(prisma, options = {}) {
       });
     }
 
-    if (created.length) {
+    const nextFines = existingFines.filter((fine) => !removedFineIds.has(String(fine?.id)));
+    if (created.length || nextFines.length !== existingFines.length) {
       const nextData = {
         ...attendanceData,
-        extraFines: [...existingFines, ...created],
+        extraFines: [...nextFines, ...created],
       };
       await tx.appConfig.upsert({
         where: { key: "attendanceData" },
@@ -196,7 +212,12 @@ async function reconcilePrepackShortfallFines(prisma, options = {}) {
         create: { key: "attendanceData", value: JSON.stringify(nextData) },
       });
     }
-    return { created, checked: targetDates.length, cutoff: targetDates.map((dateKey) => bangkokEndOfDay(dateKey).toISOString()) };
+    return {
+      created,
+      removed: [...removedFineIds].filter((id) => existingFines.some((fine) => String(fine?.id) === id)),
+      checked: targetDates.length,
+      cutoff: targetDates.map((dateKey) => bangkokEndOfDay(dateKey).toISOString()),
+    };
   }, { isolationLevel: "Serializable", timeout: 15000, maxWait: 10000 });
 }
 
@@ -206,5 +227,6 @@ module.exports = {
   PREPACK_OFFICIAL_FINE,
   PREPACK_SEASONAL_FINE,
   isShortfall,
+  hasApprovedLeaveForDate,
   reconcilePrepackShortfallFines,
 };

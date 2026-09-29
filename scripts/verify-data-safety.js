@@ -31,7 +31,6 @@ const evidenceWorker = read('cloudflare/r2-daily-evidence-worker/src/index.ts');
 const devLauncher = read('scripts/start-electron-dev.js');
 const fastStartBatch = read('START.bat');
 const devStartBatch = read('START-DEV.bat');
-const r2BootstrapScript = read('scripts/prepare-r2-daily-evidence-config.js');
 const releaseLite = read('updates/RELEASE-SUPPERLITE.bat');
 const releaseQuick = read('updates/RELEASE-ver3.bat');
 const releasePrisma = read('updates/RELEASE-PRISMA-PATCH.bat');
@@ -65,10 +64,11 @@ requireText(posCreateHandler, 'changes: {', 'POS activity logs must persist stru
 requireText(ipc, 'const DATA_SAFETY_MODE = true;', 'DATA_SAFETY_MODE must default to true');
 requireText(ipc, 'const isAdminSession = currentSession?.role === "admin";', 'Admin sessions must be able to run maintenance workflows in safety mode');
 requireText(ipc, 'DATA_SAFETY_MODE && !isAdminSession', 'Safety-mode blocking must not apply to authenticated admins');
-requireText(ipc, 'path.join(__dirname, "r2-daily-evidence-bootstrap.json")', 'Daily evidence R2 must support bundled production bootstrap configuration');
-requireText(r2BootstrapScript, 'DAILY_EVIDENCE_KEY', 'R2 bootstrap preparation must read the worker key');
-requireText(r2BootstrapScript, 'legacyBootstrap.testKey', 'R2 bootstrap preparation must reuse the existing production-compatible device key');
-requireText(r2BootstrapScript, 'development-only$/i.test(key)', 'R2 bootstrap preparation must reject the development-only key');
+requireText(ipc, 'getSharedDriveBackend().getSessionGrant()', 'Daily evidence R2 must use the short-lived employee grant');
+rejectText(releaseQuick, 'prepare-r2-daily-evidence-config.js', 'Quick release must not embed the R2 shared key');
+rejectText(releasePrisma, 'prepare-r2-daily-evidence-config.js', 'Prisma release must not embed the R2 shared key');
+rejectText(releaseFull, 'prepare-r2-daily-evidence-config.js', 'Full release must not embed the R2 shared key');
+requireText(packageJson, '!electron/r2-daily-evidence-bootstrap.json', 'Installer must exclude the R2 shared key');
 const allowedChannelsMatch = ipc.match(/const DATA_SAFETY_ALLOWED_CHANNELS = new Set\(\[([\s\S]*?)\n\]\);/);
 if (!allowedChannelsMatch) {
   failures.push('Data-safety allowed-channel set is missing');
@@ -426,7 +426,7 @@ rejectText(ecommerce, "appConfig.set('activePacker'", 'Per-shift packer selectio
 rejectText(ecommerce, "appConfig.set('telegramChatId'", 'Telegram credentials must not be saved through split AppConfig writes');
 rejectText(ecommerce, "appConfig.set('telegramOrderCounter'", 'Telegram numbering must not use split AppConfig writes');
 requireText(purchasePage, 'const importReceiptFiles = pendingImportFiles.length > 0', 'Purchase edits must include replacement receipts in the guarded update request');
-requireText(ipc, 'updatedAt: true,\n          vatInvoiceStatus: true,', 'Purchase list must expose the revision required by guarded edits and uploads');
+requireText(normalizedIpc, 'updatedAt: true,\n          vatInvoiceStatus: true,', 'Purchase list must expose the revision required by guarded edits and uploads');
 requireText(ipc, 'importReceiptDriveUrl: uploadedReceiptReferences.join("\\n")', 'Purchase update must commit replacement receipt references with the edited receipt');
 requireText(purchasePage, 'expectedUpdatedAt: documentRevision', 'VAT upload after a purchase edit must send the latest row revision');
 requireText(purchasePage, 'expectedUpdatedAt: existingPurchase?.updatedAt', 'Manual VAT upload must reject stale purchase rows');
@@ -545,7 +545,7 @@ for (const [name, source] of [
   ['Prisma/Python release', releasePrismaPython],
   ['Full release', releaseFull],
 ]) {
-  requireText(source, 'verify-gdrive-release-token.cjs', `${name} must validate the shared Google Drive token before packaging`);
+  requireText(source, 'prepare-drive-backend-stage.cjs', `${name} must exclude Google tokens and stage the shared backend client`);
   requireText(source, 'supabase-storage.json" 2>nul', `${name} must remove local Supabase configuration from staging`);
 }
 requireText(releasePrisma, 'npx prisma generate', 'Prisma patch must regenerate Prisma Client');

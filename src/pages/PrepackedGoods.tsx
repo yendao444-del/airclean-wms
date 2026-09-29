@@ -34,7 +34,7 @@ import maskBoxMint from '../assets/pos-catalog/mask-box-mint.webp';
 import maskBoxLocPhat from '../assets/pos-catalog/mask-box-loc-phat.webp';
 import './PrepackedGoods.css';
 
-type PrepackStatus = 'active' | 'pending' | 'waiting_acceptance' | 'ready' | 'depleted' | 'rejected';
+type PrepackStatus = 'active' | 'pending' | 'waiting_acceptance' | 'ready' | 'depleted' | 'rejected' | 'cancelled';
 
 interface PrepackEvidence {
     id: number;
@@ -213,6 +213,10 @@ export default function PrepackedGoods() {
         : []);
     const [historyLoading, setHistoryLoading] = useState(!isUiTest);
     const [loading, setLoading] = useState(!isUiTest);
+    const [rowsError, setRowsError] = useState('');
+    const [historyError, setHistoryError] = useState('');
+    const [rowsReadyKey, setRowsReadyKey] = useState(() => isUiTest ? dayjs().format('YYYY-MM-DD') : '');
+    const [historyReadyKey, setHistoryReadyKey] = useState(() => isUiTest ? dayjs().format('YYYY-MM-DD') : '');
     const [catalog, setCatalog] = useState<CatalogItem[]>(isUiTest ? [
         { productId: 1, sku: 'AMI-WHITE', name: 'Khẩu trang AMI - Trắng', productName: 'Khẩu trang AMI', variantName: 'Trắng', unit: 'hộp', image: maskBoxPink },
         { productId: 1, sku: 'AMI-BLACK', name: 'Khẩu trang AMI - Đen', productName: 'Khẩu trang AMI', variantName: 'Đen', unit: 'hộp', image: maskBoxPink },
@@ -241,6 +245,9 @@ export default function PrepackedGoods() {
     const [selectedPackerUsername, setSelectedPackerUsername] = useState<string>('');
     const [historyVisible, setHistoryVisible] = useState(false);
     const historyPanelRef = useRef<HTMLElement | null>(null);
+    const rowsRequestRef = useRef(0);
+    const historyRequestRef = useRef(0);
+    const selectedDateKeyRef = useRef('');
     const [reportedQuantities, setReportedQuantities] = useState<Record<number, number | null>>({});
     const [collapsedPackerGroups, setCollapsedPackerGroups] = useState<Set<string>>(() => new Set());
     const [createForm] = Form.useForm();
@@ -248,6 +255,8 @@ export default function PrepackedGoods() {
 
     const isSelectedToday = selectedWorkDate.isSame(dayjs(), 'day');
     const selectedWorkDateLabel = selectedWorkDate.format('DD/MM/YYYY');
+    const selectedDateKey = selectedWorkDate.format('YYYY-MM-DD');
+    selectedDateKeyRef.current = selectedDateKey;
     const evidenceDateFilters = {
         evidenceStartDate: selectedWorkDate.startOf('day').toISOString(),
         evidenceEndDate: selectedWorkDate.add(1, 'day').startOf('day').toISOString(),
@@ -329,40 +338,64 @@ export default function PrepackedGoods() {
     };
 
     const loadRows = async () => {
+        const requestId = ++rowsRequestRef.current;
+        const requestDateKey = selectedDateKey;
         if (isUiTest) {
             setRows(getUiTestRows());
+            setRowsReadyKey(requestDateKey);
             return;
         }
+        const startedAt = performance.now();
+        setRowsError('');
         setLoading(true);
         try {
             const result = await window.electronAPI.prepack.list(evidenceDateFilters);
+            if (requestId !== rowsRequestRef.current || requestDateKey !== selectedDateKeyRef.current) return;
             if (!result.success) throw new Error(result.error);
-            setRows(result.data || []);
+            setRows((result.data || []).filter((row: PrepackBatch) => row.status !== 'cancelled'));
+            setRowsReadyKey(requestDateKey);
         } catch (error: any) {
-            message.error(error?.message || 'Không thể tải lệnh đóng gói.');
+            if (requestId === rowsRequestRef.current && requestDateKey === selectedDateKeyRef.current) {
+                setRowsError(error?.message || 'Không thể tải lệnh đóng gói.');
+            }
         } finally {
-            setLoading(false);
+            if (requestId === rowsRequestRef.current && requestDateKey === selectedDateKeyRef.current) {
+                setLoading(false);
+                if (import.meta.env.DEV) console.info('[Prepack:load] rows', { date: requestDateKey, ms: Math.round(performance.now() - startedAt) });
+            }
         }
     };
 
     const loadHistory = async () => {
+        const requestId = ++historyRequestRef.current;
+        const requestDateKey = selectedDateKey;
         if (isUiTest) {
             setPrepackHistory(readUiTestJson<PrepackHistoryRecord[]>(PREPACK_UI_HISTORY_STORAGE_KEY, []));
+            setHistoryReadyKey(requestDateKey);
             return;
         }
+        const startedAt = performance.now();
+        setHistoryError('');
         setHistoryLoading(true);
         try {
             const result = await window.electronAPI.prepack.history({
                 startDate: selectedWorkDate.startOf('day').toISOString(),
                 endDate: selectedWorkDate.add(1, 'day').startOf('day').toISOString(),
             });
+            if (requestId !== historyRequestRef.current || requestDateKey !== selectedDateKeyRef.current) return;
             if (!result.success) throw new Error(result.error);
             setPrepackHistory((result.data || []) as PrepackHistoryRecord[]);
+            setHistoryReadyKey(requestDateKey);
         } catch (error: any) {
-            setPrepackHistory([]);
-            message.error(error?.message || 'Không thể tải lịch sử đóng gói.');
+            if (requestId === historyRequestRef.current && requestDateKey === selectedDateKeyRef.current) {
+                setPrepackHistory([]);
+                setHistoryError(error?.message || 'Không thể tải lịch sử đóng gói.');
+            }
         } finally {
-            setHistoryLoading(false);
+            if (requestId === historyRequestRef.current && requestDateKey === selectedDateKeyRef.current) {
+                setHistoryLoading(false);
+                if (import.meta.env.DEV) console.info('[Prepack:load] history', { date: requestDateKey, ms: Math.round(performance.now() - startedAt) });
+            }
         }
     };
 
@@ -384,7 +417,11 @@ export default function PrepackedGoods() {
 
     useEffect(() => {
         void Promise.all([loadRows(), loadHistory()]);
-    }, [selectedWorkDate.valueOf()]);
+        return () => {
+            rowsRequestRef.current += 1;
+            historyRequestRef.current += 1;
+        };
+    }, [selectedDateKey]);
     useEffect(() => {
         setReportedQuantities(Object.fromEntries(
             rows
@@ -394,18 +431,32 @@ export default function PrepackedGoods() {
     }, [rows, selectedWorkDate.valueOf()]);
     useEffect(() => {
         if (!isManager || isUiTest) return;
-        void Promise.all([
-            // Managers need the active catalog but must not receive exact stock
-            // values that are reserved for the admin inventory screen.
-            window.electronAPI.products.getCatalogForSale?.() || window.electronAPI.products.getAll(),
-            window.electronAPI.users.getAll(),
-        ]).then(([productResult, userResult]) => {
-            if (productResult.success) setCatalog(flattenCatalog(productResult.data || []));
-            if (userResult.success) setEmployees((userResult.data || []).filter((item: EmployeeItem) => item.isActive && item.role !== 'admin' && item.operationalAssignee !== false));
-        });
+        let cancelled = false;
+        const catalogStartedAt = performance.now();
+        // Managers need the active catalog but must not receive exact stock
+        // values that are reserved for the admin inventory screen.
+        void (window.electronAPI.products.getCatalogForSale?.() || window.electronAPI.products.getAll())
+            .then(result => {
+                if (!cancelled && result.success) setCatalog(flattenCatalog(result.data || []));
+            })
+            .catch(error => { if (!cancelled) console.error('Không thể tải danh mục đóng gói:', error); })
+            .finally(() => {
+                if (import.meta.env.DEV) console.info('[Prepack:load] catalog', { ms: Math.round(performance.now() - catalogStartedAt) });
+            });
+        const usersStartedAt = performance.now();
+        void window.electronAPI.users.getAll()
+            .then(result => {
+                if (!cancelled && result.success) setEmployees((result.data || []).filter((item: EmployeeItem) => item.isActive && item.role !== 'admin' && item.operationalAssignee !== false));
+            })
+            .catch(error => { if (!cancelled) console.error('Không thể tải nhân viên đóng gói:', error); })
+            .finally(() => {
+                if (import.meta.env.DEV) console.info('[Prepack:load] users', { ms: Math.round(performance.now() - usersStartedAt) });
+            });
+        return () => { cancelled = true; };
     }, [isManager, isUiTest]);
 
     const targetRows = useMemo(() => rows
+        .filter(row => row.status !== 'cancelled')
         .filter(row => !isSelectedToday || row.status === 'active' || row.status === 'pending' || row.status === 'waiting_acceptance')
         .filter(row => isAdmin || !isRolePreview || !user?.username || row.packerUsername === user.username), [isAdmin, isRolePreview, isSelectedToday, rows, user?.username]);
     const packerTabs = useMemo(() => {
@@ -518,6 +569,9 @@ export default function PrepackedGoods() {
     const getEmployeeInitial = (name: string) => name.trim().split(/\s+/).pop()?.charAt(0).toUpperCase() || '?';
     const submitActualReport = async () => {
         if (isRolePreview && !isAdmin) return;
+        if (rowsReadyKey !== selectedDateKey || historyReadyKey !== selectedDateKey || loading || historyLoading) {
+            return void message.warning('Vui lòng chờ tải đủ chỉ tiêu và lịch sử trước khi gửi báo cáo.');
+        }
         if (!isSelectedToday && !isAdmin) return void message.info('Chỉ có thể gửi báo cáo cho ngày hôm nay.');
         const unreportedRows = selectedPackerRows.filter(row => !hasSubmittedReportForSelectedDate(row));
         const reports = unreportedRows.map(row => ({
@@ -783,7 +837,7 @@ export default function PrepackedGoods() {
             </div>
 
             <div className="prepack-report-shell">
-                {loading ? <div className="prepack-loading"><Spin /></div> : selectedPackerRows.length ? <>
+                {rowsError ? <div className="prepack-loading"><span>{rowsError}</span><Button onClick={() => void loadRows()}>Thử lại</Button></div> : loading || rowsReadyKey !== selectedDateKey ? <div className="prepack-loading"><Spin /></div> : selectedPackerRows.length ? <>
                     <div className="prepack-report-heading">
                     <div><strong>Báo cáo đóng gói của nhân viên</strong><span>Nhập số lượng thực tế theo từng sản phẩm; ảnh kiểm tra thực hiện trong Công việc hàng ngày.</span></div>
                         <b>{selectedPackerRows.length} sản phẩm</b>
@@ -825,7 +879,7 @@ export default function PrepackedGoods() {
                              </div>;
                         })}
                     </div>
-                    <div className="prepack-report-footer"><span><ClockCircleOutlined /> Bắt buộc nhập số lượng thực tế, có thể nhập 0. Báo cáo được lưu theo ngày; ảnh và công việc hàng ngày xem ở tab riêng.</span><Button type="primary" loading={submitting} disabled={(isRolePreview && !isAdmin) || selectedPackerRows.every(row => hasSubmittedReportForSelectedDate(row)) || selectedPackerRows.some(row => !hasSubmittedReportForSelectedDate(row) && (!Number.isInteger(Object.prototype.hasOwnProperty.call(reportedQuantities, row.id) ? reportedQuantities[row.id] : null) || Number(reportedQuantities[row.id]) < 0))} onClick={() => void submitActualReport()}>Gửi báo cáo đóng gói</Button></div>
+                    <div className="prepack-report-footer"><span><ClockCircleOutlined /> {historyError ? <>Không thể đối chiếu lịch sử: {historyError} <Button size="small" onClick={() => void loadHistory()}>Thử lại</Button></> : 'Bắt buộc nhập số lượng thực tế, có thể nhập 0. Báo cáo được lưu theo ngày; ảnh và công việc hàng ngày xem ở tab riêng.'}</span><Button type="primary" loading={submitting} disabled={(isRolePreview && !isAdmin) || historyLoading || historyReadyKey !== selectedDateKey || Boolean(historyError) || selectedPackerRows.every(row => hasSubmittedReportForSelectedDate(row)) || selectedPackerRows.some(row => !hasSubmittedReportForSelectedDate(row) && (!Number.isInteger(Object.prototype.hasOwnProperty.call(reportedQuantities, row.id) ? reportedQuantities[row.id] : null) || Number(reportedQuantities[row.id]) < 0))} onClick={() => void submitActualReport()}>Gửi báo cáo đóng gói</Button></div>
                 </> : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="Nhân viên này chưa có chỉ tiêu đóng gói" />}
             </div>
 
@@ -837,7 +891,7 @@ export default function PrepackedGoods() {
                     </div>
                     <b>{selectedPackerHistory.length || (shouldShowHistory ? 1 : 0)} lần gửi</b>
                 </div>
-                {historyLoading ? <div className="prepack-history-loading"><Spin size="small" /></div> : selectedPackerRows.length ? (
+                {historyError ? <div className="prepack-history-loading"><span>{historyError}</span><Button size="small" onClick={() => void loadHistory()}>Thử lại</Button></div> : historyLoading || historyReadyKey !== selectedDateKey || rowsReadyKey !== selectedDateKey ? <div className="prepack-history-loading"><Spin size="small" /></div> : selectedPackerRows.length ? (
                     <div className="prepack-history-table">
                         <div className="prepack-history-row prepack-history-head"><span>Sản phẩm</span><span>Chỉ tiêu</span><span>Đã nhập</span><span>Đối chiếu</span><span>Thời điểm</span></div>
                         {selectedPackerRows.map(row => {

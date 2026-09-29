@@ -987,6 +987,23 @@
     border-left: 2px solid #ecfdf5;
 }
 
+/* Fine descriptions need the widest column so the ledger does not become a
+   tall stack of narrow words beside a large empty row area. */
+.attendance-module .att-fines-table .ant-table-cell.att-fines-detail-column {
+    white-space: normal !important;
+    vertical-align: top;
+}
+
+.attendance-module .att-fines-table .ant-table-cell.att-fines-detail-column > div {
+    max-width: 100%;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+}
+
+.attendance-module .att-fines-table .ant-table-tbody > tr > td {
+    vertical-align: middle;
+}
+
 .att-emp-name {
     font-weight: 900;
     color: #111827;

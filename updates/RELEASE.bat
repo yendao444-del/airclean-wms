@@ -60,8 +60,6 @@ echo [4/7] Building Electron...
 echo ----------------------------------------
 call node scripts\prepare-runtime-db-config.cjs
 if errorlevel 1 ( echo [ERROR] Runtime database config build that bai! & pause & exit /b 1 )
-call node scripts\prepare-r2-daily-evidence-config.js
-if errorlevel 1 ( echo [ERROR] R2 daily evidence config build that bai! & pause & exit /b 1 )
 node --max-old-space-size=4096 node_modules/electron-builder/cli.js
 if errorlevel 1 ( echo ❌ Electron build that bai! & pause & exit /b 1 )
 call node scripts\verify-packaged-footprint.cjs release4\win-unpacked\resources\app
@@ -97,18 +95,8 @@ mkdir "_full_temp\resources\app\node_modules\tslib"
 
 :: Luon dong goi token moi nhat tu AppData. Neu chi copy khi file dich chua
 :: ton tai, mot token cu trong electron/ se tiep tuc bi phat hanh cho nhan vien.
-if exist "%APPDATA%\quan-ly-ban-hang-desktop\gdrive-token.json" (
-    copy /Y "%APPDATA%\quan-ly-ban-hang-desktop\gdrive-token.json" "electron\gdrive-token.json" >nul 2>&1
-    echo    [OK] Auto-copy gdrive-token.json moi nhat tu AppData vao electron/
-) else (
-    if not exist "electron\gdrive-token.json" (
-        echo    [!] CANH BAO: Khong co gdrive-token.json - Google Drive upload se THAT BAI tren production!
-        echo        Chay reauth-gdrive.bat truoc khi build.
-    ) else (
-        echo    [!] Khong co token AppData, dang dung token hien co trong electron/.
-    )
-)
-call node scripts\verify-gdrive-release-token.cjs "electron\gdrive-token.json"
+:: Google authorization is held by the shared Cloudflare backend.
+call node --check electron\drive-backend.js
 if errorlevel 1 (
     pause
     exit /b 1
@@ -139,7 +127,7 @@ rem Never publish development database/service credentials in a patch.
 del /Q "_full_temp\resources\app\electron\config.js" 2>nul
 del /Q "_full_temp\resources\app\electron\supabase-storage.json" 2>nul
 del /Q "_full_temp\resources\app\electron\gdrive-credentials.json" 2>nul
-call node scripts\verify-gdrive-release-token.cjs "_full_temp\resources\app\electron\gdrive-token.json"
+call node scripts\prepare-drive-backend-stage.cjs "_full_temp\resources\app\electron"
 if errorlevel 1 (
     rmdir /S /Q "_full_temp" 2>nul
     pause

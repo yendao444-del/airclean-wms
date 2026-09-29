@@ -81,35 +81,27 @@ mkdir "!PATCH_TEMP!\resources\app\node_modules\iceberg-js"
 mkdir "!PATCH_TEMP!\resources\app\node_modules\tslib"
 mkdir "!PATCH_TEMP!\resources\app\node_modules\ws"
 
-if exist "%APPDATA%\quan-ly-ban-hang-desktop\gdrive-token.json" (
-    copy /Y "%APPDATA%\quan-ly-ban-hang-desktop\gdrive-token.json" "electron\gdrive-token.json" >nul 2>&1
-    echo    [OK] Auto-copy gdrive-token.json moi nhat tu AppData vao electron/
-)
-call node scripts\verify-gdrive-release-token.cjs "electron\gdrive-token.json"
+:: Google authorization is held by the shared Cloudflare backend.
+call node --check electron\drive-backend.js
 if errorlevel 1 goto release_failed
 
 xcopy "dist\*" "!PATCH_TEMP!\resources\app\dist\" /E /I /Y /Q >nul 2>&1
 xcopy "electron\*" "!PATCH_TEMP!\resources\app\electron\" /E /I /Y /Q >nul 2>&1
 xcopy "node_modules\@prisma\client\*" "!PATCH_TEMP!\resources\app\node_modules\@prisma\client\" /E /I /Y /Q >nul 2>&1
 xcopy "node_modules\.prisma\client\*" "!PATCH_TEMP!\resources\app\node_modules\.prisma\client\" /E /I /Y /Q >nul 2>&1
-xcopy "node_modules\@supabase\*" "!PATCH_TEMP!\resources\app\node_modules\@supabase\" /E /I /Y /Q >nul 2>&1
-xcopy "node_modules\@zxing\*" "!PATCH_TEMP!\resources\app\node_modules\@zxing\" /E /I /Y /Q >nul 2>&1
-xcopy "node_modules\cloudflared\*" "!PATCH_TEMP!\resources\app\node_modules\cloudflared\" /E /I /Y /Q >nul 2>&1
-xcopy "node_modules\iceberg-js\*" "!PATCH_TEMP!\resources\app\node_modules\iceberg-js\" /E /I /Y /Q >nul 2>&1
-xcopy "node_modules\tslib\*" "!PATCH_TEMP!\resources\app\node_modules\tslib\" /E /I /Y /Q >nul 2>&1
-xcopy "node_modules\ws\*" "!PATCH_TEMP!\resources\app\node_modules\ws\" /E /I /Y /Q >nul 2>&1
+for %%D in (@supabase @zxing cloudflared iceberg-js tslib ws) do (
+    robocopy "node_modules\%%D" "!PATCH_TEMP!\resources\app\node_modules\%%D" /E /R:1 /W:1 /NFL /NDL /NJH /NJS /NP >nul
+    if errorlevel 8 exit /b 1
+)
 copy /Y "python\attendance_service.py" "!PATCH_TEMP!\resources\app\python\" >nul 2>&1
 copy /Y "python\requirements.txt" "!PATCH_TEMP!\resources\app\python\" >nul 2>&1
 copy /Y "package.json" "!PATCH_TEMP!\resources\app\package.json" >nul 2>&1
-
-call node scripts\prepare-r2-daily-evidence-config.js "!PATCH_TEMP!\resources\app\electron\r2-daily-evidence-bootstrap.json"
-if errorlevel 1 goto release_failed
 
 rem Never publish development database/service credentials in a patch.
 del /Q "!PATCH_TEMP!\resources\app\electron\config.js" 2>nul
 del /Q "!PATCH_TEMP!\resources\app\electron\supabase-storage.json" 2>nul
 del /Q "!PATCH_TEMP!\resources\app\electron\gdrive-credentials.json" 2>nul
-call node scripts\verify-gdrive-release-token.cjs "!PATCH_TEMP!\resources\app\electron\gdrive-token.json"
+call node scripts\prepare-drive-backend-stage.cjs "!PATCH_TEMP!\resources\app\electron"
 if errorlevel 1 goto release_failed
 
 echo [6/8] Validate staged Prisma runtime...

@@ -92,13 +92,6 @@ mkdir "!PATCH_TEMP!\resources\app\node_modules\iceberg-js"
 mkdir "!PATCH_TEMP!\resources\app\node_modules\tslib"
 mkdir "!PATCH_TEMP!\resources\app\node_modules\ws"
 
-call node scripts\prepare-google-oauth-config.js
-if errorlevel 1 (
-    echo    [ERROR] Khong tao duoc google-oauth-config.json cho ban production.
-    echo            Kiem tra OAUTH_CLIENT_ID/OAUTH_CLIENT_SECRET roi chay lai.
-    pause
-    exit /b 1
-)
 
 call node scripts\embed-wms-token.js
 if errorlevel 1 (
@@ -108,16 +101,8 @@ if errorlevel 1 (
     exit /b 1
 )
 
-if exist "%APPDATA%\quan-ly-ban-hang-desktop\gdrive-token.json" (
-    copy /Y "%APPDATA%\quan-ly-ban-hang-desktop\gdrive-token.json" "electron\gdrive-token.json" >nul 2>&1
-    echo    [OK] Auto-copy gdrive-token.json moi nhat tu AppData vao electron/
-) else (
-    if not exist "electron\gdrive-token.json" (
-        echo    [!] CANH BAO: Khong co gdrive-token.json - Google Drive upload se THAT BAI tren production!
-        echo        Chay reauth-gdrive.bat truoc khi build.
-    )
-)
-call node scripts\verify-gdrive-release-token.cjs "electron\gdrive-token.json"
+:: Google authorization is held by the shared Cloudflare backend.
+call node --check electron\drive-backend.js
 if errorlevel 1 (
     rmdir /S /Q "!PATCH_TEMP!" 2>nul
     rmdir /S /Q "!BUILD_DIST!" 2>nul
@@ -126,30 +111,28 @@ if errorlevel 1 (
 )
 xcopy "!BUILD_DIST!\*" "!PATCH_TEMP!\resources\app\dist\" /E /I /Y /Q >nul 2>&1
 xcopy "electron\*" "!PATCH_TEMP!\resources\app\electron\" /E /I /Y /Q >nul 2>&1
-call node scripts\prepare-r2-daily-evidence-config.js "!PATCH_TEMP!\resources\app\electron\r2-daily-evidence-bootstrap.json"
-if errorlevel 1 (
-    echo    [ERROR] Khong tao duoc cau hinh R2 cho Cong viec hang ngay.
-    pause
-    exit /b 1
-)
-:: Patch desktop chi can google-oauth-config.json da tao o tren. Khong phat
-:: hanh config dev co database/service credentials cho may nhan vien.
+:: Desktop uses the shared Drive backend; no Google credentials are shipped.
 del /Q "!PATCH_TEMP!\resources\app\electron\config.js" 2>nul
 del /Q "!PATCH_TEMP!\resources\app\electron\supabase-storage.json" 2>nul
 del /Q "!PATCH_TEMP!\resources\app\electron\gdrive-credentials.json" 2>nul
-call node scripts\verify-gdrive-release-token.cjs "!PATCH_TEMP!\resources\app\electron\gdrive-token.json"
+call node scripts\prepare-drive-backend-stage.cjs "!PATCH_TEMP!\resources\app\electron"
 if errorlevel 1 (
     rmdir /S /Q "!PATCH_TEMP!" 2>nul
     rmdir /S /Q "!BUILD_DIST!" 2>nul
     pause
     exit /b 1
 )
-xcopy "node_modules\@supabase\*" "!PATCH_TEMP!\resources\app\node_modules\@supabase\" /E /I /Y /Q >nul 2>&1
-xcopy "node_modules\@zxing\*" "!PATCH_TEMP!\resources\app\node_modules\@zxing\" /E /I /Y /Q >nul 2>&1
-xcopy "node_modules\cloudflared\*" "!PATCH_TEMP!\resources\app\node_modules\cloudflared\" /E /I /Y /Q >nul 2>&1
-xcopy "node_modules\iceberg-js\*" "!PATCH_TEMP!\resources\app\node_modules\iceberg-js\" /E /I /Y /Q >nul 2>&1
-xcopy "node_modules\tslib\*" "!PATCH_TEMP!\resources\app\node_modules\tslib\" /E /I /Y /Q >nul 2>&1
-xcopy "node_modules\ws\*" "!PATCH_TEMP!\resources\app\node_modules\ws\" /E /I /Y /Q >nul 2>&1
+for %%D in (@supabase @zxing cloudflared iceberg-js tslib ws) do (
+    echo    Copying node_modules\%%D ...
+    robocopy "node_modules\%%D" "!PATCH_TEMP!\resources\app\node_modules\%%D" /E /R:1 /W:1 /NFL /NDL /NJH /NJS /NP >nul
+    if errorlevel 8 (
+        echo [ERROR] Failed to copy node_modules\%%D.
+        rmdir /S /Q "!PATCH_TEMP!" 2>nul
+        rmdir /S /Q "!BUILD_DIST!" 2>nul
+        pause
+        exit /b 1
+    )
+)
 
 if not exist "!PATCH_TEMP!\resources\app\node_modules\ws\index.js" (
     echo    [ERROR] Thieu node_modules\ws trong patch. Khong tao goi update khong day du.

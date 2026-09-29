@@ -281,6 +281,9 @@ const mergeFinesWithDeletes = (
         const fineWithId = ensureFineId(fine, index);
         const key = getFineRecordKey(fine);
         const deleted = getFineRecordKeys(fineWithId).some(item => deletedKeys.has(item));
+        // Schedule fines are generated and withdrawn by the server. A stale
+        // renderer snapshot must not recreate one the reconciliation removed.
+        if (fine.source === 'attendance-schedule' && !merged.has(key)) return;
         // A stale renderer must not overwrite a fine that was edited in the DB.
         // A local record wins only when this snapshot also contains a new audit action for it.
         if (key && !deleted && (!merged.has(key) || snapshotHasNewChange(fineWithId))) {
@@ -4178,6 +4181,11 @@ export default function Attendance() {
     const [stockCheckSessions, setStockCheckSessions] = useState<any[]>([]);
     const [stockBalanceRecords, setStockBalanceRecords] = useState<any[]>([]);
     const [fineSourcesReadyKey, setFineSourcesReadyKey] = useState('');
+    const finePerfSessionRef = useRef<{ key: string; startedAt: number; firstRenderLogged: boolean; readyLogged: boolean } | null>(null);
+    const logFinesPerf = useCallback((event: string, payload: Record<string, unknown> = {}) => {
+        if (!import.meta.env.DEV) return;
+        console.info(`[Attendance:fines:${event}]`, JSON.stringify(payload));
+    }, []);
 
     const [isDbLoaded, setIsDbLoaded] = useState(false);
     const [isCoreSnapshotReady, setIsCoreSnapshotReady] = useState(false);
@@ -4574,8 +4582,20 @@ export default function Attendance() {
     // hiện ngay, không cần reload toàn bộ ứng dụng.
     useEffect(() => {
         if (!isDbLoaded || activeTab !== 'fines') return;
+        const sessionKey = 'tab';
+        if (!finePerfSessionRef.current || finePerfSessionRef.current.key !== sessionKey) {
+            finePerfSessionRef.current = {
+                key: sessionKey,
+                startedAt: performance.now(),
+                firstRenderLogged: false,
+                readyLogged: false,
+            };
+            logFinesPerf('tab-mounted', { rangeKey: sessionKey });
+        }
         let cancelled = false;
         const refreshFineLedger = async () => {
+            const startedAt = performance.now();
+            logFinesPerf('ledger-start');
             try {
                 const api = (window as any).electronAPI;
                 const latest = await api.appConfig.get('attendanceData');
@@ -4595,13 +4615,23 @@ export default function Attendance() {
                     setFineAuditLog(mergedAuditLog);
                     setExtraFines(mergedFines);
                 });
+                logFinesPerf('ledger-end', {
+                    ms: Math.round(performance.now() - startedAt),
+                    fines: dbFines.length,
+                    audit: dbAuditLog.length,
+                });
             } catch (error) {
                 console.error('Không thể làm mới danh sách phạt:', error);
+                logFinesPerf('ledger-error', { ms: Math.round(performance.now() - startedAt) });
             }
         };
-        void refreshFineLedger();
-        return () => { cancelled = true; };
-    }, [activeTab, isDbLoaded]);
+        const refreshTimer = window.setTimeout(() => { void refreshFineLedger(); }, 150);
+        return () => {
+            cancelled = true;
+            window.clearTimeout(refreshTimer);
+            if (finePerfSessionRef.current?.key === sessionKey) finePerfSessionRef.current = null;
+        };
+    }, [activeTab, isDbLoaded, logFinesPerf]);
 
     // Bảo trì dữ liệu chạy sau lần render đầu. Không thay đổi logic đối soát;
     // chỉ không bắt toàn bộ giao diện phải chờ quét lịch sử chấm công.
@@ -5225,6 +5255,8 @@ export default function Attendance() {
     };
 
     const loadPurchaseVatTracking = (since?: string, requestKey?: string) => runFineSource(`vat:${requestKey || fineSourcesRangeKeyRef.current || 'current'}`, async () => {
+        const startedAt = performance.now();
+        logFinesPerf('source-start', { source: 'vat' });
         try {
             const api = (window as any).electronAPI;
             const result = api.purchases.getVatPenaltyReadModel
@@ -5237,12 +5269,20 @@ export default function Attendance() {
                     console.warn('[Attendance] VAT source returned no usable data; keeping last snapshot.');
                 }
             }
+            logFinesPerf('source-end', {
+                source: 'vat',
+                ms: Math.round(performance.now() - startedAt),
+                rows: Array.isArray(result?.data) ? result.data.length : 0,
+            });
         } catch (error) {
             console.error('Lỗi tải dữ liệu VAT nhập hàng:', error);
+            logFinesPerf('source-error', { source: 'vat', ms: Math.round(performance.now() - startedAt) });
         }
     });
 
     const loadReturnOverdueTracking = (requestKey?: string) => runFineSource(`returns:${requestKey || fineSourcesRangeKeyRef.current || 'current'}`, async () => {
+        const startedAt = performance.now();
+        logFinesPerf('source-start', { source: 'returns' });
         try {
             const api = (window as any).electronAPI;
             // A return can generate up to 366 historical fine stages. Load
@@ -5257,12 +5297,20 @@ export default function Attendance() {
                     console.warn('[Attendance] Return source returned no usable data; keeping last snapshot.');
                 }
             }
+            logFinesPerf('source-end', {
+                source: 'returns',
+                ms: Math.round(performance.now() - startedAt),
+                rows: Array.isArray(result?.data) ? result.data.length : 0,
+            });
         } catch (error) {
             console.error('Lỗi tải dữ liệu trả hàng quá hạn:', error);
+            logFinesPerf('source-error', { source: 'returns', ms: Math.round(performance.now() - startedAt) });
         }
     });
 
     const loadRefundOverdueTracking = (requestKey?: string) => runFineSource(`refunds:${requestKey || fineSourcesRangeKeyRef.current || 'current'}`, async () => {
+        const startedAt = performance.now();
+        logFinesPerf('source-start', { source: 'refunds' });
         try {
             const api = (window as any).electronAPI;
             // Keep the same policy window as returns so old completed rows do
@@ -5276,8 +5324,14 @@ export default function Attendance() {
                     console.warn('[Attendance] Refund source returned no usable data; keeping last snapshot.');
                 }
             }
+            logFinesPerf('source-end', {
+                source: 'refunds',
+                ms: Math.round(performance.now() - startedAt),
+                rows: Array.isArray(result?.data) ? result.data.length : 0,
+            });
         } catch (error) {
             console.error('Lỗi tải dữ liệu hàng hoàn quá hạn:', error);
+            logFinesPerf('source-error', { source: 'refunds', ms: Math.round(performance.now() - startedAt) });
         }
     });
 
@@ -5289,6 +5343,8 @@ export default function Attendance() {
 
         const task = (async () => {
         const isCurrentRequest = () => !requestKey || fineSourcesRangeKeyRef.current === requestKey;
+        const startedAt = performance.now();
+        logFinesPerf('source-start', { source: 'daily-tasks' });
         try {
             const api = (window as any).electronAPI;
             const [result, penaltyResult, balanceResult, stockCheckResult] = await Promise.all([
@@ -5309,8 +5365,17 @@ export default function Attendance() {
                     setStockCheckSessions(stockCheckResult.data);
                 }
             });
+            logFinesPerf('source-end', {
+                source: 'daily-tasks',
+                ms: Math.round(performance.now() - startedAt),
+                tasks: Array.isArray(result?.data) ? result.data.length : 0,
+                evidence: Array.isArray(penaltyResult?.data) ? penaltyResult.data.length : 0,
+                stockBalance: Array.isArray(balanceResult?.data) ? balanceResult.data.length : 0,
+                stockChecks: Array.isArray(stockCheckResult?.data) ? stockCheckResult.data.length : 0,
+            });
         } catch (error) {
             console.error('Lỗi tải dữ liệu deadline công việc:', error);
+            logFinesPerf('source-error', { source: 'daily-tasks', ms: Math.round(performance.now() - startedAt) });
         }
         })();
 
@@ -5407,6 +5472,34 @@ export default function Attendance() {
     const fineSourcesRangeKey = `${overviewDateRange[0].startOf('day').valueOf()}-${overviewDateRange[1].endOf('day').valueOf()}-${isAdmin ? 'admin' : 'user'}`;
     const areFineSourcesReady = isBackgroundSyncComplete && fineSourcesReadyKey === fineSourcesRangeKey;
 
+    useEffect(() => {
+        if (!isDbLoaded || activeTab !== 'fines') return;
+        const session = finePerfSessionRef.current;
+        if (!session) return;
+        if (!session.firstRenderLogged) {
+            session.firstRenderLogged = true;
+            logFinesPerf('first-render', {
+                msFromTab: Math.round(performance.now() - session.startedAt),
+                ready: areFineSourcesReady,
+                fines: extraFines.length,
+                audit: fineAuditLog.length,
+            });
+        }
+        if (areFineSourcesReady && !session.readyLogged) {
+            session.readyLogged = true;
+            logFinesPerf('ready', {
+                msFromTab: Math.round(performance.now() - session.startedAt),
+                fines: extraFines.length,
+                audit: fineAuditLog.length,
+                vat: purchaseVatTracking.length,
+                returns: returnOverdueTracking.length,
+                refunds: refundOverdueTracking.length,
+                tasks: dailyTaskTracking.length,
+                evidence: evidencePenaltyRecords.length,
+            });
+        }
+    }, [activeTab, areFineSourcesReady, dailyTaskTracking.length, evidencePenaltyRecords.length, extraFines.length, fineAuditLog.length, isDbLoaded, logFinesPerf, purchaseVatTracking.length, refundOverdueTracking.length, returnOverdueTracking.length]);
+
     // Tải các nguồn tổng hợp phạt khi mở Tổng quan hoặc Phạt.
     useEffect(() => {
         if (!isDbLoaded) return;
@@ -5415,6 +5508,8 @@ export default function Attendance() {
         // Supporting indicators are not needed for the first overview paint.
         // Yield once so the shell and primary attendance data render first.
         const deferredLoad = window.setTimeout(() => {
+            const startedAt = performance.now();
+            logFinesPerf('sources-start', { rangeKey: fineSourcesRangeKey });
             void Promise.all([
                 loadPurchaseVatTracking(overviewDateRange[0].subtract(7, 'day').startOf('day').toISOString(), fineSourcesRangeKey),
                 loadReturnOverdueTracking(fineSourcesRangeKey),
@@ -5424,6 +5519,10 @@ export default function Attendance() {
                 if (fineSourcesRangeKeyRef.current === fineSourcesRangeKey) {
                     setFineSourcesReadyKey(fineSourcesRangeKey);
                 }
+                logFinesPerf('sources-end', {
+                    rangeKey: fineSourcesRangeKey,
+                    ms: Math.round(performance.now() - startedAt),
+                });
             });
         }, 0);
         const taskTrackingTimer = window.setInterval(() => {
@@ -5433,7 +5532,7 @@ export default function Attendance() {
             window.clearTimeout(deferredLoad);
             window.clearInterval(taskTrackingTimer);
         };
-    }, [isDbLoaded, overviewDateRange, activeTab, fineSourcesRangeKey]);
+    }, [isDbLoaded, overviewDateRange, activeTab, fineSourcesRangeKey, logFinesPerf]);
 
     // Packing is independent from the auxiliary fine sources. Start it as soon
     // as the overview mounts. The IPC call is asynchronous, so deferring it
@@ -6288,7 +6387,9 @@ export default function Attendance() {
     const overviewAttendanceLogsReady = overviewAttendanceLogsKey === overviewAttendanceExpectedKey;
     const overviewAttendanceReady = isBackgroundSyncComplete && overviewAttendanceLogsReady;
     const packingExpectedKey = `${getPackingLoadStart(overviewDateRange[0]).valueOf()}-${overviewDateRange[1].endOf('day').valueOf()}`;
-    const isPackingDataReady = packingCatalogReady && packingReadyKey === packingExpectedKey && !packingLoadError;
+    const isPackingDataReady = packingReadyKey === packingExpectedKey
+        && !packingLoadError
+        && (activeTab !== 'packaging' || packingCatalogReady);
     const isPayrollDataReady = isCoreSnapshotReady && (isCurrentPeriodLocked
         ? Boolean(lockedPayrollSnapshot)
         : (overviewAttendanceReady && areFineSourcesReady && isPackingDataReady && attendanceRewardReadyKey === attendanceRewardPeriodKey && salesBonusReadyKey === salesBonusExpectedKey));
@@ -6381,6 +6482,40 @@ export default function Attendance() {
         () => payrollData.filter(isCurrentUserPayrollRow),
         [payrollData, isCurrentUserPayrollRow]
     );
+    // Each payroll column has a different data dependency. Keeping one global
+    // readiness flag here made fast, already-known amounts look like zeros
+    // while slower reconciliation sources were still loading.
+    const hasLockedPayrollSnapshot = !isCurrentPeriodLocked || Boolean(lockedPayrollSnapshot);
+    const isBaseSalaryAmountReady = useCallback((row?: { type?: string }) => (
+        isCoreSnapshotReady
+        && hasLockedPayrollSnapshot
+        && (isCurrentPeriodLocked || row?.type !== 'Seasonal' || overviewAttendanceLogsReady)
+    ), [hasLockedPayrollSnapshot, isCoreSnapshotReady, isCurrentPeriodLocked, overviewAttendanceLogsReady]);
+    const isPackingAmountReady = isCoreSnapshotReady && hasLockedPayrollSnapshot && isPackingDataReady;
+    const isBonusAmountReady = isCoreSnapshotReady && hasLockedPayrollSnapshot && (
+        isPackingDataReady
+        &&
+        attendanceRewardReadyKey === attendanceRewardPeriodKey
+        && salesBonusReadyKey === salesBonusExpectedKey
+    );
+    const isFineAmountReady = isCoreSnapshotReady && hasLockedPayrollSnapshot && (
+        isCurrentPeriodLocked || areFineSourcesReady
+    );
+    const isLeaveAmountReady = isCoreSnapshotReady && hasLockedPayrollSnapshot && (
+        isCurrentPeriodLocked || overviewAttendanceReady
+    );
+    const allBaseSalaryReady = privatePayrollData.every(row => isBaseSalaryAmountReady(row));
+    useEffect(() => {
+        if (!import.meta.env.DEV || activeTab !== 'overview') return;
+        console.info('[Attendance:amount-ready]', JSON.stringify({
+            base: allBaseSalaryReady,
+            packing: isPackingAmountReady,
+            bonus: isBonusAmountReady,
+            fine: isFineAmountReady,
+            leave: isLeaveAmountReady,
+            total: isPayrollDataReady,
+        }));
+    }, [activeTab, allBaseSalaryReady, isBonusAmountReady, isFineAmountReady, isLeaveAmountReady, isPackingAmountReady, isPayrollDataReady]);
     // Keep the amount visible while slower auxiliary sources are still being
     // reconciled. The value is explicitly marked as provisional; actions that
     // require a coherent payroll snapshot remain gated by isPayrollDataReady.
@@ -7644,6 +7779,7 @@ const openConfigModal = () => {
                     note: employee.type === 'Seasonal' ? `${employee.shifts || 0} ca đã ghi nhận` : 'Theo mức lương tháng',
                     value: employee.salaryBase || 0,
                     positive: true,
+                    ready: isBaseSalaryAmountReady(employee),
                     items: [{ label: 'Lương cơ bản', amount: employee.salaryBase || 0 }],
                 },
                 {
@@ -7651,6 +7787,7 @@ const openConfigModal = () => {
                     note: `${employee.packTotalUnits || 0} gói · ${employee.packOrderCount || 0} đơn · tính theo mức độ đóng gói`,
                     value: employee.packIncome || 0,
                     positive: true,
+                    ready: isPackingAmountReady,
                     items: [{ label: `${employee.packTotalUnits || 0} gói đóng gói`, amount: employee.packIncome || 0 }],
                 },
                 {
@@ -7658,6 +7795,7 @@ const openConfigModal = () => {
                     note: employeeBonuses.length > 0 ? `${employeeBonuses.length} khoản thưởng trong kỳ` : 'Không có thưởng khác',
                     value: employee.totalBonus || 0,
                     positive: true,
+                    ready: isBonusAmountReady,
                     items: employeeBonuses.map(bonus => ({ label: `${bonus.type || 'Thưởng'}${bonus.detail ? ` · ${bonus.detail}` : ''}`, amount: bonus.amount || 0 })),
                 },
                 {
@@ -7665,6 +7803,7 @@ const openConfigModal = () => {
                     note: employeeFines.length > 0 ? `${employeeFines.length} khoản phạt trong kỳ` : 'Không có khấu trừ phạt',
                     value: employee.myFines || 0,
                     positive: false,
+                    ready: isFineAmountReady,
                     items: employeeFines.map(fine => ({
                         label: `${fine.date ? dayjs(fine.date).format('DD/MM') : 'Không ngày'} · ${fine.type || 'Phạt'}${fine.detail ? ` · ${fine.detail}` : ''}`,
                         amount: fine.amount || 0,
@@ -7675,6 +7814,7 @@ const openConfigModal = () => {
                     note: employee.leaveDeduction > 0 ? `${employee.absentDays || 0} ngày/ca nghỉ đã tính` : 'Không có khoản trừ nghỉ',
                     value: employee.leaveDeduction || 0,
                     positive: false,
+                    ready: isLeaveAmountReady,
                     items: employee.leaveDeduction > 0 ? [{ label: `${employee.absentDays || 0} ngày/ca nghỉ`, amount: employee.leaveDeduction || 0 }] : [],
                 },
             ];
@@ -7778,7 +7918,13 @@ const openConfigModal = () => {
                                             <strong>{row.label}</strong>
                                             <span>{row.note}</span>
                                         </div>
-                                        <div className="att-staff-row-value">{row.positive ? '+' : '−'} {fmt(Math.abs(row.value))}<EyeOutlined className="att-staff-row-value-icon" /></div>
+                                        <Tooltip title={row.ready ? undefined : 'Số tạm tính; hệ thống vẫn đang bổ sung dữ liệu nền'}>
+                                            <div className={`att-staff-row-value${row.ready ? '' : ' att-money-pending'}`}>
+                                                {row.positive ? '+' : '−'} {fmt(Math.abs(row.value))}
+                                                {!row.ready && <SyncOutlined spin aria-label="Đang cập nhật" />}
+                                                <EyeOutlined className="att-staff-row-value-icon" />
+                                            </div>
+                                        </Tooltip>
                                     </button>
                                 ))}
                             </div>
@@ -7836,21 +7982,21 @@ const openConfigModal = () => {
                                 </span>
                             </Table.Summary.Cell>
                             <Table.Summary.Cell index={2} align="right" className="att-overview-total-cell">
-                                {renderPendingValue(fmt(totalBaseSalary), isPayrollDataReady, 'att-overview-total-value-base')}
+                                {renderPendingValue(fmt(totalBaseSalary), allBaseSalaryReady, 'att-overview-total-value-base')}
                             </Table.Summary.Cell>
                             <Table.Summary.Cell index={3} align="right" className="att-overview-total-cell">
-                                {renderPendingValue(`+ ${fmt(totalPackIncome)}`, isPayrollDataReady, 'att-overview-total-value-pack')}
+                                {renderPendingValue(`+ ${fmt(totalPackIncome)}`, isPackingAmountReady, 'att-overview-total-value-pack')}
                             </Table.Summary.Cell>
                             <Table.Summary.Cell index={4} align="right" className="att-overview-total-cell">
-                                {renderPendingValue(`+ ${fmt(totalBonus)}`, isPayrollDataReady, 'att-overview-total-value-bonus')}
+                                {renderPendingValue(`+ ${fmt(totalBonus)}`, isBonusAmountReady, 'att-overview-total-value-bonus')}
                             </Table.Summary.Cell>
                             <Table.Summary.Cell index={5} align="right" className="att-overview-total-cell">
                                 <span className="att-overview-total-value-fine">
-                                    {renderFineAmount(totalFines, isPayrollDataReady, 'att-overview-total-value-fine')}
+                                    {renderFineAmount(totalFines, isFineAmountReady, 'att-overview-total-value-fine')}
                                 </span>
                             </Table.Summary.Cell>
                             <Table.Summary.Cell index={6} align="right" className="att-overview-total-cell-final">
-                                {renderPendingValue(formatDeductionAmount(totalLeaveDeduction), isPayrollDataReady, 'att-overview-total-value-fine')}
+                                {renderPendingValue(formatDeductionAmount(totalLeaveDeduction), isLeaveAmountReady, 'att-overview-total-value-fine')}
                             </Table.Summary.Cell>
                             <Table.Summary.Cell index={7} colSpan={2} align="right" className="att-overview-total-cell-final">
                                 <span className="att-overview-total-money">
@@ -7882,25 +8028,25 @@ const openConfigModal = () => {
                     },
                     {
                         title: 'Lương cơ bản', dataIndex: 'salaryBase', key: 'base', align: 'right' as const, width: '11%', className: 'att-overview-cell att-overview-cell--base',
-                        render: (v: number) => renderPendingValue(fmt(v), isPayrollDataReady, 'att-money-gray'),
+                        render: (v: number, r: any) => renderPendingValue(fmt(v), isBaseSalaryAmountReady(r), 'att-money-gray'),
                     },
                     {
                         title: 'Thưởng đóng gói', dataIndex: 'packIncome', key: 'pack', align: 'right' as const, width: '12%', className: 'att-overview-cell att-overview-cell--pack',
-                        render: (v: number, r: any) => <Tooltip title={`${r.packTotalUnits || 0} gói · tính theo mức Dễ / Trung bình / Cao`}><span>{renderPendingValue(`+ ${fmt(v)}`, isPayrollDataReady, 'att-money-emerald')}</span></Tooltip>,
+                        render: (v: number, r: any) => <Tooltip title={`${r.packTotalUnits || 0} gói · tính theo mức Dễ / Trung bình / Cao`}><span>{renderPendingValue(`+ ${fmt(v)}`, isPackingAmountReady, 'att-money-emerald')}</span></Tooltip>,
                     },
                     {
                         title: 'Thưởng', dataIndex: 'totalBonus', key: 'bonus', align: 'right' as const, width: '9%', className: 'att-overview-cell att-overview-cell--bonus',
-                        render: (v: number) => renderPendingValue(`+ ${fmt(v)}`, isPayrollDataReady, 'att-money-emerald'),
+                        render: (v: number) => renderPendingValue(`+ ${fmt(v)}`, isBonusAmountReady, 'att-money-emerald'),
                     },
                     {
                         title: 'Phạt', dataIndex: 'myFines', key: 'fine', align: 'right' as const, width: '9%', className: 'att-overview-cell att-overview-cell--fine',
-                        render: (v: number) => renderFineAmount(v, isPayrollDataReady),
+                        render: (v: number) => renderFineAmount(v, isFineAmountReady),
                     },
                     {
                         title: 'Nghỉ', dataIndex: 'leaveDeduction', key: 'leaveDeduction', align: 'right' as const, width: '8%', className: 'att-overview-cell att-overview-cell--leave',
                         render: (v: number, r: any) => (
                             <Tooltip title={r.absentDays > 0 ? `${r.absentDays} ngày/ca nghỉ đã tính` : 'Không có khoản trừ nghỉ'}>
-                                {renderPendingValue(formatDeductionAmount(v), isPayrollDataReady, 'att-money-red')}
+                                {renderPendingValue(formatDeductionAmount(v), isLeaveAmountReady, 'att-money-red')}
                             </Tooltip>
                         ),
                     },
@@ -7924,11 +8070,11 @@ const openConfigModal = () => {
                     <span>{privatePayrollData.length} nhân viên</span>
                 </div>
                 <div className="att-overview-responsive-total__grid">
-                    <div><span>Lương cơ bản</span><strong>{renderPendingValue(fmt(totalBaseSalary), isPayrollDataReady, 'att-overview-total-value-base')}</strong></div>
-                    <div><span>Thưởng đóng gói</span><strong>{renderPendingValue(`+ ${fmt(totalPackIncome)}`, isPayrollDataReady, 'att-overview-total-value-pack')}</strong></div>
-                    <div><span>Thưởng</span><strong>{renderPendingValue(`+ ${fmt(totalBonus)}`, isPayrollDataReady, 'att-overview-total-value-bonus')}</strong></div>
-                    <div><span>Phạt</span><strong className="att-overview-total-value-fine">{renderFineAmount(totalFines, isPayrollDataReady, 'att-overview-total-value-fine')}</strong></div>
-                    <div><span>Nghỉ</span><strong>{renderPendingValue(formatDeductionAmount(totalLeaveDeduction), isPayrollDataReady, 'att-overview-total-value-fine')}</strong></div>
+                    <div><span>Lương cơ bản</span><strong>{renderPendingValue(fmt(totalBaseSalary), allBaseSalaryReady, 'att-overview-total-value-base')}</strong></div>
+                    <div><span>Thưởng đóng gói</span><strong>{renderPendingValue(`+ ${fmt(totalPackIncome)}`, isPackingAmountReady, 'att-overview-total-value-pack')}</strong></div>
+                    <div><span>Thưởng</span><strong>{renderPendingValue(`+ ${fmt(totalBonus)}`, isBonusAmountReady, 'att-overview-total-value-bonus')}</strong></div>
+                    <div><span>Phạt</span><strong className="att-overview-total-value-fine">{renderFineAmount(totalFines, isFineAmountReady, 'att-overview-total-value-fine')}</strong></div>
+                    <div><span>Nghỉ</span><strong>{renderPendingValue(formatDeductionAmount(totalLeaveDeduction), isLeaveAmountReady, 'att-overview-total-value-fine')}</strong></div>
                     <div className="att-overview-responsive-total__final"><span>Tổng lương</span><strong>{renderPayrollAmount(totalFinalSalary, isPayrollDataReady)}</strong></div>
                 </div>
             </div>
@@ -8931,14 +9077,18 @@ const openConfigModal = () => {
     // TAB 4: PHẠT
     // ============================================
     const renderFines = () => {
-        if (!areFineSourcesReady) {
+        // The persisted ledger is safe to show as soon as the core snapshot
+        // arrives. Reconciliation and auxiliary sources then append rows
+        // progressively instead of blocking the whole tab behind the slowest
+        // source.
+        if (!isCoreSnapshotReady) {
             return (
                 <Card style={{ marginTop: 4 }} bodyStyle={{ padding: '72px 24px' }}>
                     <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 14 }}>
                         <Spin size="large" />
-                        <Text strong>Đang tổng hợp đầy đủ các khoản phạt...</Text>
+                        <Text strong>Đang tải sổ phạt...</Text>
                         <Text type="secondary" style={{ textAlign: 'center' }}>
-                            Bảng sẽ hiển thị một lần sau khi đối chiếu xong dữ liệu điểm danh, công việc, bằng chứng, VAT và kiểm hàng.
+                            Các khoản đã ghi nhận sẽ hiển thị trước; dữ liệu đối soát bổ sung sẽ cập nhật tiếp sau đó.
                         </Text>
                     </div>
                 </Card>
@@ -9108,6 +9258,41 @@ const openConfigModal = () => {
         const filteredFines = effectiveFineEmployeeFilter === 'all'
             ? scopedFines
             : scopedFines.filter(f => f.empId === effectiveFineEmployeeFilter);
+        const isEcommerceOverdueFine = (fine: any) => (
+            fine?.source === 'ecommerce_overdue'
+            || fine?.type === 'Đơn TMDT trễ hạn'
+        );
+        const tableFines = (() => {
+            const rows: any[] = [];
+            const groups = new Map<string, any>();
+            filteredFines.forEach((fine: any) => {
+                if (!isEcommerceOverdueFine(fine)) {
+                    rows.push(fine);
+                    return;
+                }
+                const key = `${fine.empId}|${fine.source || 'ecommerce_overdue'}`;
+                let group = groups.get(key);
+                if (!group) {
+                    group = {
+                        key: `ecommerce-group-${key}`,
+                        empId: fine.empId,
+                        empName: fine.empName,
+                        type: 'Đơn TMDT trễ hẹn',
+                        source: fine.source,
+                        date: fine.date,
+                        amount: 0,
+                        isEcommerceGroup: true,
+                        ecommerceDetails: [],
+                    };
+                    groups.set(key, group);
+                    rows.push(group);
+                }
+                group.amount += fine.isWaived ? 0 : Number(fine.amount || 0);
+                group.date = dayjs(fine.date).isAfter(dayjs(group.date)) ? fine.date : group.date;
+                group.ecommerceDetails.push(fine);
+            });
+            return rows;
+        })();
         const selectedFineEmployeeName = canViewAllPayroll
             ? (effectiveFineEmployeeFilter === 'all'
                 ? ''
@@ -9165,6 +9350,14 @@ const openConfigModal = () => {
 
         return (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+                {!areFineSourcesReady && (
+                    <Alert
+                        type="info"
+                        showIcon
+                        message="Đang bổ sung dữ liệu đối soát"
+                        description="Các khoản phạt đã ghi nhận đang hiển thị trước. VAT, trả hàng, hàng hoàn, công việc và kiểm hàng sẽ tự cập nhật khi tải xong."
+                    />
+                )}
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
                         <Title level={4} style={{ margin: 0, color: '#ff4d4f' }}>Khấu trừ & Phạt</Title>
@@ -9224,22 +9417,49 @@ const openConfigModal = () => {
 
                 <Card bodyStyle={{ padding: 0 }} style={{ borderTop: '3px solid #ff4d4f' }}>
                     <Table
-                        dataSource={filteredFines}
-                        pagination={{ pageSize: 10, size: 'small', showTotal: (total) => `Tổng ${total} vi phạm` }}
+                        className="att-fines-table"
+                        dataSource={tableFines}
+                        pagination={{ pageSize: 10, size: 'small', showTotal: () => `Tổng ${filteredFines.length} khoản · ${tableFines.length} dòng` }}
                         size="middle"
                         tableLayout="fixed"
+                        scroll={{ x: 900 }}
+                        expandable={{
+                            rowExpandable: (record: any) => Boolean(record.isEcommerceGroup),
+                            expandedRowRender: (record: any) => (
+                                <div style={{ padding: '4px 12px 8px 36px', display: 'flex', flexDirection: 'column', gap: 5 }}>
+                                    <Text type="secondary" style={{ fontSize: 11, fontWeight: 700 }}>
+                                        Chi tiết {record.ecommerceDetails.length} đơn TMDT trễ hẹn:
+                                    </Text>
+                                    {record.ecommerceDetails.map((fine: any) => (
+                                        <div key={fine.id || `${fine.orderNumber}-${fine.date}`} style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'center', fontSize: 12 }}>
+                                            <Text style={{ minWidth: 0, overflowWrap: 'anywhere' }}>
+                                                {fine.orderNumber || fine.ecommerceExportId || 'Đơn không rõ mã'}
+                                                <Text type="secondary"> · {fine.detail}</Text>
+                                            </Text>
+                                            <Text strong style={{ color: fine.isWaived ? '#389e0d' : '#ff4d4f', whiteSpace: 'nowrap' }}>
+                                                {fine.isWaived ? '0 đ' : `- ${fmt(fine.amount)}`}
+                                            </Text>
+                                        </div>
+                                    ))}
+                                </div>
+                            ),
+                        }}
                         columns={[
                             {
-                                title: 'Nhân viên', dataIndex: 'empName', key: 'name', width: 160,
+                                title: 'Nhân viên', dataIndex: 'empName', key: 'name', width: 130,
                                 render: (n: string) => <Text strong style={{ whiteSpace: 'normal', overflowWrap: 'anywhere' }}>{n}</Text>,
                             },
                             {
-                                title: 'Lỗi vi phạm', dataIndex: 'type', key: 'type', width: 145,
-                                render: (t: string) => <Tag color="error" style={{ margin: 0, fontWeight: 700, fontSize: 10, textTransform: 'uppercase', whiteSpace: 'normal', lineHeight: 1.3 }}>{t}</Tag>,
+                                title: 'Lỗi vi phạm', dataIndex: 'type', key: 'type', width: 120,
+                                render: (t: string, record: any) => record.isEcommerceGroup
+                                    ? <Space size={5} wrap><Tag color="volcano" style={{ margin: 0, fontWeight: 700, fontSize: 10 }}>TMDT TRỄ HẸN</Tag><Badge count={record.ecommerceDetails.length} color="#fa541c" /></Space>
+                                    : <Tag color="error" style={{ margin: 0, fontWeight: 700, fontSize: 10, textTransform: 'uppercase', whiteSpace: 'normal', lineHeight: 1.3 }}>{t}</Tag>,
                             },
                             {
-                                title: 'Trạng thái', key: 'status', width: 125,
-                                render: (_: unknown, record: any) => record.isWaived ? (
+                                title: 'Trạng thái', key: 'status', width: 110,
+                                render: (_: unknown, record: any) => record.isEcommerceGroup ? (
+                                    <Text type="secondary" style={{ fontSize: 12 }}>{record.ecommerceDetails.every((fine: any) => fine.isWaived) ? 'Đã miễn toàn bộ' : 'Đang áp dụng'}</Text>
+                                ) : record.isWaived ? (
                                     <Tooltip title={record.waiverReason || 'Vi phạm đã được ghi nhận nhưng không khấu trừ lương.'}>
                                         <Tag color="success" style={{ margin: 0, fontWeight: 800, fontSize: 10, whiteSpace: 'normal', lineHeight: 1.3 }}>ĐÃ MIỄN PHẠT</Tag>
                                     </Tooltip>
@@ -9253,7 +9473,7 @@ const openConfigModal = () => {
                                 })(),
                             },
                             {
-                                title: 'Thời gian', dataIndex: 'date', key: 'date', width: 118,
+                                title: 'Thời gian', dataIndex: 'date', key: 'date', width: 100,
                                 render: (date: string) => {
                                     const d = date ? dayjs(date) : null;
                                     if (!d?.isValid()) return <Text type="secondary">-</Text>;
@@ -9266,8 +9486,22 @@ const openConfigModal = () => {
                                 },
                             },
                             {
-                                title: 'Chi tiết', dataIndex: 'detail', key: 'detail',
+                                title: 'Chi tiết', dataIndex: 'detail', key: 'detail', width: 270,
+                                className: 'att-fines-detail-column',
                                 render: (d: string, record: any) => {
+                                    if (record.isEcommerceGroup) {
+                                        const waivedCount = record.ecommerceDetails.filter((fine: any) => fine.isWaived).length;
+                                        return (
+                                            <div style={fineDetailCellStyle}>
+                                                <Text style={{ color: '#595959', fontWeight: 600 }}>
+                                                    {record.ecommerceDetails.length} đơn trễ SLA · chia đều cho nhân sự chính thức
+                                                </Text>
+                                                <Text type="secondary" style={{ display: 'block', marginTop: 3, fontSize: 11 }}>
+                                                    {waivedCount > 0 ? `${waivedCount}/${record.ecommerceDetails.length} đơn đã miễn phạt` : 'Bấm mũi tên để xem danh sách đơn'}
+                                                </Text>
+                                            </div>
+                                        );
+                                    }
                                     // 1. Phạt xử lý Trả hàng quá hạn
                                     if (record.source === 'returns_overdue') {
                                         const code = String(d).match(/^Phiếu\s+(.+?)(?:\s+-\s+đơn\s+|\s+quá \d+ ngày)/i)?.[1] || '-';
@@ -9319,6 +9553,22 @@ const openConfigModal = () => {
                                                 </Space>
                                             );
                                         }
+                                    }
+
+                                    // Chỉ giữ thông tin đối soát chính trên bảng;
+                                    // danh sách sản phẩm đầy đủ vẫn xem được khi rê chuột.
+                                    if (record.source === 'prepack-shortfall') {
+                                        const shortfallDate = String(d).match(/^Ngày\s+(.+?),/i)?.[1];
+                                        return (
+                                            <Tooltip title={d}>
+                                                <Space size={[4, 4]} wrap style={fineDetailCellStyle}>
+                                                    <Text style={{ color: '#595959', fontWeight: 600 }}>Thiếu chỉ tiêu đóng gói</Text>
+                                                    <Tag color="orange" style={{ margin: 0, fontWeight: 700, fontSize: 11 }}>
+                                                        {shortfallDate || 'Dưới 90%'}
+                                                    </Tag>
+                                                </Space>
+                                            </Tooltip>
+                                        );
                                     }
 
                                     // 3. Phạt Đi muộn (Attendance)
@@ -9475,15 +9725,17 @@ const openConfigModal = () => {
                             },
                             {
                                 title: <Text style={{ color: '#ff4d4f' }}>Số tiền trừ</Text>,
-                                dataIndex: 'amount', key: 'amount', width: 125, align: 'right' as const,
-                                render: (v: number, record: any) => record.isWaived
+                                dataIndex: 'amount', key: 'amount', width: 110, align: 'right' as const,
+                                render: (v: number, record: any) => record.isEcommerceGroup
+                                    ? (record.amount > 0 ? <Text strong style={{ color: '#ff4d4f', whiteSpace: 'nowrap' }}>- {fmt(record.amount)}</Text> : <Text strong style={{ color: '#389e0d', whiteSpace: 'nowrap' }}>0 đ</Text>)
+                                    : record.isWaived
                                     ? <Text strong style={{ color: '#389e0d', whiteSpace: 'nowrap' }}>0 đ</Text>
                                     : <Text strong style={{ color: '#ff4d4f', whiteSpace: 'nowrap' }}>- {fmt(v)}</Text>,
                             },
                             {
-                                title: '', key: 'actions', width: 72, align: 'center' as const,
+                                title: '', key: 'actions', width: 60, align: 'center' as const,
                                 render: (_: any, record: any) => {
-                                    if (!isAdmin || isCurrentPeriodLocked || record.isWaived) return null;
+                                    if (!isAdmin || isCurrentPeriodLocked || record.isWaived || record.isEcommerceGroup) return null;
                                     return (
                                         <Space size={2}>
                                             <Tooltip title="Sửa phạt">
@@ -10523,7 +10775,7 @@ const openConfigModal = () => {
 
     return (
         <div className={`attendance-module${!isAdmin ? ' attendance-module--staff' : ''}`}>
-            {(activeTab === 'overview' || activeTab === 'packaging') && !packingCatalogReady && (
+            {activeTab === 'packaging' && !packingCatalogReady && (
                 <div role="status" style={{ padding: '8px 16px' }}>
                     {packingCatalogError ? (
                         <Space>

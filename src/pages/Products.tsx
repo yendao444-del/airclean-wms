@@ -14,6 +14,7 @@ import {
     Tag,
     Dropdown,
     Checkbox,
+    type Breakpoint,
 } from 'antd';
 import { PlusOutlined, EditOutlined, DeleteOutlined, ReloadOutlined } from '@ant-design/icons';
 import type { Product, Category } from '../types/electron';
@@ -852,6 +853,7 @@ export default function ProductsPage() {
             key: 'category',
             width: 150,
             minWidth: 120,
+            responsive: ['lg'] as Breakpoint[],
             render: (text: string) => text ? <Tag color="blue">{text}</Tag> : '-',
         },
         {
@@ -860,6 +862,7 @@ export default function ProductsPage() {
             key: 'cost',
             width: 120,
             minWidth: 100,
+            responsive: ['xl'] as Breakpoint[],
             render: (value: number, record: Product) => {
                 if (expandedRowKeys.includes(record.id)) return null;
                 // Nếu có variants → hiển thị khoảng giá vốn từ variants
@@ -924,6 +927,7 @@ export default function ProductsPage() {
             key: 'unit',
             width: 80,
             minWidth: 60,
+            responsive: ['md'] as Breakpoint[],
             render: (text: string, record: Product) => {
                 if (expandedRowKeys.includes(record.id)) return null;
                 return <Tag color="purple">{text || 'Cái'}</Tag>;
@@ -1097,7 +1101,7 @@ export default function ProductsPage() {
     return (
         <div>
             {/* Search Bar - Responsive */}
-            <div style={{ marginBottom: 16 }}>
+            <div className="products-search" style={{ marginBottom: 16 }}>
                 <Input.Search
                     placeholder="🔍 Tìm theo SKU, Barcode, Tên..."
                     value={searchText}
@@ -1111,6 +1115,7 @@ export default function ProductsPage() {
 
             {/* Table Layout - Responsive Container */}
             <Card
+                className="products-card"
                 bordered={false}
                 style={{
                     background: '#fff',
@@ -1120,6 +1125,7 @@ export default function ProductsPage() {
                 }}
             >
                 <Table
+                    className="products-table"
                     columns={columns}
                     dataSource={filteredProducts}
                     rowKey="id"
@@ -1129,7 +1135,7 @@ export default function ProductsPage() {
                         showSizeChanger: true,
                         showTotal: (total) => searchText ? `Tìm thấy ${total} / ${products.length} sản phẩm` : `Tổng ${total} sản phẩm`,
                     }}
-                    scroll={{ x: 1400 }}
+                    scroll={{ x: 'max-content' }}
                     rowSelection={{
                         selectedRowKeys,
                         onChange: (selectedKeys) => {

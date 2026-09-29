@@ -5,6 +5,18 @@ const PARTIAL_ATTENDANCE_FINE = 50000;
 const OFFICIAL_ABSENCE_FINE = 200000;
 const POLICY_EFFECTIVE_DATE = '2026-09-19';
 const CUTOFF_HOUR = 19;
+const ATTENDANCE_RECONCILE_BUSY = 'ATTENDANCE_RECONCILE_BUSY';
+
+function isRetryableReconcileError(error) {
+    const message = String(error?.message || error || '');
+    return error?.code === 'P2034'
+        || error?.code === 'P2028'
+        || /write conflict|deadlock|could not serialize|serialization failure|lock timeout|transaction.*timed out/i.test(message);
+}
+
+function retryDelayMs(attempt) {
+    return [150, 350, 750, 1500][attempt] || 1500;
+}
 
 function normalizeIdentity(value) {
     return String(value || '')
@@ -85,7 +97,7 @@ function dateRangeThroughToday(now) {
     const today = dateKeyFromTimestamp(now);
     const rows = [];
     let cursor = POLICY_EFFECTIVE_DATE;
-    const lastTarget = addDays(today, 1);
+    const lastTarget = today;
     while (cursor && cursor <= lastTarget && rows.length < 366) {
         const nowMs = new Date(now).getTime();
         if (nowMs >= deadlineFor(cursor).getTime()) rows.push(cursor);
@@ -105,9 +117,21 @@ function completedWorkDatesThroughToday(now) {
     return rows;
 }
 
+function isPrematureMissingScheduleFine(fine, now = new Date()) {
+    if (fine?.type !== 'Không đăng ký lịch') return false;
+    const idMatch = String(fine?.id || '').match(/^fine-attendance-schedule-\d+-(\d{4}-\d{2}-\d{2})$/);
+    const dateKey = String(fine?.attendanceDate || idMatch?.[1] || '');
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(dateKey)) return false;
+    return new Date(now).getTime() < dateAtBangkok(dateKey, CUTOFF_HOUR).getTime();
+}
+
 async function reconcileMissingSeasonalScheduleFines(prisma, options = {}) {
     const evaluationNow = options.now || new Date();
-    return prisma.$transaction(async (tx) => {
+    let lastError = null;
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const transactionStartedAt = Date.now();
+      try {
+        const result = await prisma.$transaction(async (tx) => {
         await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('attendanceData'))`;
         const configRow = await tx.appConfig.findUnique({ where: { key: 'attendanceData' } });
         if (!configRow) return { created: [], removed: [], checked: 0 };
@@ -166,6 +190,13 @@ async function reconcileMissingSeasonalScheduleFines(prisma, options = {}) {
                             scheduledSession: declaration.session,
                         });
                     }
+                    continue;
+                }
+
+                // A missed registration deadline does not prove a no-show.
+                // Wait for the workday to end before classifying the fine.
+                if (new Date(evaluationNow).getTime() < dateAtBangkok(dateKey, CUTOFF_HOUR).getTime()) {
+                    if (existing && existing.source === 'attendance-schedule') removed.push(existing);
                     continue;
                 }
 
@@ -249,7 +280,25 @@ async function reconcileMissingSeasonalScheduleFines(prisma, options = {}) {
             await tx.appConfig.update({ where: { key: 'attendanceData' }, data: { value: JSON.stringify(attendanceData) } });
         }
         return { created, removed, updated, checked: targetDates.length };
-    }, { isolationLevel: 'Serializable', timeout: 15000, maxWait: 10000 });
+        }, { isolationLevel: 'Serializable', timeout: 15000, maxWait: 10000 });
+        console.info(`[Attendance Schedule] attempt=${attempt + 1} transaction=${Date.now() - transactionStartedAt}ms created=${result.created?.length || 0} removed=${result.removed?.length || 0} updated=${result.updated?.length || 0}`);
+        return result;
+      } catch (error) {
+        if (!isRetryableReconcileError(error) || attempt === 4) {
+          if (isRetryableReconcileError(error)) {
+            const busyError = new Error('Bảng công đang bận đối soát phạt. Vui lòng thử lại sau.');
+            busyError.code = ATTENDANCE_RECONCILE_BUSY;
+            busyError.cause = error;
+            throw busyError;
+          }
+          throw error;
+        }
+        lastError = error;
+        console.warn(`[Attendance Schedule] retry=${attempt + 1} error=${error?.code || 'transaction_conflict'} message=${String(error?.message || error)}`);
+        await new Promise((resolve) => setTimeout(resolve, retryDelayMs(attempt)));
+      }
+    }
+    throw lastError || new Error('Không thể đối soát phạt chấm công.');
 }
 
 module.exports = {
@@ -257,9 +306,11 @@ module.exports = {
     MISSING_SCHEDULE_FINE,
     PARTIAL_ATTENDANCE_FINE,
     OFFICIAL_ABSENCE_FINE,
+    ATTENDANCE_RECONCILE_BUSY,
     POLICY_EFFECTIVE_DATE,
     dateAtBangkok,
     deadlineFor,
+    isPrematureMissingScheduleFine,
     normalizeIdentity,
     reconcileMissingSeasonalScheduleFines,
     validScheduleForDate,
