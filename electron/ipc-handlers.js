@@ -308,7 +308,7 @@ try {
 // Set Prisma environment variables from runtime-only configuration.
 const isPostgresUrl = (value) =>
   typeof value === "string" && /^postgres(?:ql)?:\/\//i.test(value.trim());
-const { desktopPrismaUrl, withDatabaseReadDeadline, createPrismaReadRecovery } = require('./prisma-pool-policy.cjs');
+const { desktopPrismaUrl, withDatabaseReadDeadline, withIsolatedReadFallback, createPrismaReadRecovery } = require('./prisma-pool-policy.cjs');
 // A shell or another local project can leave DATABASE_URL/DIRECT_URL behind.
 // Never pass a non-PostgreSQL value to Prisma; use the packaged fallback instead.
 const databaseUrl = isPostgresUrl(config.DATABASE_URL)
@@ -1482,6 +1482,11 @@ function getPrismaAuth() {
       log: ["error"],
       datasources: { db: { url: authUrl.toString() } },
     });
+    // Serialize reads before they enter the single-connection Prisma pool.
+    // Timed-out work retains its slot until the actual query settles.
+    prismaAuth.$use(createPrismaReadRecovery({
+      concurrency: 1, timeoutMs: 3000, queueTimeoutMs: 3000, maxQueued: 32,
+    }));
     prismaAuth.$connect()
       .then(() => console.log("✅ Connected Prisma Auth (login priority)"))
       .catch((error) => console.warn("⚠️ Prisma Auth connect failed:", error.message));
@@ -1517,6 +1522,9 @@ try {
     },
   });
   prisma.$use(createPrismaReadRecovery({
+    // Match the effective pool even when runtime configuration requests fewer
+    // connections. Leave one connection available for mutations/session work.
+    concurrency: Math.max(1, Number(new URL(desktopPrismaUrl(databaseUrl)).searchParams.get("connection_limit")) - 1),
     replay: params => {
       const delegate = params.model[0].toLowerCase() + params.model.slice(1);
       return prisma[delegate][params.action](params.args);
@@ -2382,11 +2390,9 @@ function requireReceivingOperatorRole(...roles) {
 }
 
 function requireInventoryLedgerReadAccess() {
-  requireRole();
-  // Test operators may exercise stock-check workflows, but the inventory
-  // ledger remains an admin-only data source.
-  if (currentSession.role === "admin") return;
-  throw new Error("Khong co quyen xem The kho.");
+  // Package history reads the same SKU ledger as the stock card. Managers
+  // need read access to both views; this grants no inventory mutation rights.
+  requireRole("admin", "manager");
 }
 
 function hashRememberToken(token) {
@@ -9506,7 +9512,11 @@ async function tryAcquireTelegramWmsLease() {
 
   for (let attempt = 0; attempt < 3; attempt += 1) {
     try {
-      const acquired = await getPrismaDirectTx().$transaction(
+      // This short row-lock transaction must not queue behind historical fine
+      // reconciliation in the two-connection transaction pool. Main-pool report
+      // reads reserve a connection; the same database row still serializes all
+      // bot owners regardless of which client executes this transaction.
+      const acquired = await prisma.$transaction(
         async (tx) => {
           const clockRows = await tx.$queryRaw`
             SELECT CURRENT_TIMESTAMP AS "dbNow"
@@ -17954,11 +17964,30 @@ function normalizeActorName(value) {
     .toLocaleLowerCase("vi-VN");
 }
 
+const actorReadInFlight = new Map();
+
 async function getCurrentActor() {
   requireRole();
-  const user = await prisma.user.findUnique({
-    where: { id: currentSession.id },
-  });
+  // Actor validation is security work, not a report. Use the existing isolated
+  // auth connection so a payroll/report burst cannot starve it.
+  const userId = currentSession.id;
+  const args = {
+    where: { id: userId },
+    select: { id: true, username: true, fullName: true, role: true, status: true },
+  };
+  let read = actorReadInFlight.get(userId);
+  if (!read) {
+    read = withIsolatedReadFallback(
+      () => getPrismaAuth().user.findUnique(args),
+      () => prisma.user.findUnique(args),
+    );
+    actorReadInFlight.set(userId, read);
+    void read.finally(() => {
+      if (actorReadInFlight.get(userId) === read) actorReadInFlight.delete(userId);
+    }).catch(() => undefined);
+  }
+  const user = await read;
+  if (currentSession?.id !== userId) throw new Error("Phiên đăng nhập đã thay đổi. Vui lòng thử lại.");
   if (!user || user.status !== "active")
     throw new Error("Phiên đăng nhập không hợp lệ.");
   return {
