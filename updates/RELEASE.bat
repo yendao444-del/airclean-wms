@@ -58,8 +58,6 @@ echo.
 
 echo [4/7] Building Electron...
 echo ----------------------------------------
-call node scripts\prepare-runtime-db-config.cjs
-if errorlevel 1 ( echo [ERROR] Runtime database config build that bai! & pause & exit /b 1 )
 node --max-old-space-size=4096 node_modules/electron-builder/cli.js
 if errorlevel 1 ( echo ❌ Electron build that bai! & pause & exit /b 1 )
 call node scripts\verify-packaged-footprint.cjs release4\win-unpacked\resources\app
@@ -127,6 +125,10 @@ rem Never publish development database/service credentials in a patch.
 del /Q "_full_temp\resources\app\electron\config.js" 2>nul
 del /Q "_full_temp\resources\app\electron\supabase-storage.json" 2>nul
 del /Q "_full_temp\resources\app\electron\gdrive-credentials.json" 2>nul
+del /Q "_full_temp\resources\app\electron\gdrive-token.json" 2>nul
+del /Q "_full_temp\resources\app\electron\google-oauth-config.json" 2>nul
+del /Q "_full_temp\resources\app\electron\r2-daily-evidence-bootstrap.json" 2>nul
+del /Q "_full_temp\resources\app\electron\wms-bot-runtime.js" 2>nul
 call node scripts\prepare-drive-backend-stage.cjs "_full_temp\resources\app\electron"
 if errorlevel 1 (
     rmdir /S /Q "_full_temp" 2>nul

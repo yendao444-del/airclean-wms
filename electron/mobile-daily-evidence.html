@@ -133,7 +133,7 @@
       });
       submitButton.disabled = !activeTask || selectedFiles.length < (activeTask?.requiredCount || 1);
       submitButton.textContent = `Gửi bằng chứng (${selectedFiles.length}/${activeTask?.requiredCount || 1})`;
-      captureButton.disabled = selectedFiles.length >= 5;
+      captureButton.disabled = selectedFiles.length >= 8;
     }
     function openTask(taskId) {
       activeTask = sessionData.tasks.find(task => task.id === taskId && !task.completed); if (!activeTask) return;
@@ -165,7 +165,7 @@
       const file = input.files?.[0]; input.value = ''; if (!file) return;
       if (file.type !== 'image/jpeg') { setStatus('error', 'Chỉ nhận ảnh JPG/JPEG chụp trực tiếp từ camera.'); return; }
       if (file.size > 15 * 1024 * 1024) { setStatus('error', 'Mỗi ảnh không được vượt quá 15 MB.'); return; }
-      if (selectedFiles.length >= 5) return;
+      if (selectedFiles.length >= 8) return;
       try {
         const dimensions = await getImageDimensions(file);
         if (!dimensions.width || !dimensions.height || dimensions.width <= dimensions.height) {

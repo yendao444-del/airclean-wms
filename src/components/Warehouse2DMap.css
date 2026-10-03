@@ -5,10 +5,10 @@
 .wms-minimal-root {
   display: flex;
   flex-direction: column;
-  background: #ffffff;
+  background: #fbfcfe;
   border-radius: 12px;
-  border: 1px solid #e2e8f0;
-  box-shadow: 0 4px 16px rgba(15, 23, 42, 0.04);
+  border: 1px solid #dce5ee;
+  box-shadow: 0 8px 24px rgba(15, 32, 52, 0.06);
   overflow: hidden;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
 }
@@ -21,8 +21,8 @@
   flex-wrap: wrap;
   gap: 12px;
   padding: 12px 18px;
-  background: #ffffff;
-  border-bottom: 1px solid #f1f5f9;
+  background: #fbfcfe;
+  border-bottom: 1px solid #e6edf3;
 }
 
 .wms-minimal-header-left {
@@ -34,7 +34,8 @@
 .wms-live-dot {
   width: 8px;
   height: 8px;
-  background: #0f172a;
+  background: #00ab70;
+  box-shadow: 0 0 0 4px rgba(0, 171, 112, 0.12);
   border-radius: 50%;
 }
 
@@ -63,10 +64,11 @@
   display: flex;
   align-items: center;
   gap: 6px;
-  background: #f8fafc;
+  background: #ffffff;
   padding: 4px 10px;
   border-radius: 6px;
-  border: 1px solid #e2e8f0;
+  border: 1px solid #dbe5ee;
+  box-shadow: 0 1px 2px rgba(15, 32, 52, 0.03);
 }
 
 .wms-kpi-val {
@@ -94,7 +96,7 @@
   position: relative;
   width: 100%;
   min-height: 480px;
-  background: #f8fafc;
+  background: #f3f7fa;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -102,6 +104,77 @@
   box-sizing: border-box;
   overflow: hidden;
 }
+
+.wms-map-toolbar,
+.wms-map-legend {
+  position: absolute;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  background: rgba(255, 255, 255, 0.94);
+  border: 1px solid #dbe5ee;
+  box-shadow: 0 4px 12px rgba(15, 32, 52, 0.08);
+  backdrop-filter: blur(8px);
+}
+
+.wms-map-toolbar {
+  top: 14px;
+  right: 16px;
+  gap: 4px;
+  padding: 4px;
+  border-radius: 9px;
+}
+
+.wms-map-tool {
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 6px;
+  color: #42566b;
+  background: transparent;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.wms-map-tool:hover,
+.wms-map-tool:focus-visible {
+  color: #087a50;
+  background: #eaf9f4;
+  outline: none;
+}
+
+.wms-map-legend {
+  left: 16px;
+  bottom: 14px;
+  gap: 14px;
+  padding: 7px 10px;
+  border-radius: 8px;
+  color: #53677b;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.wms-map-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  white-space: nowrap;
+}
+
+.wms-legend-swatch {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 3px;
+  box-sizing: border-box;
+}
+
+.wms-legend-zone { background: #eaf9f4; border: 1px solid #9bd8c0; }
+.wms-legend-wall { background: #334155; border-radius: 2px; height: 3px; }
+.wms-legend-location { background: #00a86b; border: 2px solid #dff8ed; box-shadow: 0 0 0 1px #00a86b; }
 
 .wms-minimal-svg-box {
   width: 100%;
@@ -115,6 +188,10 @@
   min-height: 440px;
   display: block;
   user-select: none;
+}
+
+.wms-minimal-svg text {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
 }
 
 /* The allocation dialog reuses the exact floor plan at a denser scale. */
@@ -139,6 +216,15 @@
   padding: 3px 8px;
 }
 
+.wms-minimal-root.is-compact .wms-map-legend {
+  display: none;
+}
+
+.wms-minimal-root.is-compact .wms-map-toolbar {
+  top: 8px;
+  right: 10px;
+}
+
 /* ROOM RECTANGLES (TỐI GIẢN, SẠCH SẼ, ĐỒNG BỘ) */
 .wms-room-node {
   cursor: pointer;
@@ -147,34 +233,46 @@
 
 .wms-room-rect {
   fill: #ffffff;
-  stroke: #cbd5e1;
-  stroke-width: 1.5;
+  stroke: #afbdcc;
+  stroke-width: 2;
   transition: all 0.2s ease;
 }
 
+/* Quiet zone tints echo spatial robot maps while keeping text contrast high. */
+.wms-room-node[data-zone="TOP_1"] .wms-room-rect { fill: #eaf9f4; }
+.wms-room-node[data-zone="TOP_2"] .wms-room-rect { fill: #edf5fc; }
+.wms-room-node[data-zone="TOP_3"] .wms-room-rect { fill: #f1f0fb; }
+.wms-room-node[data-zone="TOP_4"] .wms-room-rect { fill: #fbf6ea; }
+.wms-room-node[data-zone="CENTER"] .wms-room-rect { fill: #eaf7f8; }
+.wms-room-node[data-zone="PACKING"] .wms-room-rect { fill: #fbf4eb; }
+.wms-room-node[data-zone="OFFICE"] .wms-room-rect { fill: #eef5fb; }
+
 .wms-room-node:hover .wms-room-rect {
-  fill: #f1f5f9;
-  stroke: #0f172a;
-  stroke-width: 2;
+  fill: #f8fbfd;
+  stroke: #334155;
+  stroke-width: 2.5;
 }
 
 .wms-room-node.selected .wms-room-rect {
-  fill: #f1f5f9;
-  stroke: #0f172a;
+  stroke: #334155;
   stroke-width: 2.5;
 }
 
 .wms-room-node.unit-location-focus .wms-room-rect {
-  fill: #ecfdf5;
-  stroke: #10b981;
-  stroke-width: 3;
-  filter: drop-shadow(0 0 8px rgba(16, 185, 129, 0.55));
+  fill: #dff8ed;
+  stroke: #00a86b;
+  stroke-width: 3.5;
+  filter: drop-shadow(0 2px 5px rgba(0, 168, 107, 0.28));
+}
+
+.wms-unit-location-marker {
+  filter: url(#wms-location-shadow);
 }
 
 .wms-unit-location-marker rect {
-  fill: #059669;
+  fill: #00a86b;
   stroke: #ffffff;
-  stroke-width: 1.5;
+  stroke-width: 2;
 }
 
 .wms-unit-location-marker text {
@@ -183,17 +281,52 @@
   font-weight: 800;
 }
 
+.wms-location-pulse {
+  fill: rgba(0, 168, 107, 0.16);
+  stroke: rgba(0, 168, 107, 0.35);
+  stroke-width: 1.5;
+  stroke-dasharray: 3 3;
+}
+
+.wms-location-dot {
+  fill: #00a86b;
+  stroke: #ffffff;
+  stroke-width: 3;
+}
+
 .wms-room-title {
   font-size: 12px;
   font-weight: 800;
-  fill: #0f172a;
-  letter-spacing: 0.4px;
+  fill: #132238;
+  letter-spacing: 0.25px;
 }
 
 .wms-room-count {
   font-size: 11px;
   font-weight: 600;
-  fill: #64748b;
+  fill: #53677b;
+}
+
+.wms-zone-code-chip rect {
+  fill: rgba(255, 255, 255, 0.82);
+  stroke: #b7c7d6;
+  stroke-width: 1;
+}
+
+.wms-zone-code-chip text {
+  fill: #28415b;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.4px;
+}
+
+.wms-room-node.unit-location-focus .wms-zone-code-chip rect {
+  fill: #00a86b;
+  stroke: #00a86b;
+}
+
+.wms-room-node.unit-location-focus .wms-zone-code-chip text {
+  fill: #ffffff;
 }
 
 /* MODAL */

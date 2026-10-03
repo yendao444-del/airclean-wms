@@ -820,3 +820,118 @@
     border-bottom: 1px solid #e7eeeb;
   }
 }
+
+.daily-worksheet,
+.daily-worksheet button,
+.daily-worksheet input,
+.daily-worksheet .ant-input-number,
+.daily-worksheet .ant-tag {
+  font-family: inherit;
+}
+
+.daily-worksheet-table th {
+  letter-spacing: .02em;
+  height: 40px;
+  padding: 0 6px !important;
+  color: #52647d !important;
+  background: #f8fafc !important;
+  border-right: 1px solid #edf1f5;
+}
+
+.daily-worksheet-table td {
+  height: 42px;
+  padding: 6px !important;
+  color: #263b59;
+  border-right: 1px solid #f1f4f7;
+}
+
+.daily-worksheet-table .ant-input-number {
+  max-width: 100%;
+  height: 25px;
+  min-height: 25px;
+  border-radius: 6px;
+}
+
+.daily-worksheet-table .ant-input-number-input {
+  height: 23px;
+  padding: 0 6px;
+  text-align: center;
+  font-size: 12px;
+}
+
+.daily-worksheet-table .ant-btn {
+  font-family: inherit;
+}
+
+.daily-worksheet-table tbody tr:not(.daily-worksheet-group-row):hover {
+  background: #f0fdf9 !important;
+}
+
+.daily-color-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: #334155;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.daily-color-dot {
+  width: 9px;
+  height: 9px;
+  flex: 0 0 9px;
+  border-radius: 50%;
+  border: 1px solid rgba(51, 65, 85, .18);
+}
+
+.daily-empty-input {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 60px;
+  max-width: 100%;
+  height: 25px;
+  border: 1px solid #e3eaf0;
+  border-radius: 6px;
+  color: #c4ced8;
+  background: #f8fafc;
+  font-size: 12px;
+}
+
+.daily-status-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 9px;
+  border-radius: 999px;
+  color: #64748b;
+  background: #f1f5f9;
+  font-size: 11px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.daily-status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #94a3b8;
+}
+
+.daily-worksheet-group-row td {
+  height: 38px !important;
+  padding: 0 14px !important;
+  border-right: 0 !important;
+}
+
+@media (max-width: 760px) {
+  .daily-worksheet-toolbar {
+    align-items: stretch !important;
+    flex-direction: column;
+  }
+
+  .daily-worksheet-toolbar .ant-input-affix-wrapper {
+    width: 100% !important;
+  }
+}

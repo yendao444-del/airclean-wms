@@ -1,5 +1,6 @@
 import { useState, useMemo, useCallback, useRef, useEffect, useTransition, forwardRef, useImperativeHandle, cloneElement, isValidElement } from 'react';
 import AttendancePackingChart from '../components/AttendancePackingChart';
+import { groupPayslipFines } from '../lib/payslipFineGroups';
 import { awaitPackingRequest, packingRequestIdentity } from '../lib/packingRequest';
 import { Medal } from '@phosphor-icons/react';
 import { useCurrentUser } from '../lib/hooks/useCurrentUser';
@@ -125,6 +126,29 @@ let sharedAudioCtx: AudioContext | null = null;
 // refresh, so this cache only improves perceived latency and never suppresses
 // cross-workstation updates.
 let attendanceInitialDataCache: { data: any; updatedAt?: string | null } | null = null;
+// A locked period already contains the complete, authoritative payroll
+// snapshot. Keep targeted snapshots in this renderer session as well, so
+// switching away from and back to Bảng công does not issue another large read.
+const lockedPayrollSnapshotCache = new Map<string, {
+    lockIdentity: string;
+    snapshot: LockedPayrollSnapshot;
+}>();
+const buildLockedPayrollSnapshotKey = (start: string, end: string) => `${start}|${end}`;
+const getLockedPeriodIdentity = (period: Partial<LockedPeriod> | null | undefined) =>
+    `${String(period?.id || '')}|${String(period?.lockedAt || '')}`;
+const PAYROLL_VIEW_CACHE_VERSION = 1;
+const PAYROLL_VIEW_CACHE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+const buildPayrollViewCacheKey = (periodKey: string, viewerKey: string) => `attendance-payroll-view-v${PAYROLL_VIEW_CACHE_VERSION}:${periodKey}:${viewerKey || 'anonymous'}`;
+const readPayrollViewCache = (key: string): any[] | null => {
+    try {
+        const parsed = JSON.parse(window.localStorage.getItem(key) || 'null');
+        return parsed?.version === PAYROLL_VIEW_CACHE_VERSION && Array.isArray(parsed.rows)
+            && Number.isFinite(parsed.savedAt) && Date.now() - parsed.savedAt <= PAYROLL_VIEW_CACHE_MAX_AGE_MS ? parsed.rows : null;
+    } catch { return null; }
+};
+const writePayrollViewCache = (key: string, rows: any[]) => {
+    try { window.localStorage.setItem(key, JSON.stringify({ version: PAYROLL_VIEW_CACHE_VERSION, savedAt: Date.now(), rows })); } catch { }
+};
 
 interface LeaveRequest {
     id: string;
@@ -1390,7 +1414,7 @@ const getPackingComparisonRange = (range: AttendancePeriod): AttendancePeriod =>
     return [comparisonEnd.subtract(elapsedDays - 1, 'day').startOf('day'), comparisonEnd];
 };
 
-function buildPackingWeeklyResults(orderLogs: PackingOrderLog[], employeesList: Employee[], asOf: dayjs.Dayjs): PackingWeeklyResult[] {
+function buildPackingWeeklyResults(orderLogs: PackingOrderLog[], employeesList: Employee[], asOf: dayjs.Dayjs, employmentEndDates: Record<string, string> = {}): PackingWeeklyResult[] {
     const weeks = new Map<string, Map<number, { employee: Employee; units: number; orderCount: number }>>();
     const employeeByPacker = new Map<string, Employee | null>();
 
@@ -1404,6 +1428,8 @@ function buildPackingWeeklyResults(orderLogs: PackingOrderLog[], employeesList: 
             employeeByPacker.set(packerKey, employee);
         }
         if (!employee) return;
+        const employmentEnd = String(employmentEndDates[normalizeAttendanceText(employee.username)] || '').trim();
+        if (/^\d{4}-\d{2}-\d{2}$/.test(employmentEnd) && !orderTime.isBefore(dayjs(employmentEnd), 'day')) return;
         const weekStart = getPackingWeekStart(orderTime);
         const weekKey = weekStart.format('YYYY-MM-DD');
         if (!weeks.has(weekKey)) weeks.set(weekKey, new Map());
@@ -1432,8 +1458,10 @@ function buildPackingWeeklyResults(orderLogs: PackingOrderLog[], employeesList: 
     }).sort((left, right) => left.weekStart.valueOf() - right.weekStart.valueOf());
 }
 
-const packingWeeklyResultToBonus = (result: PackingWeeklyResult): BonusRecord | null => {
+const packingWeeklyResultToBonus = (result: PackingWeeklyResult, employmentEndDates: Record<string, string> = {}): BonusRecord | null => {
     if (!result.completed || !result.leader || result.units <= 0) return null;
+    const employmentEnd = String(employmentEndDates[normalizeAttendanceText(result.leader.username)] || '').trim();
+    if (/^\d{4}-\d{2}-\d{2}$/.test(employmentEnd) && !result.weekEnd.isBefore(dayjs(employmentEnd), 'day')) return null;
     return {
         id: `auto-packing-week-${result.weekKey}`,
         empId: result.leader.id,
@@ -1723,7 +1751,10 @@ function calculatePayroll(
         const fineShare = 0;
 
         const mBonus = bonusesData.filter(b => b.empId === emp.id && isAccruedDuringEmployment(b)).reduce((sum, b) => sum + b.amount, 0);
-        const salesBonus = emp.type === 'Official' ? Math.max(0, Math.round(salesBonusAmount)) : 0;
+        const salesBonus = emp.type === 'Official'
+            && (!employmentEnd || employmentEnd.isAfter(dayjs(`${yearNum}-${monthNum}-${daysInPayrollMonth}`), 'day'))
+            ? Math.max(0, Math.round(salesBonusAmount))
+            : 0;
         const totalBonus = mBonus + salesBonus;
         const finalSalary = salaryBase + packIncome + totalBonus - myFines - leaveDeduction + extraAdjust;
         return {
@@ -3607,6 +3638,7 @@ export default function Attendance() {
     const [pdfExporting, setPdfExporting] = useState(false);
     const [payslipPdfDetailOpen, setPayslipPdfDetailOpen] = useState(false);
     const [gmailSending, setGmailSending] = useState(false);
+    const pdfImageCacheRef = useRef(new Map<string, Promise<string>>());
     const [staffBreakdownDetail, setStaffBreakdownDetail] = useState<{
         label: string;
         note: string;
@@ -3728,15 +3760,19 @@ export default function Attendance() {
             });
             await Promise.all(externalImgs.map(async (img) => {
                 try {
-                    if (img.dataset.payslipQr === 'true') {
-                        const result = await window.electronAPI.attendance.getPayslipQrImage({ url: img.src });
-                        if (!result?.success || !result.data?.dataUrl) {
-                            throw new Error(result?.error || 'Không tải được QR chuyển khoản.');
-                        }
-                        img.src = result.data.dataUrl;
-                    } else {
-                        img.src = await fetchImageAsDataUrl(img.src);
+                    const url = img.src;
+                    let pending = pdfImageCacheRef.current.get(url);
+                    if (!pending) {
+                        pending = img.dataset.payslipQr === 'true'
+                            ? window.electronAPI.attendance.getPayslipQrImage({ url }).then(result => {
+                                if (!result?.success || !result.data?.dataUrl) throw new Error(result?.error || 'Không tải được QR chuyển khoản.');
+                                return result.data.dataUrl;
+                            })
+                            : fetchImageAsDataUrl(url);
+                        pdfImageCacheRef.current.set(url, pending);
+                        pending.catch(() => pdfImageCacheRef.current.delete(url));
                     }
+                    img.src = await pending;
                     await img.decode().catch(() => undefined);
                 } catch (error) {
                     if (img.dataset.payslipQr === 'true') {
@@ -3933,7 +3969,7 @@ export default function Attendance() {
             ),
             okText: 'Gửi ngay',
             cancelText: 'Hủy',
-            onOk: async () => {
+            onOk: () => { void (async () => {
                 const periodKey = `${overviewDateRange[0].year()}-${String(overviewDateRange[0].month() + 1).padStart(2, '0')}`;
                 setBulkSendProgress({ running: true, current: 0, total: toSend.length, currentName: '', results: [] });
                 const results: { name: string; success: boolean; error?: string }[] = [];
@@ -3990,7 +4026,7 @@ export default function Attendance() {
                 }
                 setPayslipModal(null);
                 setBulkSendProgress({ running: false, current: toSend.length, total: toSend.length, currentName: '', results });
-            },
+            })(); },
         });
     };
 
@@ -4123,6 +4159,18 @@ export default function Attendance() {
     const [lockedPeriods, setLockedPeriods] = useState<LockedPeriod[]>([]);
     const lockedSnapshotRequestsRef = useRef(new Set<string>());
     const [lockedSnapshotError, setLockedSnapshotError] = useState('');
+    // Overview defaults to the current calendar month. Keep this state near
+    // the lock metadata so loading effects can skip live sources immediately
+    // when the selected period is already frozen.
+    const [overviewDateRange, setOverviewDateRange] = useState<AttendancePeriod>([
+        dayjs().startOf('month'),
+        dayjs().endOf('month'),
+    ]);
+    const selectedLockedPeriod = useMemo(() => lockedPeriods.find(period =>
+        dayjs(period.start).isSame(overviewDateRange[0], 'day')
+        && dayjs(period.end).isSame(overviewDateRange[1], 'day')
+    ), [lockedPeriods, overviewDateRange]);
+    const isSelectedPeriodLocked = Boolean(selectedLockedPeriod);
 
     // === Ghi đè lương thủ công (Admin) ===
     const [payrollOverrides, setPayrollOverrides] = useState<Record<string, PayrollOverride>>({});
@@ -4180,6 +4228,9 @@ export default function Attendance() {
     // Catalog loading must not delay employee data or the monthly log query.
     useEffect(() => {
         if (activeTab !== 'overview' && activeTab !== 'packaging') return;
+        if (activeTab === 'overview' && isSelectedPeriodLocked) {
+            return;
+        }
         if (packingCatalogReady) return;
         if (isAttendanceUiTest) {
             setPackingCatalogReady(true);
@@ -4263,7 +4314,7 @@ export default function Attendance() {
             cancelled = true;
             window.clearTimeout(timer);
         };
-    }, [activeTab, isAttendanceUiTest, loadPackingComponents, packingCatalogAttempt, packingCatalogReady, startBackgroundTransition]);
+    }, [activeTab, isAttendanceUiTest, isSelectedPeriodLocked, loadPackingComponents, packingCatalogAttempt, packingCatalogReady, startBackgroundTransition]);
 
     // 1. Tải dữ liệu từ DB lúc mở component
     useEffect(() => {
@@ -4299,7 +4350,17 @@ export default function Attendance() {
             if (d.fineOverrides) setFineOverrides(d.fineOverrides);
             if (d.fineAuditLog) setFineAuditLog(d.fineAuditLog);
             if (d.fineWaivers) setFineWaivers(d.fineWaivers);
-            if (d.lockedPeriods) setLockedPeriods(d.lockedPeriods);
+            if (d.lockedPeriods) {
+                d.lockedPeriods.forEach((period: LockedPeriod) => {
+                    if (period?.payrollSnapshot) {
+                        lockedPayrollSnapshotCache.set(
+                            buildLockedPayrollSnapshotKey(period.start, period.end),
+                            { lockIdentity: getLockedPeriodIdentity(period), snapshot: period.payrollSnapshot },
+                        );
+                    }
+                });
+                setLockedPeriods(d.lockedPeriods);
+            }
             if (d.payrollOverrides) setPayrollOverrides(d.payrollOverrides);
             if (d.gmailSentLog) setGmailSentLog(d.gmailSentLog);
             if (Array.isArray(d.leaveRecords)) setLeaveRecords(d.leaveRecords);
@@ -4343,7 +4404,9 @@ export default function Attendance() {
                         console.info(`[Attendance:load] ${label} ms:`, Math.round(performance.now() - requestedAt));
                     }
                 };
-                const usersPromise = measurePrimary('users', api.users.getAll()).catch(() => null);
+                // Include archived metadata so the attendance roster can hide
+                // former employees without dropping their historical ledger.
+                const usersPromise = measurePrimary('users', api.users.getAll(true)).catch(() => null);
                 const attendancePromise = measurePrimary(
                     'attendanceData',
                     api.attendance?.getInitialData
@@ -4543,7 +4606,7 @@ export default function Attendance() {
     // Đọc lại ledger khi mở tab Phạt để các khoản vừa được đối soát trong DB
     // hiện ngay, không cần reload toàn bộ ứng dụng.
     useEffect(() => {
-        if (!isDbLoaded || activeTab !== 'fines') return;
+        if (!isDbLoaded || activeTab !== 'fines' || isSelectedPeriodLocked) return;
         const sessionKey = 'tab';
         if (!finePerfSessionRef.current || finePerfSessionRef.current.key !== sessionKey) {
             finePerfSessionRef.current = {
@@ -4593,7 +4656,7 @@ export default function Attendance() {
             window.clearTimeout(refreshTimer);
             if (finePerfSessionRef.current?.key === sessionKey) finePerfSessionRef.current = null;
         };
-    }, [activeTab, isDbLoaded, logFinesPerf]);
+    }, [activeTab, isDbLoaded, isSelectedPeriodLocked, logFinesPerf]);
 
     // Bảo trì dữ liệu chạy sau lần render đầu. Không thay đổi logic đối soát;
     // chỉ không bắt toàn bộ giao diện phải chờ quét lịch sử chấm công.
@@ -4603,7 +4666,15 @@ export default function Attendance() {
             setIsBackgroundSyncComplete(true);
             return;
         }
+        // A locked period is fully represented by its persisted payroll
+        // snapshot. Do not re-run the live ledger reconciliation just to paint
+        // a period whose numbers are already frozen.
+        if (isSelectedPeriodLocked) {
+            setIsBackgroundSyncComplete(true);
+            return;
+        }
         let cancelled = false;
+        const syncStartedAt = performance.now();
         setIsBackgroundSyncComplete(false);
         const syncTask = (async () => {
             // The fresh core snapshot is already committed. Reconciliation
@@ -4626,38 +4697,46 @@ export default function Attendance() {
                         // avoid reading the large attendance document a second time.
                         dbFines = reconcileResult.data.ledger.extraFines;
                         dbAuditLog = reconcileResult.data.ledger.fineAuditLog;
-                    } else {
-                        const latest = api.attendance?.getInitialData
-                            ? await api.attendance.getInitialData()
-                            : await api.appConfig.get('attendanceData');
-                        if (latest?.success && latest.data) {
-                            dbFines = Array.isArray(latest.data.extraFines) ? latest.data.extraFines : [];
-                            dbAuditLog = Array.isArray(latest.data.fineAuditLog) ? latest.data.fineAuditLog : [];
-                        }
                     }
                 }
 
-                const normalized = await normalizeReturnFineDates(api, dbFines);
                 if (cancelled) return;
 
-                const localAuditLog = fineAuditLogStateRef.current;
-                const mergedAuditLog = mergeAuditLogs(dbAuditLog, localAuditLog);
-                const normalizedFines = normalized.fines.map((fine: FineRecord, index: number) => ensureFineId(fine, index));
-                const mergedFines = mergeFinesWithDeletes(
-                    normalizedFines,
-                    extraFinesRef.current,
-                    mergedAuditLog,
-                    dbAuditLog,
-                    localAuditLog,
-                );
-                startBackgroundTransition(() => {
-                    setFineAuditLog(mergedAuditLog);
-                    setExtraFines(mergedFines);
-                });
+                // Publish the reconciled ledger immediately. Legacy return-date
+                // normalization is corrective maintenance and may require a
+                // second network read; it must not keep the payroll readiness
+                // gate (and the visible "Đang đồng bộ" banner) open.
+                const publishLedger = (sourceFines: FineRecord[]) => {
+                    const localAuditLog = fineAuditLogStateRef.current;
+                    const mergedAuditLog = mergeAuditLogs(dbAuditLog, localAuditLog);
+                    const normalizedFines = sourceFines.map((fine: FineRecord, index: number) => ensureFineId(fine, index));
+                    const mergedFines = mergeFinesWithDeletes(
+                        normalizedFines,
+                        extraFinesRef.current,
+                        mergedAuditLog,
+                        dbAuditLog,
+                        localAuditLog,
+                    );
+                    startBackgroundTransition(() => {
+                        setFineAuditLog(mergedAuditLog);
+                        setExtraFines(mergedFines);
+                    });
+                };
+                publishLedger(dbFines);
+                if (dbFines.some((fine) => fine?.source === 'returns')) {
+                    void normalizeReturnFineDates(api, dbFines)
+                        .then((normalized) => {
+                            if (!cancelled && normalized.changed) publishLedger(normalized.fines);
+                        })
+                        .catch((error) => console.warn('[Attendance] Không chuẩn hóa ngày phạt trả hàng nền:', error?.message || error));
+                }
             } catch (err) {
                 console.error('Lỗi đồng bộ nền dữ liệu chấm công:', err);
             } finally {
-                if (!cancelled) setIsBackgroundSyncComplete(true);
+                if (!cancelled) {
+                    setIsBackgroundSyncComplete(true);
+                    console.info('[Attendance:load] background sync ready ms:', Math.round(performance.now() - syncStartedAt));
+                }
             }
         })();
         backgroundSyncPromiseRef.current = syncTask;
@@ -4665,7 +4744,7 @@ export default function Attendance() {
         return () => {
             cancelled = true;
         };
-    }, [isAdmin, isAttendanceUiTest, isCoreSnapshotReady]);
+    }, [isAdmin, isAttendanceUiTest, isCoreSnapshotReady, isSelectedPeriodLocked]);
 
     const saveAttendanceSnapshot = useCallback(async (snapshot: Record<string, any>) => {
         // Mọi đường ghi đều xếp sau đối soát để không thể ghi snapshot cũ đè kết quả nền.
@@ -4707,10 +4786,19 @@ export default function Attendance() {
     }, [isDbLoaded, employees, config, bonusAuditLog, extraBonuses, extraFundTx, fundAuditLog, extraFines, fineOverrides, fineAuditLog, fineWaivers, lockedPeriods, payrollOverrides, gmailSentLog, leaveRecords, workSchedules, saveAttendanceSnapshot]);
 
     // 2b. Lưu tự động khi có thay đổi state với Debounce
+    const autoSavePrimedRef = useRef(false);
     useEffect(() => {
         if (isAttendanceUiTest) return;
         if (!isDbLoaded || !isBackgroundSyncComplete) return; // Chờ đối soát nền để snapshot cũ không ghi đè DB
         if (employees.length === 0) return; // Chưa có data employees → không ghi đè DB
+
+        // The first state transition after the initial snapshot/reconciliation
+        // is already represented by the backend response. Do not immediately
+        // serialize the 12 MB attendance document again on page load.
+        if (!autoSavePrimedRef.current) {
+            autoSavePrimedRef.current = true;
+            return;
+        }
 
         const snapshot = { config, bonusAuditLog, extraBonuses, extraFundTx, fundAuditLog, extraFines, fineOverrides, fineAuditLog, fineWaivers, lockedPeriods, payrollOverrides, gmailSentLog, leaveRecords, workSchedules };
 
@@ -4762,10 +4850,20 @@ export default function Attendance() {
 
     // Các bảng công/phạt/lương vẫn mở theo tháng. Riêng tab Đóng gói có
     // bộ lọc tuần độc lập để không làm thay đổi kỳ lương đang xem.
-    const [overviewDateRange, setOverviewDateRange] = useState<AttendancePeriod>([
-        dayjs().startOf('month'),
-        dayjs().endOf('month'),
-    ]);
+    const payrollViewCacheKey = buildPayrollViewCacheKey(
+        `${overviewDateRange[0].format('YYYY-MM-DD')}:${overviewDateRange[1].format('YYYY-MM-DD')}`,
+        normalizeAttendanceText(user?.username || currentUser || (isAdmin ? 'admin' : 'staff')),
+    );
+    const [cachedPayrollData, setCachedPayrollData] = useState<any[] | null>(null);
+    const [cachedPayrollSavedAt, setCachedPayrollSavedAt] = useState<number | null>(null);
+    useEffect(() => {
+        try {
+            const raw = JSON.parse(window.localStorage.getItem(payrollViewCacheKey) || 'null');
+            const rows = readPayrollViewCache(payrollViewCacheKey);
+            setCachedPayrollData(rows);
+            setCachedPayrollSavedAt(rows && raw?.savedAt ? raw.savedAt : null);
+        } catch { setCachedPayrollData(null); setCachedPayrollSavedAt(null); }
+    }, [payrollViewCacheKey]);
     const [packingDateRange, setPackingDateRange] = useState<AttendancePeriod>(() => {
         const start = getPackingWeekStart(dayjs());
         return [start, start.add(6, 'day').endOf('day')];
@@ -4835,6 +4933,11 @@ export default function Attendance() {
                     }
                     : { success: false, error: 'Ứng dụng chưa có API thưởng doanh số. Vui lòng khởi động lại app.' };
             if (!response?.success || !response.data) throw new Error(response?.error || 'Không tải được thưởng doanh số.');
+            const moneyFields = ['rate', 'grossRevenue', 'excludedRevenue', 'eligibleRevenue', 'bonusAmount'];
+            if (moneyFields.some(field => typeof response.data[field] !== 'number'
+                || !Number.isFinite(response.data[field]) || response.data[field] < 0)) {
+                throw new Error('Dữ liệu thưởng doanh thu chưa đầy đủ. Vui lòng khởi động lại app và đối soát lại.');
+            }
             const normalized: SalesBonusSummary = {
                 ...EMPTY_SALES_BONUS_SUMMARY,
                 ...response.data,
@@ -4868,9 +4971,10 @@ export default function Attendance() {
         // Sales bonus is an independent aggregate over orders/returns/refunds;
         // do not wait for the slower attendance-fine reconciliation before
         // starting it on the overview tab.
+        if (isSelectedPeriodLocked) return;
         if (activeTab !== 'overview' && activeTab !== 'bonuses') return;
         void loadSalesBonusSummary(overviewDateRange).catch(() => undefined);
-    }, [activeTab, loadSalesBonusSummary, overviewDateRange]);
+    }, [activeTab, isSelectedPeriodLocked, loadSalesBonusSummary, overviewDateRange]);
 
     const [packingOrderLogsData, setPackingOrderLogsData] = useState<PackingOrderLog[]>([]);
     const [packingRewardNow, setPackingRewardNow] = useState(() => dayjs());
@@ -5398,7 +5502,9 @@ export default function Attendance() {
     const [overviewAttendanceLogs, setOverviewAttendanceLogs] = useState<any[]>([]);
     const [overviewAttendanceLogsKey, setOverviewAttendanceLogsKey] = useState('');
     const [overviewAttendanceLoadError, setOverviewAttendanceLoadError] = useState('');
+    const [overviewAttendanceLoading, setOverviewAttendanceLoading] = useState(false);
     const overviewAttendanceRequestRef = useRef(0);
+    const overviewAttendancePendingRequestRef = useRef<{ month: string; promise: Promise<void> } | null>(null);
     const attendanceMatrixWrapRef = useRef<HTMLDivElement | null>(null);
 
     // === State cho đóng gói + lịch sử ===
@@ -5411,6 +5517,10 @@ export default function Attendance() {
 
     useEffect(() => {
         if (!isDbLoaded) return;
+        if (isSelectedPeriodLocked) {
+            setAttendanceRewardReadyKey(attendanceRewardPeriodKey);
+            return;
+        }
         let cancelled = false;
         const loadAttendanceRewardSummary = async () => {
             const api = (window as any).electronAPI;
@@ -5472,7 +5582,7 @@ export default function Attendance() {
         setAttendanceRewardReadyKey('');
         void loadAttendanceRewardSummary();
         return () => { cancelled = true; };
-    }, [attendanceRewardPeriodKey, attendanceRewardRefreshKey, isAttendanceUiTest, isDbLoaded]);
+    }, [attendanceRewardPeriodKey, attendanceRewardRefreshKey, isAttendanceUiTest, isDbLoaded, isSelectedPeriodLocked]);
 
     const fineSourcesRangeKey = `${overviewDateRange[0].startOf('day').valueOf()}-${overviewDateRange[1].endOf('day').valueOf()}-${isAdmin ? 'admin' : 'user'}`;
     const areFineSourcesReady = isBackgroundSyncComplete && fineSourcesReadyKey === fineSourcesRangeKey;
@@ -5509,6 +5619,10 @@ export default function Attendance() {
     useEffect(() => {
         if (!isDbLoaded) return;
         if (activeTab !== 'overview' && activeTab !== 'fines') return;
+        if (isSelectedPeriodLocked) {
+            setFineSourcesReadyKey(fineSourcesRangeKey);
+            return;
+        }
         fineSourcesRangeKeyRef.current = fineSourcesRangeKey;
         // Supporting indicators are not needed for the first overview paint.
         // Yield once so the shell and primary attendance data render first.
@@ -5537,23 +5651,25 @@ export default function Attendance() {
             window.clearTimeout(deferredLoad);
             window.clearInterval(taskTrackingTimer);
         };
-    }, [isDbLoaded, overviewDateRange, activeTab, fineSourcesRangeKey, logFinesPerf]);
+    }, [isDbLoaded, overviewDateRange, activeTab, fineSourcesRangeKey, isSelectedPeriodLocked, logFinesPerf]);
 
-    // Packing is independent from the auxiliary fine sources, but summarized
-    // income needs the catalog's parent/variant SKU expansion before calculation.
+    // Show a provisional summary while the catalog loads. Final payroll still
+    // requires the complete SKU expansion and its matching policy revision.
     useEffect(() => {
-        // The summary endpoint computes historical commission values in the
-        // main process, so wait for the active history and complete SKU mapping.
-        if (activeTab !== 'overview' || !isCoreSnapshotReady || !packingCatalogReady) return;
+        if (activeTab !== 'overview' || isSelectedPeriodLocked || !isCoreSnapshotReady) return;
+        // Start the server-side payroll summary as soon as the core snapshot
+        // is ready. The catalog still triggers a follow-up refresh when its
+        // SKU expansion changes the commission policy, but it no longer blocks
+        // the first money paint.
         void loadPackingOrders(getPackingLoadStart(overviewDateRange[0]).toISOString(), { range: overviewDateRange, summaryOnly: true });
-    }, [activeTab, isCoreSnapshotReady, overviewDateRange, packingPolicyKey, packingCatalogReady]);
+    }, [activeTab, isCoreSnapshotReady, isSelectedPeriodLocked, overviewDateRange, packingPolicyKey, packingCatalogReady]);
 
     // Đóng gói dùng khoảng tuần riêng; không thay đổi kỳ tháng của các tab còn lại.
     useEffect(() => {
         if (!isDbLoaded || activeTab !== 'packaging') return;
         const timer = window.setTimeout(() => {
             void loadPackingOrders(undefined, { range: packingDateRange, includeComparison: true });
-        }, 900);
+        }, 0);
         return () => window.clearTimeout(timer);
     }, [isDbLoaded, activeTab, packingDateRange]);
 
@@ -5810,6 +5926,8 @@ export default function Attendance() {
                 normalizeAttendanceText(emp.username) === normalizeAttendanceText(RETURN_OVERDUE_RESPONSIBLE_USERNAME)
             );
             if (!employee) return [];
+            const account = systemUsers.find((item: any) => normalizeAttendanceText(item?.username) === normalizeAttendanceText(employee.username));
+            const resignationDate = account?.employmentStatus === 'resigned' && account.resignationDate ? dayjs(account.resignationDate) : null;
             const complaintCode = record.complaintCode || record.returnCode || `#${record.id}`;
 
             return Array.from({ length: fineStage }, (_, index) => {
@@ -5824,9 +5942,10 @@ export default function Attendance() {
                     date: penaltyDate.toISOString(),
                     source: 'returns_overdue' as any,
                 };
-            }).filter(fine => inOverviewRange(fine.date));
+            }).filter(fine => inOverviewRange(fine.date)
+                && (!resignationDate || !resignationDate.isValid() || dayjs(fine.date).isBefore(resignationDate, 'day')));
         });
-    }, [employees, returnOverdueTracking, overviewDateRange]);
+    }, [employees, returnOverdueTracking, overviewDateRange, systemUsers]);
 
     // Reconcile persisted return fines with the working-day schedule. This
     // removes rows previously created on Sundays/holidays and gives corrected
@@ -5896,6 +6015,8 @@ export default function Attendance() {
                 normalizeAttendanceText(emp.username) === normalizeAttendanceText(REFUND_OVERDUE_RESPONSIBLE_USERNAME)
             );
             if (!employee) return [];
+            const account = systemUsers.find((item: any) => normalizeAttendanceText(item?.username) === normalizeAttendanceText(employee.username));
+            const resignationDate = account?.employmentStatus === 'resigned' && account.resignationDate ? dayjs(account.resignationDate) : null;
             const refundCode = record.refundCode || record.orderNumber || `#${record.id}`;
             const orderSuffix = record.orderNumber && record.orderNumber !== refundCode
                 ? ` - đơn ${record.orderNumber}`
@@ -5913,9 +6034,10 @@ export default function Attendance() {
                     date: penaltyDate.toISOString(),
                     source: 'refunds_overdue' as any,
                 };
-            }).filter(fine => inOverviewRange(fine.date));
+            }).filter(fine => inOverviewRange(fine.date)
+                && (!resignationDate || !resignationDate.isValid() || dayjs(fine.date).isBefore(resignationDate, 'day')));
         });
-    }, [employees, refundOverdueTracking, overviewDateRange]);
+    }, [employees, refundOverdueTracking, overviewDateRange, systemUsers]);
 
     // Persist each chargeable day as a historical deduction. Completing or
     // receiving the parcel stops future stages without erasing prior fines.
@@ -6221,6 +6343,22 @@ export default function Attendance() {
             && d.isBefore(packingDateRange[1].endOf('day').add(1, 'ms'));
     }
 
+    const employmentEndDates = useMemo(() => Object.fromEntries(
+        systemUsers
+            .filter((item: any) => item?.employmentStatus === 'resigned' && item?.resignationDate)
+            .map((item: any) => [normalizeAttendanceText(item.username), String(item.resignationDate)])
+    ), [systemUsers]);
+    const hiddenEmployeeKeys = useMemo(() => new Set(
+        systemUsers
+            .filter((item: any) => item?.archived || item?.employmentStatus === 'resigned')
+            .flatMap((item: any) => [
+                normalizeAttendanceText(item.username),
+                normalizeAttendanceText(item.fullName),
+                item.id != null ? `id:${Number(item.id)}` : '',
+            ])
+            .filter(Boolean)
+    ), [systemUsers]);
+
     // August 2026 policy: keep history intact, but deduct only late-arrival fines.
     const liveOverviewFines = useMemo(
         () => allFines.filter(f => inOverviewRange(f.date) && !isAugust2026WaivedFine(f)),
@@ -6239,19 +6377,20 @@ export default function Attendance() {
             && timestamp.isBefore(packingComparisonRange[1].endOf('day').add(1, 'ms'));
     }), [activeTab, packingOrderLogsData, packingComparisonRange]);
     const liveWeeklyPackingResults = useMemo(
-        () => buildPackingWeeklyResults(packingOrderLogsData, employees, packingRewardNow),
-        [packingOrderLogsData, employees, packingRewardNow]
+        () => buildPackingWeeklyResults(packingOrderLogsData, employees, packingRewardNow, employmentEndDates),
+        [packingOrderLogsData, employees, packingRewardNow, employmentEndDates]
     );
     const packingWeeklyResults = useMemo(
-        () => activeTab === 'packaging' ? buildPackingWeeklyResults(livePackingLogs, employees, packingRewardNow) : [],
-        [activeTab, livePackingLogs, employees, packingRewardNow]
+        () => activeTab === 'packaging' ? buildPackingWeeklyResults(livePackingLogs, employees, packingRewardNow, employmentEndDates) : [],
+        [activeTab, livePackingLogs, employees, packingRewardNow, employmentEndDates]
     );
     const liveOverviewWeeklyBonuses = useMemo(() => liveWeeklyPackingResults
-        .map(packingWeeklyResultToBonus)
+        .map(result => packingWeeklyResultToBonus(result, employmentEndDates))
         .filter((bonus): bonus is BonusRecord => Boolean(bonus) && inOverviewRange(bonus.date)),
-    [liveWeeklyPackingResults, overviewDateRange]);
+    [liveWeeklyPackingResults, overviewDateRange, employmentEndDates]);
     const liveOverviewAttendanceBonuses = useMemo(() => attendanceRewardSummaries
         .filter(summary => summary.periodKey === attendanceRewardPeriodKey && summary.monthly.qualified && summary.monthly.rewardAmount > 0)
+        .filter(summary => !hiddenEmployeeKeys.has(`id:${Number(summary.employeeId)}`))
         .map(summary => ({
             id: `auto-attendance-month-${summary.employeeId}-${summary.periodKey}`,
             empId: summary.employeeId,
@@ -6262,7 +6401,7 @@ export default function Attendance() {
             createdBy: 'system',
             createdByName: 'Hệ thống chấm công',
         } satisfies BonusRecord)),
-    [attendanceRewardPeriodKey, attendanceRewardSummaries]);
+    [attendanceRewardPeriodKey, attendanceRewardSummaries, hiddenEmployeeKeys]);
     const liveOverviewBonusesWithWeekly = useMemo(() => {
         const manualIds = new Set(liveOverviewBonuses.map(bonus => bonus.id));
         const weekly = liveOverviewWeeklyBonuses.filter(bonus => !manualIds.has(bonus.id));
@@ -6271,15 +6410,29 @@ export default function Attendance() {
         return [...liveOverviewBonuses, ...weekly, ...attendance];
     }, [liveOverviewAttendanceBonuses, liveOverviewBonuses, liveOverviewWeeklyBonuses]);
 
-    const currentLockedPeriod = useMemo(() => lockedPeriods.find(lp =>
-        dayjs(lp.start).isSame(overviewDateRange[0], 'day') &&
-        dayjs(lp.end).isSame(overviewDateRange[1], 'day')
-    ), [lockedPeriods, overviewDateRange]);
+    const currentLockedPeriod = selectedLockedPeriod;
     useEffect(() => {
-        if (!isDbLoaded || !currentLockedPeriod || currentLockedPeriod.payrollSnapshot) return;
+        if (!isDbLoaded || !currentLockedPeriod) return;
+        const requestKey = buildLockedPayrollSnapshotKey(currentLockedPeriod.start, currentLockedPeriod.end);
+        const lockIdentity = getLockedPeriodIdentity(currentLockedPeriod);
+        if (currentLockedPeriod.payrollSnapshot) {
+            lockedPayrollSnapshotCache.set(requestKey, {
+                lockIdentity,
+                snapshot: currentLockedPeriod.payrollSnapshot,
+            });
+            return;
+        }
+        const cached = lockedPayrollSnapshotCache.get(requestKey);
+        if (cached?.lockIdentity === lockIdentity && cached.snapshot) {
+            setLockedPeriods(current => current.map(item => (
+                item.start === currentLockedPeriod.start && item.end === currentLockedPeriod.end
+                    ? { ...item, payrollSnapshot: cached.snapshot }
+                    : item
+            )));
+            return;
+        }
         const api = (window as any).electronAPI;
         if (!api?.attendance?.getLockedPeriodSnapshot) return;
-        const requestKey = `${currentLockedPeriod.start}|${currentLockedPeriod.end}`;
         if (lockedSnapshotRequestsRef.current.has(requestKey)) return;
         lockedSnapshotRequestsRef.current.add(requestKey);
         let cancelled = false;
@@ -6293,6 +6446,10 @@ export default function Attendance() {
             if (!result?.success || !period?.payrollSnapshot) {
                 throw new Error(result?.error || 'Kỳ đã khóa chưa có snapshot lương an toàn.');
             }
+            lockedPayrollSnapshotCache.set(requestKey, {
+                lockIdentity,
+                snapshot: period.payrollSnapshot,
+            });
             setLockedPeriods(current => current.map(item => (
                 item.start === currentLockedPeriod.start && item.end === currentLockedPeriod.end
                     ? { ...item, payrollSnapshot: period.payrollSnapshot }
@@ -6300,6 +6457,8 @@ export default function Attendance() {
             )));
         }).catch((error: any) => {
             if (!cancelled) setLockedSnapshotError(error?.message || String(error));
+        }).finally(() => {
+            lockedSnapshotRequestsRef.current.delete(requestKey);
         });
         return () => { cancelled = true; };
     }, [currentLockedPeriod, isDbLoaded]);
@@ -6360,7 +6519,15 @@ export default function Attendance() {
             score.trend = score.orderCount - (previousOrderCounts.get(score.employee.id) || 0);
         });
 
-        const leaderboard = [...employeeScores.values()]
+        // Hide former employees only from the standings. Keep their orders
+        // and contributions in the historical log and company totals.
+        const allScores = [...employeeScores.values()];
+        const leaderboard = allScores
+            .filter(score => (
+                !hiddenEmployeeKeys.has(normalizeAttendanceText(score.employee.username))
+                && !hiddenEmployeeKeys.has(normalizeAttendanceText(score.employee.name))
+                && !hiddenEmployeeKeys.has(`id:${Number((score.employee as any).userId)}`)
+            ))
             .map(score => ({ ...score.employee, ...score }))
             .sort((a, b) => b.orderCount - a.orderCount || b.units - a.units || a.id - b.id);
 
@@ -6369,10 +6536,10 @@ export default function Attendance() {
             tableRows: livePackingLogs,
             leaderboard,
             totalOrders: livePackingLogs.length,
-            totalUnits: leaderboard.reduce((sum, entry) => sum + entry.units, 0),
-            totalIncome: leaderboard.reduce((sum, entry) => sum + entry.income, 0),
+            totalUnits: allScores.reduce((sum, entry) => sum + entry.units, 0),
+            totalIncome: allScores.reduce((sum, entry) => sum + entry.income, 0),
         };
-    }, [activeTab, employees, packingDateRange, livePackingLogs, livePackingTrendLogs, packingCommission]);
+    }, [activeTab, employees, hiddenEmployeeKeys, packingDateRange, livePackingLogs, livePackingTrendLogs, packingCommission]);
     const overviewWareHousePacking = useMemo(() => {
         let totalUnits = 0;
         overviewPackingLogs.forEach(order => {
@@ -6391,7 +6558,7 @@ export default function Attendance() {
     const isPackingDataReady = packingReadyKey === packingExpectedKey
         && packingReadyPolicy === packingPolicyKey
         && !packingLoadError
-        && (activeTab !== 'packaging' || packingCatalogReady);
+        && packingCatalogReady;
     const isPayrollDataReady = isCoreSnapshotReady && (isCurrentPeriodLocked
         ? Boolean(lockedPayrollSnapshot)
         : (overviewAttendanceReady && areFineSourcesReady && isPackingDataReady && attendanceRewardReadyKey === attendanceRewardPeriodKey && salesBonusReadyKey === salesBonusExpectedKey));
@@ -6409,11 +6576,11 @@ export default function Attendance() {
             sales: salesBonusReadyKey === salesBonusExpectedKey,
         }));
     }, [activeTab, isPayrollDataReady, isCoreSnapshotReady, overviewAttendanceReady, areFineSourcesReady, packingCatalogReady, isPackingDataReady, attendanceRewardReadyKey, attendanceRewardPeriodKey, salesBonusReadyKey, salesBonusExpectedKey]);
-    const employmentEndDates = useMemo(() => Object.fromEntries(
-        systemUsers
-            .filter((item: any) => item?.employmentStatus === 'resigned' && item?.resignationDate)
-            .map((item: any) => [normalizeAttendanceText(item.username), String(item.resignationDate)])
-    ), [systemUsers]);
+    const visibleEmployees = useMemo(() => employees.filter((employee: any) => (
+        !hiddenEmployeeKeys.has(normalizeAttendanceText(employee.username))
+        && !hiddenEmployeeKeys.has(normalizeAttendanceText(employee.name))
+        && !hiddenEmployeeKeys.has(`id:${Number(employee.userId)}`)
+    )), [employees, hiddenEmployeeKeys]);
     const activeEmployeesForNewRecords = useMemo(() => employees.filter(emp =>
         !employmentEndDates[normalizeAttendanceText(emp.username)]
     ), [employees, employmentEndDates]);
@@ -6433,12 +6600,32 @@ export default function Attendance() {
         console.info('[Attendance:compute] payroll ms:', Math.round(performance.now() - startedAt));
         return rows;
     }, [lockedPayrollSnapshot, isPayrollDataReady, overviewFines, leaveRecords, workSchedules, overviewWareHousePacking, employees, overviewBonuses, overviewAttendanceLogs, overviewDateRange, overviewPackingLogs, packingCommission, employmentEndDates, payrollOverrides, overviewAttendanceLogsReady, activeSalesBonusSummary.bonusAmount]);
+    const canUseCachedPayroll = !isPayrollDataReady && Boolean(cachedPayrollData?.length);
+    const displayPayrollData = useMemo(() => {
+        const source = canUseCachedPayroll ? cachedPayrollData! : payrollData;
+        return source.filter((row: any) => (
+            !hiddenEmployeeKeys.has(normalizeAttendanceText(row.username))
+            && !hiddenEmployeeKeys.has(normalizeAttendanceText(row.name))
+            && !hiddenEmployeeKeys.has(`id:${Number(row.userId)}`)
+            && !hiddenEmployeeKeys.has(`id:${Number(row.id)}`)
+        ));
+    }, [hiddenEmployeeKeys, cachedPayrollData, canUseCachedPayroll, payrollData]);
+    useEffect(() => {
+        if (activeTab !== 'overview' || !isPayrollDataReady || !payrollData.length) return;
+        const rows = isAdmin ? payrollData : payrollData.filter(row => {
+            const username = normalizeAttendanceText(user?.username || currentUser || '');
+            const name = normalizeAttendanceText(user?.fullName || '');
+            return (username && normalizeAttendanceText(row.username) === username)
+                || (name && normalizeAttendanceText(row.name) === name);
+        });
+        if (rows.length) { writePayrollViewCache(payrollViewCacheKey, rows); setCachedPayrollData(rows); setCachedPayrollSavedAt(Date.now()); }
+    }, [activeTab, currentUser, isAdmin, isPayrollDataReady, payrollData, payrollViewCacheKey, user?.fullName, user?.username]);
 
     function buildPayrollDataFromPackingLogs(orderLogs: PackingOrderLog[], bonusSummary: SalesBonusSummary = activeSalesBonusSummary) {
         const freshOverviewPackingLogs = orderLogs.filter(o => inOverviewRange(o.timestamp));
         const freshTotalUnits = freshOverviewPackingLogs.reduce((sum, order) => sum + calcPacksFromItems(order.items, order.timestamp), 0);
-        const freshWeeklyBonuses = buildPackingWeeklyResults(orderLogs, employees, packingRewardNow)
-            .map(packingWeeklyResultToBonus)
+        const freshWeeklyBonuses = buildPackingWeeklyResults(orderLogs, employees, packingRewardNow, employmentEndDates)
+            .map(result => packingWeeklyResultToBonus(result, employmentEndDates))
             .filter((bonus): bonus is BonusRecord => Boolean(bonus) && inOverviewRange(bonus.date));
         const manualBonusIds = new Set(liveOverviewBonusesWithWeekly.map(bonus => bonus.id));
         const freshBonuses = [...liveOverviewBonusesWithWeekly, ...freshWeeklyBonuses.filter(bonus => !manualBonusIds.has(bonus.id))];
@@ -6481,8 +6668,8 @@ export default function Attendance() {
         return canViewAllPayroll || matchesCurrentUserPayrollRow(row);
     }, [canViewAllPayroll, matchesCurrentUserPayrollRow]);
     const privatePayrollData = useMemo(
-        () => payrollData.filter(isCurrentUserPayrollRow),
-        [payrollData, isCurrentUserPayrollRow]
+        () => displayPayrollData.filter(isCurrentUserPayrollRow),
+        [displayPayrollData, isCurrentUserPayrollRow]
     );
     // Each payroll column has a different data dependency. Keeping one global
     // readiness flag here made fast, already-known amounts look like zeros
@@ -6493,12 +6680,12 @@ export default function Attendance() {
         && hasLockedPayrollSnapshot
         && (isCurrentPeriodLocked || row?.type !== 'Seasonal' || overviewAttendanceLogsReady)
     ), [hasLockedPayrollSnapshot, isCoreSnapshotReady, isCurrentPeriodLocked, overviewAttendanceLogsReady]);
-    const isPackingAmountReady = isCoreSnapshotReady && hasLockedPayrollSnapshot && isPackingDataReady;
+    const isPackingAmountReady = isCoreSnapshotReady && hasLockedPayrollSnapshot && (isCurrentPeriodLocked || isPackingDataReady);
     const isBonusAmountReady = isCoreSnapshotReady && hasLockedPayrollSnapshot && (
-        isPackingDataReady
+        isCurrentPeriodLocked || (isPackingDataReady
         &&
         attendanceRewardReadyKey === attendanceRewardPeriodKey
-        && salesBonusReadyKey === salesBonusExpectedKey
+        && salesBonusReadyKey === salesBonusExpectedKey)
     );
     const isFineAmountReady = isCoreSnapshotReady && hasLockedPayrollSnapshot && (
         isCurrentPeriodLocked || areFineSourcesReady
@@ -6506,6 +6693,15 @@ export default function Attendance() {
     const isLeaveAmountReady = isCoreSnapshotReady && hasLockedPayrollSnapshot && (
         isCurrentPeriodLocked || overviewAttendanceReady
     );
+    // Viewing a payslip is read-only and can use the current row snapshot.
+    // Do not make the user wait for every background source; finalization and
+    // export actions remain gated by isPayrollDataReady below.
+    const canOpenPayslip = isCoreSnapshotReady && hasLockedPayrollSnapshot;
+    useEffect(() => {
+        if (!canOpenPayslip || bulkSendProgress?.running || !payslipModal) return;
+        const updated = payrollData.find(row => isSameEmployeeId(row.id, payslipModal.id));
+        if (updated && updated !== payslipModal) setPayslipModal(updated);
+    }, [canOpenPayslip, bulkSendProgress?.running, payrollData, payslipModal]);
     const allBaseSalaryReady = privatePayrollData.every(row => isBaseSalaryAmountReady(row));
     useEffect(() => {
         if (!import.meta.env.DEV || activeTab !== 'overview') return;
@@ -6522,7 +6718,7 @@ export default function Attendance() {
     // reconciled. The value is explicitly marked as provisional; actions that
     // require a coherent payroll snapshot remain gated by isPayrollDataReady.
     const renderPayrollAmount = (value: number, ready: boolean, className = 'att-money-final') => (
-        ready
+        (ready || canUseCachedPayroll)
             ? <span className={className}>{fmt(value || 0)}</span>
             : <Tooltip title="Số tạm tính; hệ thống vẫn đang đối soát dữ liệu nền">
                 <span className={`${className} att-money-pending`}>
@@ -6531,15 +6727,15 @@ export default function Attendance() {
             </Tooltip>
     );
     const renderPendingValue = (content: string, ready: boolean, className: string) => (
-        <Tooltip title={ready ? undefined : 'Số tạm tính; hệ thống vẫn đang đối soát dữ liệu nền'}>
-            <span className={`${className}${ready ? '' : ' att-money-pending'}`}>
-                {content} {!ready && <SyncOutlined spin aria-label="Đang cập nhật" />}
+        <Tooltip title={(ready || canUseCachedPayroll) ? undefined : 'Số tạm tính; hệ thống vẫn đang đối soát dữ liệu nền'}>
+            <span className={`${className}${ready || canUseCachedPayroll ? '' : ' att-money-pending'}`}>
+                {content} {!ready && !canUseCachedPayroll && <SyncOutlined spin aria-label="Đang cập nhật" />}
             </span>
         </Tooltip>
     );
     const formatDeductionAmount = (value: number) => value > 0 ? `- ${fmtCompactMoney(value)}` : fmtCompactMoney(0);
     const renderFineAmount = (value: number, ready: boolean, className = 'att-money-red') => (
-        ready
+        (ready || canUseCachedPayroll)
             ? <span className={className}>{formatDeductionAmount(value)}</span>
             : <Tooltip title="Phạt tạm tính; hệ thống vẫn đang bổ sung các nguồn tự động">
                 <span className={`${className} att-money-pending`}>
@@ -6555,8 +6751,8 @@ export default function Attendance() {
         ) : renderPayrollAmount(value, ready)
     );
     const currentEmployeePayroll = useMemo(
-        () => payrollData.find(matchesCurrentUserPayrollRow),
-        [payrollData, matchesCurrentUserPayrollRow]
+        () => displayPayrollData.find(matchesCurrentUserPayrollRow),
+        [displayPayrollData, matchesCurrentUserPayrollRow]
     );
 
     // Totals cho Overview
@@ -6572,73 +6768,123 @@ export default function Attendance() {
     }, [payrollData]);
 
     // Tổng quát và Điểm danh đang dùng cùng kỳ, nên chỉ truy vấn log một lần.
-    const fetchMonthLogs = async () => {
+    const fetchMonthLogs = (): Promise<void> => {
         const monthStr = `${selectedYear}-${String(selectedMonth).padStart(2, '0')}`;
+        // Month-change and tab-entry effects can fire in the same render.
+        // Share their read instead of adding duplicate work to the DB queue.
+        if (overviewAttendancePendingRequestRef.current?.month === monthStr) {
+            return overviewAttendancePendingRequestRef.current.promise;
+        }
         const requestId = ++overviewAttendanceRequestRef.current;
-        setOverviewAttendanceLoadError('');
-        const api = (window as any).electronAPI;
-        if (!api?.attendance) {
-            const previewLogs = isAttendanceUiTest ? [
-                { id: 1, userId: 1, date: `${monthStr}-07`, timestamp: `${monthStr}-07T07:56:00+07:00`, checkType: 'morning_in', confidence: .98 },
-                { id: 2, userId: 1, date: `${monthStr}-07`, timestamp: `${monthStr}-07T13:33:00+07:00`, checkType: 'afternoon_in', confidence: .98 },
-                { id: 3, userId: 1, date: `${monthStr}-08`, timestamp: `${monthStr}-08T08:04:00+07:00`, checkType: 'morning_in', confidence: .97 },
-                { id: 4, userId: 2, date: `${monthStr}-07`, timestamp: `${monthStr}-07T08:03:00+07:00`, checkType: 'morning_in', confidence: .96 },
-                { id: 5, userId: 2, date: `${monthStr}-07`, timestamp: `${monthStr}-07T13:34:00+07:00`, checkType: 'afternoon_in', confidence: .96 },
-                { id: 6, userId: 2, date: `${monthStr}-08`, timestamp: `${monthStr}-08T08:12:00+07:00`, checkType: 'morning_in', confidence: .95 },
-                { id: 7, userId: 2, date: `${monthStr}-08`, timestamp: `${monthStr}-08T13:34:00+07:00`, checkType: 'afternoon_in', confidence: .95 },
-                { id: 8, userId: 3, date: `${monthStr}-09`, timestamp: `${monthStr}-09T08:03:00+07:00`, checkType: 'morning_in', confidence: .94 },
-            ] : [];
-            setLiveAttendanceLogs(previewLogs);
-            setOverviewAttendanceLogs(previewLogs);
-            setOverviewAttendanceLogsKey(monthStr);
-            return;
-        }
-
-        let lastError = '';
-        for (let attempt = 0; attempt < 2; attempt += 1) {
-            try {
-                const res = await api.attendance.getLogs({ month: monthStr });
-                if (!res?.success || !Array.isArray(res.data)) {
-                    throw new Error(res?.error || 'Dữ liệu điểm danh trả về không hợp lệ.');
+        const startedAt = performance.now();
+        const load = async () => {
+            setOverviewAttendanceLoading(true);
+            setOverviewAttendanceLoadError('');
+            console.info('[Attendance:logs:start]', JSON.stringify({ period: monthStr }));
+            const api = (window as any).electronAPI;
+            if (typeof api?.attendance?.getLogs !== 'function') {
+                if (!isAttendanceUiTest) {
+                    setOverviewAttendanceLogsKey('');
+                    setOverviewAttendanceLoading(false);
+                    setOverviewAttendanceLoadError('Không kết nối được dịch vụ chấm công. Vui lòng mở lại ứng dụng.');
+                    return;
                 }
-                const monthStart = dayjs(`${monthStr}-01`).startOf('day');
-                const yesterday = dayjs().subtract(1, 'day').startOf('day');
-                const monthEnd = monthStart.endOf('month').startOf('day');
-                const elapsedEnd = yesterday.isBefore(monthEnd, 'day') ? yesterday : monthEnd;
-                let hasElapsedWorkday = false;
-                for (let cursor = monthStart; !cursor.isAfter(elapsedEnd, 'day'); cursor = cursor.add(1, 'day')) {
-                    if (cursor.day() !== 0 && !isPublicHoliday(cursor)) {
-                        hasElapsedWorkday = true;
-                        break;
-                    }
-                }
-                if (res.data.length === 0 && employees.length > 0 && hasElapsedWorkday) {
-                    throw new Error(`Không nhận được bản ghi điểm danh tháng ${monthStr}.`);
-                }
-                if (requestId !== overviewAttendanceRequestRef.current) return;
-                setLiveAttendanceLogs(res.data);
-                setOverviewAttendanceLogs(res.data);
+                const previewLogs = isAttendanceUiTest ? [
+                    { id: 1, userId: 1, date: `${monthStr}-07`, timestamp: `${monthStr}-07T07:56:00+07:00`, checkType: 'morning_in', confidence: .98 },
+                    { id: 2, userId: 1, date: `${monthStr}-07`, timestamp: `${monthStr}-07T13:33:00+07:00`, checkType: 'afternoon_in', confidence: .98 },
+                    { id: 3, userId: 1, date: `${monthStr}-08`, timestamp: `${monthStr}-08T08:04:00+07:00`, checkType: 'morning_in', confidence: .97 },
+                    { id: 4, userId: 2, date: `${monthStr}-07`, timestamp: `${monthStr}-07T08:03:00+07:00`, checkType: 'morning_in', confidence: .96 },
+                    { id: 5, userId: 2, date: `${monthStr}-07`, timestamp: `${monthStr}-07T13:34:00+07:00`, checkType: 'afternoon_in', confidence: .96 },
+                    { id: 6, userId: 2, date: `${monthStr}-08`, timestamp: `${monthStr}-08T08:12:00+07:00`, checkType: 'morning_in', confidence: .95 },
+                    { id: 7, userId: 2, date: `${monthStr}-08`, timestamp: `${monthStr}-08T13:34:00+07:00`, checkType: 'afternoon_in', confidence: .95 },
+                    { id: 8, userId: 3, date: `${monthStr}-09`, timestamp: `${monthStr}-09T08:03:00+07:00`, checkType: 'morning_in', confidence: .94 },
+                ] : [];
+                setLiveAttendanceLogs(previewLogs);
+                setOverviewAttendanceLogs(previewLogs);
                 setOverviewAttendanceLogsKey(monthStr);
-                setOverviewAttendanceLoadError('');
+                setOverviewAttendanceLoading(false);
                 return;
-            } catch (err) {
-                lastError = err instanceof Error ? err.message : String(err);
-                if (attempt === 0) await new Promise(resolve => window.setTimeout(resolve, 300));
             }
-        }
 
-        if (requestId === overviewAttendanceRequestRef.current) {
-            // Không đánh dấu "ready" với mảng rỗng khi IPC lỗi: việc đó từng
-            // khiến toàn bộ ngày đã qua bị hiểu nhầm là nghỉ không phép.
-            setOverviewAttendanceLogsKey('');
-            setOverviewAttendanceLoadError(lastError || 'Không tải được dữ liệu điểm danh.');
-            console.error('Lỗi tải logs tháng:', lastError);
-        }
+            let lastError = '';
+            for (let attempt = 0; attempt < 2; attempt += 1) {
+                if (requestId !== overviewAttendanceRequestRef.current) return;
+                try {
+                    // An IPC/database promise can stall without rejecting. Bound
+                    // the wait so the error/retry controls remain usable; do not
+                    // turn a timeout into an empty successful attendance history.
+                    const res = await awaitPackingRequest<any>(
+                        api.attendance.getLogs({ month: monthStr }),
+                        `Lịch sử điểm danh tháng ${monthStr}`,
+                        15000,
+                    );
+                    if (!res?.success || !Array.isArray(res.data)) {
+                        throw new Error(res?.error || 'Dữ liệu điểm danh trả về không hợp lệ.');
+                    }
+                    const monthStart = dayjs(`${monthStr}-01`).startOf('day');
+                    const yesterday = dayjs().subtract(1, 'day').startOf('day');
+                    const monthEnd = monthStart.endOf('month').startOf('day');
+                    const elapsedEnd = yesterday.isBefore(monthEnd, 'day') ? yesterday : monthEnd;
+                    let hasElapsedWorkday = false;
+                    for (let cursor = monthStart; !cursor.isAfter(elapsedEnd, 'day'); cursor = cursor.add(1, 'day')) {
+                        if (cursor.day() !== 0 && !isPublicHoliday(cursor)) {
+                            hasElapsedWorkday = true;
+                            break;
+                        }
+                    }
+                    if (res.data.length === 0 && employees.length > 0 && hasElapsedWorkday) {
+                        throw new Error(`Không nhận được bản ghi điểm danh tháng ${monthStr}.`);
+                    }
+                    if (requestId !== overviewAttendanceRequestRef.current) return;
+                    setLiveAttendanceLogs(res.data);
+                    setOverviewAttendanceLogs(res.data);
+                    setOverviewAttendanceLogsKey(monthStr);
+                    setOverviewAttendanceLoadError('');
+                    setOverviewAttendanceLoading(false);
+                    console.info('[Attendance:logs]', JSON.stringify({ period: monthStr, rows: res.data.length, ms: Math.round(performance.now() - startedAt) }));
+                    return;
+                } catch (err) {
+                    if (requestId !== overviewAttendanceRequestRef.current) return;
+                    lastError = err instanceof Error ? err.message : String(err);
+                    if (lastError.includes('TIMEOUT')) {
+                        lastError = 'Máy chủ chấm công phản hồi quá lâu. Dữ liệu chưa tải được, không phải đã bị xóa. Bấm Tải lại để thử lại.';
+                    }
+                    if (attempt === 0) await new Promise(resolve => window.setTimeout(resolve, 300));
+                }
+            }
+
+            if (requestId === overviewAttendanceRequestRef.current) {
+                // Không đánh dấu "ready" với mảng rỗng khi IPC lỗi: việc đó từng
+                // khiến toàn bộ ngày đã qua bị hiểu nhầm là nghỉ không phép.
+                setOverviewAttendanceLogsKey('');
+                setOverviewAttendanceLoading(false);
+                setOverviewAttendanceLoadError(lastError || 'Không tải được dữ liệu điểm danh.');
+                console.error('Lỗi tải logs tháng:', lastError);
+            }
+        };
+        const promise = load().finally(() => {
+            if (overviewAttendancePendingRequestRef.current?.promise === promise) {
+                overviewAttendancePendingRequestRef.current = null;
+            }
+        });
+        overviewAttendancePendingRequestRef.current = { month: monthStr, promise };
+        return promise;
     };
 
     useEffect(() => {
-        if (isDbLoaded) fetchMonthLogs();
-    }, [selectedYear, selectedMonth, isDbLoaded]);
+        // The locked overview is rendered from its payroll snapshot. Delay
+        // the attendance-log month read until the user actually opens the
+        // detailed attendance tab.
+        if (isDbLoaded && (!isSelectedPeriodLocked || activeTab === 'attendance')) fetchMonthLogs();
+    }, [activeTab, isSelectedPeriodLocked, selectedYear, selectedMonth, isDbLoaded]);
+
+    // A failed read must be recoverable by reopening Điểm danh, without
+    // requiring a month change or a restart of the whole desktop app.
+    useEffect(() => {
+        if (activeTab === 'attendance' && isDbLoaded && !overviewAttendanceLogsReady && !overviewAttendanceLoading) {
+            void fetchMonthLogs();
+        }
+    }, [activeTab]);
 
     const daysInMonth = dayjs(`${selectedYear}-${selectedMonth}-01`).daysInMonth();
 
@@ -6687,7 +6933,7 @@ export default function Attendance() {
             logsByEmployee.set(matchedEmployee.id, rows);
         });
 
-        const matrix = employees.map(emp => {
+        const matrix = visibleEmployees.map(emp => {
             const monthData = Array.from({ length: daysInMonth }).map((_, i) => {
                 const currentDay = dayjs(`${selectedYear}-${selectedMonth}-${i + 1}`, 'YYYY-M-D');
                 const dateStr = currentDay.format('YYYY-MM-DD');
@@ -6739,12 +6985,12 @@ export default function Attendance() {
         });
         console.info('[Attendance:compute] matrix ms:', Math.round(performance.now() - startedAt));
         return matrix;
-    }, [activeTab, employees, liveAttendanceLogs, daysInMonth, selectedMonth, selectedYear, config, workSchedules, leaveRecords]);
+    }, [activeTab, employees, visibleEmployees, liveAttendanceLogs, daysInMonth, selectedMonth, selectedYear, config, workSchedules, leaveRecords]);
 
     // Employee attendance stats
     const employeeStats = useMemo(() => {
         if (activeTab !== 'attendance') return [];
-        return employees.map((emp, idx) => {
+        return visibleEmployees.map((emp, idx) => {
             let lateCount = 0, absentCount = 0, shiftCount = 0;
             if (liveAttendanceMatrix[idx]) {
                 liveAttendanceMatrix[idx].forEach((d, dayIdx) => {
@@ -6763,7 +7009,7 @@ export default function Attendance() {
             }
             return { ...emp, lateCount, absentCount, shiftCount };
         });
-    }, [activeTab, employees, liveAttendanceMatrix, selectedMonth, selectedYear, isAttendanceSessionDue]);
+    }, [activeTab, visibleEmployees, liveAttendanceMatrix, selectedMonth, selectedYear, isAttendanceSessionDue]);
 
     // Fund totals
     const fundTotals = useMemo(() => {
@@ -7236,21 +7482,31 @@ const openConfigModal = () => {
             message.error('Không tìm thấy khoản phạt cần xóa. Vui lòng tải lại bảng công.');
             return;
         }
+        const employeeName = employees.find(e => e.id === fine.empId)?.name || 'Nhân viên';
+        const fineDetail = String(fine.detail || '').trim();
+        const compactDetail = fineDetail.length > 140 ? `${fineDetail.slice(0, 137)}…` : fineDetail;
         Modal.confirm({
+            className: 'attendance-fine-delete-confirm',
             title: 'Xác nhận xóa khoản phạt',
+            width: 520,
+            centered: true,
+            maskClosable: false,
             icon: <ExclamationCircleOutlined style={{ color: '#ff4d4f' }} />,
             content: (
                 <div>
                     <p>Bạn có chắc muốn xóa khoản phạt này?</p>
                     <div style={{ padding: '8px 12px', background: '#fff1f0', borderRadius: 8, border: '1px solid #ffccc7' }}>
-                        <Text strong>{employees.find(e => e.id === fine.empId)?.name}</Text>
-                        <div><Text type="secondary">{fine.type}: {fine.detail} — {fmt(fine.amount)}</Text></div>
+                        <Text strong>{employeeName}</Text>
+                        <div style={{ maxHeight: 96, overflowY: 'auto', overflowWrap: 'anywhere' }}><Text type="secondary">{fine.type}: {compactDetail} — {fmt(fine.amount)}</Text></div>
                     </div>
                 </div>
             ),
             okText: 'Xóa phạt',
             cancelText: 'Hủy',
             okType: 'danger' as const,
+            autoFocusButton: 'ok',
+            okButtonProps: { size: 'large', style: { minWidth: 112, minHeight: 40, fontWeight: 700 } },
+            cancelButtonProps: { size: 'large', style: { minWidth: 80, minHeight: 40 } },
             onOk: async () => {
                 const api = (window as any).electronAPI;
                 if (!api?.attendance?.deleteFine) {
@@ -7262,17 +7518,34 @@ const openConfigModal = () => {
                     kind: 'manual',
                     fine,
                     fineId: fine.id,
-                    audit: { note: 'Xóa khoản phạt: ' + (employees.find(e => e.id === fine.empId)?.name || '') + ' — ' + fmt(fine.amount) + ' — "' + fine.detail + '"' },
+                    audit: { note: 'Xóa khoản phạt: ' + employeeName + ' — ' + fmt(fine.amount) + ' — "' + fine.detail + '"' },
                 });
                 if (!result?.success || !result.data) {
                     const error = result?.error || 'Không xóa được khoản phạt khỏi database.';
                     message.error(error);
                     throw new Error(error);
                 }
-                setExtraFines((result.data.extraFines || []).map((item: FineRecord, index: number) => ensureFineId(item, index)));
-                setFineOverrides(result.data.fineOverrides || {});
-                setFineAuditLog(result.data.fineAuditLog || []);
-                if (latestSnapshotRef.current) latestSnapshotRef.current = { ...(latestSnapshotRef.current as Record<string, any>), ...result.data };
+                if (Array.isArray(result.data.extraFines)) {
+                    setExtraFines((result.data.extraFines || []).map((item: FineRecord, index: number) => ensureFineId(item, index)));
+                    setFineOverrides(result.data.fineOverrides || {});
+                    setFineAuditLog(result.data.fineAuditLog || []);
+                    if (latestSnapshotRef.current) latestSnapshotRef.current = { ...(latestSnapshotRef.current as Record<string, any>), ...result.data };
+                } else {
+                    const deletedId = String(result.data.fineId || fine.id || '');
+                    const audit = result.data.audit;
+                    setExtraFines((current) => current.filter((item) => String(item?.id || '') !== deletedId));
+                    setFineAuditLog((current) => audit?.id && !current.some((entry) => String(entry?.id || '') === String(audit.id)) ? [...current, audit] : current);
+                    if (latestSnapshotRef.current) {
+                        const snapshot = latestSnapshotRef.current as Record<string, any>;
+                        latestSnapshotRef.current = {
+                            ...snapshot,
+                            extraFines: (snapshot.extraFines || []).filter((item: FineRecord) => String(item?.id || '') !== deletedId),
+                            fineAuditLog: audit?.id && !(snapshot.fineAuditLog || []).some((entry: any) => String(entry?.id || '') === String(audit.id))
+                                ? [...(snapshot.fineAuditLog || []), audit]
+                                : (snapshot.fineAuditLog || []),
+                        };
+                    }
+                }
                 message.success('Đã xóa khoản phạt (Đã lưu lịch sử)!');
             },
         });
@@ -7305,21 +7578,31 @@ const openConfigModal = () => {
         }
 
         if (!record.overrideKey) return;
+        const employeeName = employees.find(e => e.id === record.empId)?.name || 'Nhân viên';
+        const fineDetail = String(record.detail || '').trim();
+        const compactDetail = fineDetail.length > 140 ? `${fineDetail.slice(0, 137)}…` : fineDetail;
         Modal.confirm({
+            className: 'attendance-fine-delete-confirm',
             title: 'Xác nhận xóa khoản phạt hệ thống',
+            width: 520,
+            centered: true,
+            maskClosable: false,
             icon: <ExclamationCircleOutlined style={{ color: '#ff4d4f' }} />,
             content: (
                 <div>
                     <p>Khoản phạt này được tạo tự động. Khi xóa, hệ thống sẽ ẩn khoản này khỏi Bảng công và lương tháng.</p>
                     <div style={{ padding: '8px 12px', background: '#fff1f0', borderRadius: 8, border: '1px solid #ffccc7' }}>
-                        <Text strong>{employees.find(e => e.id === record.empId)?.name}</Text>
-                        <div><Text type="secondary">{record.type}: {record.detail} — {fmt(record.amount)}</Text></div>
+                        <Text strong>{employeeName}</Text>
+                        <div style={{ maxHeight: 96, overflowY: 'auto', overflowWrap: 'anywhere' }}><Text type="secondary">{record.type}: {compactDetail} — {fmt(record.amount)}</Text></div>
                     </div>
                 </div>
             ),
             okText: 'Xóa phạt',
             cancelText: 'Hủy',
             okType: 'danger' as const,
+            autoFocusButton: 'ok',
+            okButtonProps: { size: 'large', style: { minWidth: 112, minHeight: 40, fontWeight: 700 } },
+            cancelButtonProps: { size: 'large', style: { minWidth: 80, minHeight: 40 } },
             onOk: async () => {
                 const disabledFine: FineRecord = {
                     empId: record.empId,
@@ -7341,17 +7624,35 @@ const openConfigModal = () => {
                     kind: 'system',
                     fine: disabledFine,
                     overrideKey: record.overrideKey,
-                    audit: { note: 'Xóa khoản phạt hệ thống: ' + (employees.find(e => e.id === record.empId)?.name || '') + ' — ' + fmt(record.amount) + ' — "' + record.detail + '"' },
+                    audit: { note: 'Xóa khoản phạt hệ thống: ' + employeeName + ' — ' + fmt(record.amount) + ' — "' + record.detail + '"' },
                 });
                 if (!result?.success || !result.data) {
                     const error = result?.error || 'Không xóa được khoản phạt khỏi database.';
                     message.error(error);
                     throw new Error(error);
                 }
-                setExtraFines((result.data.extraFines || []).map((item: FineRecord, index: number) => ensureFineId(item, index)));
-                setFineOverrides(result.data.fineOverrides || {});
-                setFineAuditLog(result.data.fineAuditLog || []);
-                if (latestSnapshotRef.current) latestSnapshotRef.current = { ...(latestSnapshotRef.current as Record<string, any>), ...result.data };
+                if (Array.isArray(result.data.extraFines)) {
+                    setExtraFines((result.data.extraFines || []).map((item: FineRecord, index: number) => ensureFineId(item, index)));
+                    setFineOverrides(result.data.fineOverrides || {});
+                    setFineAuditLog(result.data.fineAuditLog || []);
+                    if (latestSnapshotRef.current) latestSnapshotRef.current = { ...(latestSnapshotRef.current as Record<string, any>), ...result.data };
+                } else {
+                    const overrideKey = String(result.data.overrideKey || record.overrideKey || '');
+                    const savedDisabledFine = result.data.disabledFine || disabledFine;
+                    const audit = result.data.audit;
+                    setFineOverrides((current) => overrideKey ? { ...current, [overrideKey]: savedDisabledFine } : current);
+                    setFineAuditLog((current) => audit?.id && !current.some((entry) => String(entry?.id || '') === String(audit.id)) ? [...current, audit] : current);
+                    if (latestSnapshotRef.current) {
+                        const snapshot = latestSnapshotRef.current as Record<string, any>;
+                        latestSnapshotRef.current = {
+                            ...snapshot,
+                            fineOverrides: overrideKey ? { ...(snapshot.fineOverrides || {}), [overrideKey]: savedDisabledFine } : (snapshot.fineOverrides || {}),
+                            fineAuditLog: audit?.id && !(snapshot.fineAuditLog || []).some((entry: any) => String(entry?.id || '') === String(audit.id))
+                                ? [...(snapshot.fineAuditLog || []), audit]
+                                : (snapshot.fineAuditLog || []),
+                        };
+                    }
+                }
                 message.success('Đã xóa khoản phạt hệ thống khỏi Bảng công.');
             },
         });
@@ -7591,54 +7892,76 @@ const openConfigModal = () => {
             cancelText: 'Hủy',
             okType: 'primary',
             onOk: async () => {
-                const api = (window as any).electronAPI;
-                if (!api?.attendance?.updatePayrollLock) {
-                    throw new Error('Ứng dụng chưa có API khóa bảng lương an toàn. Vui lòng khởi động lại app.');
-                }
-                const [freshPackingLogs, freshSalesBonusSummary] = await Promise.all([
-                    loadPackingOrders(getPackingLoadStart(overviewDateRange[0]).toISOString(), { strict: true, range: overviewDateRange }),
-                    loadSalesBonusSummary(overviewDateRange, { force: true }),
-                ]);
-                const freshOverviewPackingLogs = freshPackingLogs.filter(o => inOverviewRange(o.timestamp));
-                const snapshottedPackingLogs = freshOverviewPackingLogs.map(order => snapshotPackingOrder(order, packingCommission));
-                const freshPayrollRows = buildPayrollDataFromPackingLogs(freshPackingLogs, freshSalesBonusSummary);
-                const freshWeeklyBonuses = buildPackingWeeklyResults(freshPackingLogs, employees, packingRewardNow)
-                    .map(packingWeeklyResultToBonus)
-                    .filter((bonus): bonus is BonusRecord => Boolean(bonus) && inOverviewRange(bonus.date));
-                const manualBonusIds = new Set(liveOverviewBonusesWithWeekly.map(bonus => bonus.id));
-                const snapshottedBonuses = [...liveOverviewBonusesWithWeekly, ...freshWeeklyBonuses.filter(bonus => !manualBonusIds.has(bonus.id))];
-                const capturedAt = new Date().toISOString();
-                const newLock: LockedPeriod = {
-                    id: 'lock-' + Date.now(),
-                    start: overviewDateRange[0].startOf('day').toISOString(),
-                    end: overviewDateRange[1].endOf('day').toISOString(),
-                    lockedAt: capturedAt,
-                    lockedBy: currentUser,
-                    payrollSnapshot: {
-                        version: 1,
-                        capturedAt,
-                        capturedBy: currentUser,
-                        rows: freshPayrollRows,
-                        packingLogs: snapshottedPackingLogs,
-                        fines: liveOverviewFines,
-                        bonuses: snapshottedBonuses,
-                        sourceSummary: {
-                            packingOrderCount: snapshottedPackingLogs.length,
-                            packingTotalUnits: snapshottedPackingLogs.reduce((sum, order) => sum + calcPacksFromItems(order.items, order.timestamp), 0),
-                            salesBonusSummary: freshSalesBonusSummary,
+                try {
+                    const api = (window as any).electronAPI;
+                    if (!api?.attendance?.updatePayrollLock) {
+                        throw new Error('Ứng dụng chưa có API khóa bảng lương an toàn. Vui lòng khởi động lại app.');
+                    }
+                    const lockSince = getPackingLoadStart(overviewDateRange[0]).startOf('day').valueOf();
+                    const lockUntil = overviewDateRange[1].endOf('day').valueOf();
+                    const lockPackingKey = `${lockSince}-${lockUntil}`;
+                    // The overview already loaded a detail snapshot in most
+                    // sessions.  Reuse it for the frozen payroll snapshot;
+                    // only cold-cache sessions need another Supabase read.
+                    const cachedDetailPacking = packingOrderCacheRef.current.get(lockPackingKey);
+                    const [freshPackingLogs, freshSalesBonusSummary] = await Promise.all([
+                        cachedDetailPacking
+                            ? Promise.resolve(cachedDetailPacking)
+                            : loadPackingOrders(getPackingLoadStart(overviewDateRange[0]).toISOString(), { strict: true, range: overviewDateRange }),
+                        loadSalesBonusSummary(overviewDateRange, { force: true }),
+                    ]);
+                    const freshOverviewPackingLogs = freshPackingLogs.filter(o => inOverviewRange(o.timestamp));
+                    const snapshottedPackingLogs = freshOverviewPackingLogs.map(order => snapshotPackingOrder(order, packingCommission));
+                    const freshPayrollRows = buildPayrollDataFromPackingLogs(freshPackingLogs, freshSalesBonusSummary);
+                    const freshWeeklyBonuses = buildPackingWeeklyResults(freshPackingLogs, employees, packingRewardNow, employmentEndDates)
+                        .map(result => packingWeeklyResultToBonus(result, employmentEndDates))
+                        .filter((bonus): bonus is BonusRecord => Boolean(bonus) && inOverviewRange(bonus.date));
+                    const manualBonusIds = new Set(liveOverviewBonusesWithWeekly.map(bonus => bonus.id));
+                    const snapshottedBonuses = [...liveOverviewBonusesWithWeekly, ...freshWeeklyBonuses.filter(bonus => !manualBonusIds.has(bonus.id))];
+                    const capturedAt = new Date().toISOString();
+                    const newLock: LockedPeriod = {
+                        id: 'lock-' + Date.now(),
+                        start: overviewDateRange[0].startOf('day').toISOString(),
+                        end: overviewDateRange[1].endOf('day').toISOString(),
+                        lockedAt: capturedAt,
+                        lockedBy: currentUser,
+                        payrollSnapshot: {
+                            version: 1,
+                            capturedAt,
+                            capturedBy: currentUser,
+                            rows: freshPayrollRows,
+                            packingLogs: snapshottedPackingLogs,
+                            fines: liveOverviewFines,
+                            bonuses: snapshottedBonuses,
+                            sourceSummary: {
+                                packingOrderCount: snapshottedPackingLogs.length,
+                                packingTotalUnits: snapshottedPackingLogs.reduce((sum, order) => sum + calcPacksFromItems(order.items, order.timestamp), 0),
+                                salesBonusSummary: freshSalesBonusSummary,
+                            },
                         },
-                    },
-                };
-                const result = await api.attendance.updatePayrollLock({ action: 'lock', lock: newLock });
-                if (!result?.success || !Array.isArray(result.data?.lockedPeriods)) {
-                    throw new Error(result?.error || 'Không thể lưu snapshot kỳ lương. Kỳ chưa được khóa.');
+                    };
+                    const result = await api.attendance.updatePayrollLock({ action: 'lock', lock: newLock });
+                    if (!result?.success || !Array.isArray(result.data?.lockedPeriods)) {
+                        throw new Error(result?.error || 'Không thể lưu snapshot kỳ lương. Kỳ chưa được khóa.');
+                    }
+                    const nextLockedPeriods = result.data.lockedPeriods as LockedPeriod[];
+                    const persistedLock = nextLockedPeriods.find(item =>
+                        item.start === newLock.start && item.end === newLock.end
+                    );
+                    if (persistedLock?.payrollSnapshot) {
+                        lockedPayrollSnapshotCache.set(
+                            buildLockedPayrollSnapshotKey(persistedLock.start, persistedLock.end),
+                            { lockIdentity: getLockedPeriodIdentity(persistedLock), snapshot: persistedLock.payrollSnapshot },
+                        );
+                    }
+                    setLockedPeriods(nextLockedPeriods);
+                    if (latestSnapshotRef.current) {
+                        latestSnapshotRef.current = { ...(latestSnapshotRef.current as Record<string, any>), lockedPeriods: nextLockedPeriods };
+                    }
+                    message.success(`Đã chốt bảng lương kỳ ${startStr} — ${endStr}!`);
+                } catch (error: any) {
+                    message.error(error?.message || 'Không thể chốt bảng lương. Dữ liệu chưa bị thay đổi.');
                 }
-                const nextLockedPeriods = result.data.lockedPeriods as LockedPeriod[];
-                setLockedPeriods(nextLockedPeriods);
-                if (latestSnapshotRef.current) {
-                    latestSnapshotRef.current = { ...(latestSnapshotRef.current as Record<string, any>), lockedPeriods: nextLockedPeriods };
-                }
-                message.success(`Đã chốt bảng lương kỳ ${startStr} — ${endStr}!`);
             },
         });
     };
@@ -7651,24 +7974,33 @@ const openConfigModal = () => {
             cancelText: 'Hủy',
             okType: 'primary',
             onOk: async () => {
-                const api = (window as any).electronAPI;
-                if (!api?.attendance?.updatePayrollLock) {
-                    throw new Error('Ứng dụng chưa có API mở khóa bảng lương an toàn. Vui lòng khởi động lại app.');
+                try {
+                    const api = (window as any).electronAPI;
+                    if (!api?.attendance?.updatePayrollLock) {
+                        throw new Error('Ứng dụng chưa có API mở khóa bảng lương an toàn. Vui lòng khởi động lại app.');
+                    }
+                    const result = await api.attendance.updatePayrollLock({
+                        action: 'unlock',
+                        start: currentLockedPeriod?.start,
+                        end: currentLockedPeriod?.end,
+                    });
+                    if (!result?.success || !Array.isArray(result.data?.lockedPeriods)) {
+                        throw new Error(result?.error || 'Không thể mở khóa kỳ lương.');
+                    }
+                    const nextLockedPeriods = result.data.lockedPeriods as LockedPeriod[];
+                    if (currentLockedPeriod) {
+                        lockedPayrollSnapshotCache.delete(
+                            buildLockedPayrollSnapshotKey(currentLockedPeriod.start, currentLockedPeriod.end),
+                        );
+                    }
+                    setLockedPeriods(nextLockedPeriods);
+                    if (latestSnapshotRef.current) {
+                        latestSnapshotRef.current = { ...(latestSnapshotRef.current as Record<string, any>), lockedPeriods: nextLockedPeriods };
+                    }
+                    message.success('Đã mở khóa kỳ lương!');
+                } catch (error: any) {
+                    message.error(error?.message || 'Không thể mở khóa kỳ lương. Dữ liệu chưa bị thay đổi.');
                 }
-                const result = await api.attendance.updatePayrollLock({
-                    action: 'unlock',
-                    start: currentLockedPeriod?.start,
-                    end: currentLockedPeriod?.end,
-                });
-                if (!result?.success || !Array.isArray(result.data?.lockedPeriods)) {
-                    throw new Error(result?.error || 'Không thể mở khóa kỳ lương.');
-                }
-                const nextLockedPeriods = result.data.lockedPeriods as LockedPeriod[];
-                setLockedPeriods(nextLockedPeriods);
-                if (latestSnapshotRef.current) {
-                    latestSnapshotRef.current = { ...(latestSnapshotRef.current as Record<string, any>), lockedPeriods: nextLockedPeriods };
-                }
-                message.success('Đã mở khóa kỳ lương!');
             },
         });
     };
@@ -7935,7 +8267,7 @@ const openConfigModal = () => {
                                 <div className="att-staff-equation">
                                     <span>{fmt(employee.salaryBase || 0)}</span><i>+</i><span className="is-positive">{fmt(employee.packIncome || 0)}</span><i>+</i><span className="is-positive">{fmt(employee.totalBonus || 0)}</span><i>−</i><span className="is-negative">{fmt((employee.myFines || 0) + (employee.leaveDeduction || 0))}</span><i>=</i><strong>{fmt(employee.finalSalary || 0)}</strong>
                                 </div>
-                                <Button type="primary" icon={<FileTextOutlined />} disabled={!isPayrollDataReady} onClick={() => { setPayslipPdfDetailOpen(true); setPayslipModal(employee); }}>Xem phiếu lương</Button>
+                                <Button type="primary" icon={<FileTextOutlined />} disabled={!canOpenPayslip} onClick={() => { setPayslipPdfDetailOpen(true); setPayslipModal(employee); }}>Xem phiếu lương</Button>
                             </div>
                         </main>
                     </div>
@@ -8059,7 +8391,7 @@ const openConfigModal = () => {
                     {
                         title: 'Chi tiết', key: 'detail', align: 'center' as const, width: '15%', className: 'att-overview-cell att-overview-cell--action',
                         render: (_: any, record: any) => (
-                            <Button size="small" disabled={!isPayrollDataReady} icon={<EyeOutlined />} onClick={() => { setPayslipPdfDetailOpen(true); setPayslipModal(record); }}>
+                            <Button size="small" disabled={!canOpenPayslip} icon={<EyeOutlined />} onClick={() => { setPayslipPdfDetailOpen(true); setPayslipModal(record); }}>
                                 Xem chi tiết
                             </Button>
                         ),
@@ -9153,7 +9485,20 @@ const openConfigModal = () => {
                 .map(fine => String((fine as any).attendanceLogId || ''))
                 .filter(Boolean),
         );
-        const combinedFinesRaw = [
+        // A locked period is an immutable payroll statement. The fines tab
+        // must use the same frozen list instead of rebuilding it from today's
+        // live tracking tables (which can change after the period was closed).
+        const combinedFinesRaw = isCurrentPeriodLocked
+            ? overviewFines
+                .filter(f => inOverviewRange(f.date))
+                .map((fine, i) => ({
+                    ...fine,
+                    key: fine.id || `locked-fine-${i}`,
+                    empName: employees.find(e => e.id === fine.empId)?.name,
+                    isManual: fine.source === 'manual',
+                    manualIndex: -1,
+                }))
+            : [
             ...finesData
                 .filter(f => inOverviewRange(f.date))
                 .map((f, i) => systemFineRow(f, `base-${i}`))
@@ -10123,6 +10468,9 @@ const openConfigModal = () => {
                 }),
                 onCell: () => ({ className: `${isToday ? 'att-today-col ' : ''}${isSunday ? 'att-sunday-col ' : ''}${isHoliday ? 'att-holiday-col ' : ''}`.trim() || undefined }),
                 render: (_: any, record: any, rowIdx: number) => {
+                    if (!overviewAttendanceLogsReady) {
+                        return <Text type="secondary" style={{ fontSize: 10 }}>{overviewAttendanceLoadError ? 'Chưa tải được' : 'Đang tải…'}</Text>;
+                    }
                     const d = liveAttendanceMatrix[rowIdx]?.[i] || {
                         am: 0, pm: 0,
                         amTime: '', pmTime: '',
@@ -10252,6 +10600,7 @@ const openConfigModal = () => {
             onHeaderCell: () => ({ className: 'att-total-col-header', style: { padding: 0 } }),
             onCell: () => ({ className: 'att-total-col-cell' }),
             render: (_: any, __: any, rowIdx: number) => {
+                if (!overviewAttendanceLogsReady) return <Text type="secondary">—</Text>;
                 const stat = employeeStats[rowIdx] || { shiftCount: 0 };
                 return (
                     <div className="att-matrix-total">
@@ -10262,7 +10611,7 @@ const openConfigModal = () => {
             },
         });
         return columns;
-    }, [activeTab, employeeStats, liveAttendanceMatrix, daysInMonth, selectedMonth, selectedYear, saveWorkScheduleInline, saveLeaveRequestInline, canManageAttendance, canManageWorkSchedules, canManageAttendanceEmployee, canEditAttendanceDate, canEditWorkScheduleDate, isAdmin, isCurrentPeriodLocked, employees, isAttendanceSessionDue, config.morningStart, config.afternoonStart, showShiftDetails, attendanceRewardSummaries, attendanceRewardPeriodKey]);
+    }, [activeTab, overviewAttendanceLogsReady, overviewAttendanceLoadError, employeeStats, liveAttendanceMatrix, daysInMonth, selectedMonth, selectedYear, saveWorkScheduleInline, saveLeaveRequestInline, canManageAttendance, canManageWorkSchedules, canManageAttendanceEmployee, canEditAttendanceDate, canEditWorkScheduleDate, isAdmin, isCurrentPeriodLocked, employees, isAttendanceSessionDue, config.morningStart, config.afternoonStart, showShiftDetails, attendanceRewardSummaries, attendanceRewardPeriodKey]);
 
     useEffect(() => {
         const isCurrentMonth = selectedMonth === dayjs().month() + 1 && selectedYear === dayjs().year();
@@ -10360,6 +10709,16 @@ const openConfigModal = () => {
             }}
         >
             {/* Matrix */}
+            {(overviewAttendanceLoadError || !overviewAttendanceLogsReady) && (
+                <Alert
+                    type={overviewAttendanceLoadError ? 'error' : 'info'}
+                    showIcon
+                    title={overviewAttendanceLoadError ? 'Chưa tải được dữ liệu điểm danh' : 'Đang tải dữ liệu điểm danh'}
+                    description={overviewAttendanceLoadError || 'Đang lấy lịch sử chấm công. Chưa xác định số ca và trạng thái nghỉ.'}
+                    action={<Button size="small" loading={overviewAttendanceLoading} onClick={() => void fetchMonthLogs()}>Tải lại</Button>}
+                    style={{ marginBottom: 12 }}
+                />
+            )}
             <Card
                 className="att-matrix-card"
                 title={(
@@ -10383,7 +10742,7 @@ const openConfigModal = () => {
                 <div ref={attendanceMatrixWrapRef} className="att-matrix-wrap">
                     <Table
                         className="att-matrix-table"
-                        dataSource={employees.map((emp, idx) => ({ key: emp.id, name: emp.name, username: emp.username, idx }))}
+                        dataSource={visibleEmployees.map((emp, idx) => ({ key: emp.id, name: emp.name, username: emp.username, idx }))}
                         columns={matrixColumns}
                         pagination={false}
                         size="small"
@@ -10864,7 +11223,7 @@ const openConfigModal = () => {
             {/* ===== MODAL: Phiếu Lương ===== */}
             <Modal
                 title={null}
-                open={!!payslipModal}
+                open={!!payslipModal && !bulkSendProgress?.running}
                 onCancel={() => { setPayslipModal(null); setPayslipPdfDetailOpen(false); }}
                 footer={null}
                 width={payslipPdfDetailOpen ? 'calc(100vw - 32px)' : 1180}
@@ -10901,6 +11260,18 @@ const openConfigModal = () => {
                         return text.replace(/\s{2,}/g, ' ').replace(/\s*[—-]\s*$/, '').trim();
                     };
                     const fineTime = (f: FineRecord) => f.date ? dayjs(f.date).format('DD/MM HH:mm') : '';
+                    const displayEmpFines = groupPayslipFines(empFines).map(group => {
+                        const latest = group.members.reduce((current, item) => dayjs(item.date || 0).isAfter(dayjs(current.date || 0)) ? item : current, group.members[0]);
+                        return {
+                            ...latest,
+                            type: group.label,
+                            amount: group.amount,
+                            groupedCount: group.members.length,
+                            detail: group.members.length > 1
+                                ? `${group.members.length} khoản · ${group.members.map(item => fineDescription(item)).slice(0, 2).join('; ')}${group.members.length > 2 ? '…' : ''}`
+                                : fineDescription(latest),
+                        };
+                    });
                     const positiveAdjust = Math.max(p.extraAdjust || 0, 0);
                     const negativeAdjust = Math.max(-(p.extraAdjust || 0), 0);
                     const totalEarnings = p.salaryBase + p.packIncome + (p.totalBonus || 0) + positiveAdjust;
@@ -10943,7 +11314,7 @@ const openConfigModal = () => {
                         addLedgerRow('bonus', 'Thưởng', empBonuses.length ? `${empBonuses.length} khoản thưởng` : 'Thưởng bổ sung', p.totalBonus || 0, 'positive');
                     }
                     if ((p.myFines || 0) !== 0) {
-                        addLedgerRow('fine', 'Khấu trừ vi phạm', empFines.length ? `${empFines.length} khoản phạt` : 'Phạt vi phạm nội quy', -(p.myFines || 0), 'negative');
+                        addLedgerRow('fine', 'Khấu trừ vi phạm', empFines.length ? `${empFines.length} khoản phạt · ${displayEmpFines.length} nhóm` : 'Phạt vi phạm nội quy', -(p.myFines || 0), 'negative');
                     }
                     if ((p.leaveDeduction || 0) !== 0) {
                         addLedgerRow('leave', 'Khấu trừ nghỉ', `${p.absentDays || 0} ngày/ca nghỉ đã tính`, -(p.leaveDeduction || 0), 'negative');
@@ -10967,8 +11338,8 @@ const openConfigModal = () => {
                     if ((p.salesBonus || 0) > 0) {
                         addAuditRow('sales-bonus', 'Thưởng doanh số', `${(activeSalesBonusSummary.rate * 100).toLocaleString('vi-VN')}% doanh thu đủ điều kiện`, overviewDateRange[1].format('DD/MM/YYYY'), p.salesBonus, 'positive');
                     }
-                    if (empFines.length) {
-                        empFines.forEach((fine: any, index: number) => addAuditRow(`fine-${index}`, fine.type || 'Phạt vi phạm', fineDescription(fine), fineTime(fine) || '—', -(fine.amount || 0), 'negative'));
+                    if (displayEmpFines.length) {
+                        displayEmpFines.forEach((fine: any, index: number) => addAuditRow(`fine-${index}`, fine.type || 'Phạt vi phạm', fine.detail, fineTime(fine) || '—', -(fine.amount || 0), 'negative'));
                     } else if ((p.myFines || 0) > 0) {
                         addAuditRow('fine', 'Phạt vi phạm nội quy', 'Kỷ luật / Lỗi nghiệp vụ', '—', -(p.myFines || 0), 'negative');
                     }
@@ -10977,6 +11348,7 @@ const openConfigModal = () => {
 
                     // Helper: Lưu override cho NV này
                     const saveOverride = (patch: Partial<PayrollOverride>) => {
+                        if (!isPayrollDataReady) return;
                         if (checkLocked()) return;
                         setPayrollOverrides(prev => ({
                             ...prev,
@@ -10992,6 +11364,7 @@ const openConfigModal = () => {
 
                     // Helper: Xóa toàn bộ override
                     const clearOverride = () => {
+                        if (!isPayrollDataReady) return;
                         if (checkLocked()) return;
                         Modal.confirm({
                             title: 'Xóa tất cả điều chỉnh?',
@@ -11038,6 +11411,10 @@ const openConfigModal = () => {
                         const hasOv = overrideVal != null;
                         const displayVal = hasOv ? overrideVal : autoVal;
                         const handleEditClick = () => {
+                            if (!isPayrollDataReady) {
+                                message.info('Dữ liệu đang cập nhật. Vui lòng chờ trước khi điều chỉnh lương.');
+                                return;
+                            }
                             let newVal = displayVal;
                             Modal.confirm({
                                 title: `⚠️ Sửa thủ công: ${opts?.fieldName || label}`,
@@ -11114,6 +11491,12 @@ const openConfigModal = () => {
 
                     return (
                         <div className={payslipPdfDetailOpen ? 'ps-modal-detail-mode' : ''} style={{ fontSize: 13, paddingTop: 0 }}>
+                            {!isPayrollDataReady && <Alert
+                                type="info"
+                                showIcon
+                                message="Phiếu lương tạm tính — đang cập nhật dữ liệu"
+                                description="Các khoản tiền và chi tiết sẽ tự cập nhật. Chưa thể điều chỉnh, xuất hoặc gửi phiếu lương cho đến khi dữ liệu đầy đủ."
+                            />}
                             {!payslipPdfDetailOpen && (<>
                                 <div className="ps-ledger">
                                     <header className="ps-ledger-brandbar">
@@ -11334,7 +11717,7 @@ const openConfigModal = () => {
                                                 )}
 
                                                 {p.myFines > 0 && (empFines.length > 0
-                                                    ? empFines.map((f: any, i: number) => (
+                                                    ? displayEmpFines.map((f: any, i: number) => (
                                                         <tr key={`fine-${i}`}>
                                                             <td>
                                                                 <span className="ps-inv-row-label ps-inv-fine-label">
@@ -11344,7 +11727,7 @@ const openConfigModal = () => {
                                                                     {f.type || 'Phạt vi phạm'}
                                                                 </span>
                                                             </td>
-                                                            <td>{fineDescription(f)}{fineTime(f) && <span className="ps-inv-text-muted">{fineTime(f)}</span>}</td>
+                                                            <td>{f.groupedCount > 1 && <span className="ps-inv-text-muted">{f.groupedCount} khoản gộp · </span>}{f.detail || fineDescription(f)}{fineTime(f) && <span className="ps-inv-text-muted"> · {fineTime(f)}</span>}</td>
                                                             <td className="text-right ps-inv-text-red">-{fmt(f.amount)}</td>
                                                         </tr>
                                                     ))

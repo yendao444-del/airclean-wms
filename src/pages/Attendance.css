@@ -5703,13 +5703,54 @@
 .att-payslip-modal .ant-modal-body { max-height: 86vh; }
 .att-payslip-modal-detail { top: 48px; padding-bottom: 8px; }
 .att-payslip-modal-detail .ant-modal-content { display: flex; max-height: calc(100vh - 96px); flex-direction: column; overflow: hidden; }
-.att-payslip-modal-detail .ant-modal-body { display: flex; min-height: 0; max-height: none; padding: 0 !important; flex: 1 1 auto; flex-direction: column; overflow: hidden; }
-.att-payslip-modal-detail .ps-audit-ledger-view { overflow: hidden; }
-.att-payslip-modal-detail .ps-audit-ledger-table-wrap { overflow: visible; }
+.att-payslip-modal-detail .ant-modal-body { display: flex; min-height: 0; max-height: none; padding: 0 !important; flex: 1 1 auto; flex-direction: column; overflow-y: auto; overflow-x: hidden; }
+.att-payslip-modal-detail .ps-audit-ledger-view { overflow: visible; }
+.att-payslip-modal-detail .ps-audit-ledger-table-wrap { overflow-x: auto; overflow-y: visible; }
 .att-payslip-modal-detail .ps-ledger-actions { position: relative; z-index: 3; min-height: 54px; }
 body:has(.role-preview-banner) .att-payslip-modal-detail { top: 88px; }
 body:has(.role-preview-banner) .att-payslip-modal-detail .ant-modal-content { max-height: calc(100vh - 96px); }
 body:has(.att-payslip-modal-detail) .ant-modal-wrap { overflow: hidden; }
+
+/* Keep the detail sheet inside the viewport and let the sheet body own the
+   vertical scroll. Without a fixed modal height, the long ledger expands the
+   dialog past the window and the browser has no reachable scroll area. */
+.att-payslip-modal-detail {
+    top: 16px;
+    height: calc(100vh - 32px);
+    max-height: calc(100vh - 32px);
+    margin: 0 auto 16px;
+}
+.att-payslip-modal-detail .ant-modal-content {
+    height: 100%;
+    max-height: none;
+}
+.att-payslip-modal-detail .ant-modal-body {
+    height: 100%;
+    overflow: hidden !important;
+    scrollbar-gutter: stable;
+    overscroll-behavior: contain;
+}
+.att-payslip-modal-detail .ps-modal-detail-mode {
+    height: calc(100vh - 64px);
+    max-height: calc(100vh - 64px);
+    min-height: 0;
+    overflow-y: scroll !important;
+    overflow-x: hidden;
+    scrollbar-gutter: stable;
+    overscroll-behavior: contain;
+}
+.att-payslip-modal-detail .ps-modal-detail-mode > .ps-audit-ledger-view {
+    height: auto !important;
+    min-height: max-content;
+    flex: 0 0 auto !important;
+}
+.att-payslip-modal-detail .ps-audit-ledger-shell {
+    flex: 0 0 auto;
+}
+body:has(.role-preview-banner) .att-payslip-modal-detail .ps-modal-detail-mode {
+    height: calc(100vh - 136px);
+    max-height: calc(100vh - 136px);
+}
 .ps-audit-ledger-shell { display: grid; grid-template-columns: 300px minmax(0, 1fr); width: 100%; max-width: 1440px; height: auto; min-height: 0; margin: 0 auto; background: #fff; border: 1px solid #dbe4ee; border-radius: 11px; overflow: hidden; box-shadow: 0 14px 36px rgba(23, 48, 80, .1); }
 .ps-audit-ledger-rail { display: flex; flex-direction: column; padding: 22px 24px; border-right: 1px solid #d9e3ed; background: #fbfdff; }
 .ps-audit-brand img { display: block; width: 158px; height: auto; }
@@ -5809,7 +5850,7 @@ body:has(.att-payslip-modal-detail) .ant-modal-wrap { overflow: hidden; }
 .ps-modal-detail-mode .ps-ledger-actions .ant-btn { min-width: 112px; border-color: #cad7e5; color: #0b1f4d; font-weight: 600; }
 .ps-modal-detail-mode .ps-ledger-actions .ant-btn-primary { border-color: #079c68; background: #079c68; color: #fff; }
 .ps-modal-detail-mode .ps-ledger-actions .ant-btn-primary:hover { border-color: #087e58 !important; background: #087e58 !important; }
-.ps-modal-detail-mode { display: flex; min-height: 0; height: auto; max-height: calc(100vh - 124px); flex-direction: column; overflow: hidden; }
+.ps-modal-detail-mode { display: flex; min-height: 0; height: auto; max-height: none; flex-direction: column; overflow: visible; }
 .ps-modal-detail-mode > .ps-audit-ledger-view { min-height: 0; flex: 0 1 auto; }
 body:has(.role-preview-banner) .ps-modal-detail-mode { max-height: calc(100vh - 152px); }
 
@@ -7458,6 +7499,21 @@ body:has(.role-preview-banner) .ps-modal-detail-mode { max-height: calc(100vh - 
     border-left: 3px solid #16a163;
     border-radius: 0 8px 8px 0;
     background: #effaf4;
+}
+
+/* Destructive fine confirmation must remain easy to target even over a dense
+   attendance table. Keep the detail compact and reserve a generous hit area. */
+.attendance-fine-delete-confirm .ant-modal-confirm-content {
+    min-width: 0;
+}
+.attendance-fine-delete-confirm .ant-modal-confirm-btns {
+    display: flex;
+    justify-content: flex-end;
+    gap: 10px;
+}
+.attendance-fine-delete-confirm .ant-modal-confirm-btns .ant-btn {
+    margin-inline-start: 0;
+    touch-action: manipulation;
 }
 @media (max-width: 680px) {
     .packing-config-hero { align-items: flex-start; flex-direction: column; padding: 15px; }

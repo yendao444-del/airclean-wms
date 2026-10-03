@@ -4,6 +4,7 @@ const PREPACK_SHORTFALL_RATIO_NUMERATOR = 9;
 const PREPACK_SHORTFALL_RATIO_DENOMINATOR = 10;
 const PREPACK_OFFICIAL_FINE = 50000;
 const PREPACK_SEASONAL_FINE = 30000;
+const { loadResignedEmployeeCutoffs, isEmployeeResignedOn } = require('./employment-status');
 
 function bangkokDateKey(value) {
   const date = new Date(value);
@@ -83,11 +84,15 @@ async function reconcilePrepackShortfallFines(prisma, options = {}) {
     .filter((dateKey) => dateKey >= effectiveDate && new Date(evaluationNow) >= bangkokEndOfDay(dateKey));
 
   return prisma.$transaction(async (tx) => {
+    // Keep lock waits below the interactive transaction lifetime so a retry
+    // never attempts to use an expired transaction.
+    await tx.$executeRaw`SET LOCAL lock_timeout = '7000ms'`;
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('attendanceData'))`;
     const configRow = await tx.appConfig.findUnique({ where: { key: "attendanceData" } });
     let attendanceData = {};
     try { attendanceData = JSON.parse(configRow?.value || "{}"); } catch {}
     const employees = Array.isArray(attendanceData.employees) ? attendanceData.employees : [];
+    const resignedCutoffs = await loadResignedEmployeeCutoffs(tx);
     const leaveRecords = Array.isArray(attendanceData.leaveRecords) ? attendanceData.leaveRecords : [];
     const existingFines = Array.isArray(attendanceData.extraFines) ? [...attendanceData.extraFines] : [];
     const fineAuditLog = Array.isArray(attendanceData.fineAuditLog) ? [...attendanceData.fineAuditLog] : [];
@@ -170,6 +175,7 @@ async function reconcilePrepackShortfallFines(prisma, options = {}) {
         if (new Date(batch.createdAt).getTime() > endOfDay.getTime()) continue;
         const employee = employees.find((item) => normalizeUsername(item?.username) === normalizeUsername(batch.packerUsername));
         if (!employee || !batch.packerUsername) continue;
+        if (isEmployeeResignedOn(employee, dateKey, resignedCutoffs)) continue;
         if (hasApprovedLeaveForDate(leaveRecords, employee.id, dateKey)) {
           // An approved leave excuses the employee for the whole prepack workday.
           removedFineIds.add(fineId(Number(employee.id), dateKey));

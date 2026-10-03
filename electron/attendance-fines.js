@@ -12,6 +12,7 @@ const DEFAULT_ATTENDANCE_CONFIG = {
 const { calculateAttendanceRewardSummary, resolveEmployeeId } = require('./attendance-rewards');
 const { validScheduleForSession } = require('./attendance-schedule-fines');
 const { readLateFineSnapshot } = require('./attendance-fine-snapshot');
+const { loadResignedEmployeeCutoffs, isEmployeeResignedOn } = require('./employment-status');
 
 let reconcileQueue = Promise.resolve();
 const overviewReadsInFlight = new WeakMap();
@@ -111,10 +112,20 @@ async function reconcileLateAttendanceFinesNow(prisma, options = {}) {
     if (options.readOnlyProbe && typeof prisma.$queryRaw === 'function') {
         const snapshot = await readLateFineSnapshot(prisma, options);
         if (snapshot) {
-            const plan = calculateLateAttendanceFinePlan(snapshot.data, snapshot.logs, options);
+            const resignedCutoffs = await loadResignedEmployeeCutoffs(prisma);
+            const plan = calculateLateAttendanceFinePlan(snapshot.data, snapshot.logs, { ...options, resignedCutoffs });
             if (!plan.patch) return plan.result;
+            // The overview path already has a consistent MVCC snapshot. Do
+            // only the tiny JSON-branch patch in a transaction and guard it
+            // with the snapshot revision. This keeps the historical scan out
+            // of the advisory-lock transaction, so an interactive fine delete
+            // is not forced to wait 10-15 seconds behind 700+ attendance logs.
+            if (snapshot.updatedAt && typeof prisma.$transaction === 'function') {
+                return await applyLateFinePatchOptimistic(prisma, snapshot.updatedAt, plan.patch, plan.result, resignedCutoffs);
+            }
         }
-        // The probe never authorizes a write. Re-read and recompute after locking.
+        // If the snapshot has no revision (legacy test/mocked clients), fall
+        // back to the locked read/compute path below.
     }
     // Reconciliation used to read and then replace the entire JSON document
     // outside a transaction. That allowed another attendance edit to be lost
@@ -163,7 +174,11 @@ async function reconcileLateAttendanceFinesNow(prisma, options = {}) {
             },
             orderBy: { timestamp: 'asc' },
         });
-        const { result, patch } = calculateLateAttendanceFinePlan(attendanceData, logs, options);
+        const resignedCutoffs = await loadResignedEmployeeCutoffs(tx);
+        const { result, patch } = calculateLateAttendanceFinePlan(attendanceData, logs, {
+            ...options,
+            resignedCutoffs,
+        });
         if (patch) {
             if (typeof tx.$queryRaw === 'function') {
                 // Only fine branches change; payroll snapshots stay untouched.
@@ -186,6 +201,47 @@ async function reconcileLateAttendanceFinesNow(prisma, options = {}) {
         }
         return result;
     }, { isolationLevel: 'Serializable', timeout: 30000, maxWait: 10000 });
+}
+
+function cutoffRevision(cutoffs) {
+    return JSON.stringify([
+        [...cutoffs.byId].sort(([a], [b]) => a - b),
+        [...cutoffs.byUsername].sort(([a], [b]) => a.localeCompare(b)),
+    ]);
+}
+
+async function applyLateFinePatchOptimistic(prisma, snapshotUpdatedAt, patch, result, resignedCutoffs) {
+    return prisma.$transaction(async (tx) => {
+        // This path already has an MVCC revision guard below.  Do not take the
+        // shared attendanceData advisory lock here: the historical scan ran
+        // outside the transaction, so holding that lock only makes an
+        // interactive fine delete wait behind the reconciliation writer.
+        // The row update remains conditional on updatedAt and therefore
+        // safely aborts/recomputes when another writer commits first.
+        await tx.$executeRaw`SET LOCAL lock_timeout = '800ms'`;
+        await tx.$executeRaw`SET LOCAL statement_timeout = '5000ms'`;
+        // Employment data lives outside attendanceData. Validate it too so a
+        // resignation during the scan cannot create new fines for that user.
+        const currentCutoffs = await loadResignedEmployeeCutoffs(tx);
+        if (cutoffRevision(currentCutoffs) !== cutoffRevision(resignedCutoffs)) {
+            throw Object.assign(new Error('Trạng thái nhân viên vừa thay đổi.'), { code: 'P2034' });
+        }
+        const rows = await tx.$queryRaw`
+            UPDATE "AppConfig"
+            SET "value" = jsonb_set(
+                jsonb_set(
+                    jsonb_set("value"::jsonb, '{extraFines}', ${JSON.stringify(patch.extraFines)}::jsonb, true),
+                    '{fineWaivers}', ${JSON.stringify(patch.fineWaivers)}::jsonb, true
+                ), '{fineAuditLog}', ${JSON.stringify(patch.fineAuditLog)}::jsonb, true
+            )::text, "updatedAt" = NOW()
+            WHERE "key" = 'attendanceData' AND "updatedAt" = ${new Date(snapshotUpdatedAt)}
+            RETURNING "updatedAt"
+        `;
+        if (!rows.length) {
+            throw Object.assign(new Error('Dữ liệu Bảng công vừa thay đổi.'), { code: 'P2034' });
+        }
+        return result;
+    }, { isolationLevel: 'Serializable', timeout: 6000, maxWait: 3000 });
 }
 
 function calculateLateAttendanceFinePlan(attendanceData, logs, options = {}) {
@@ -226,6 +282,9 @@ function calculateLateAttendanceFinePlan(attendanceData, logs, options = {}) {
                 unmatched.push({ logId: log.id, date: log.date, faceId: log.faceId, userName: log.userName });
                 continue;
             }
+            // The resignation date is the first inactive day. Keep all
+            // historical fines before it, but never create a new fine after it.
+            if (isEmployeeResignedOn(employee, log.date || localDateKey(log.timestamp), options.resignedCutoffs)) continue;
 
             // Seasonal staff are fined for lateness only after declaring a shift.
             // Missing declarations are reconciled separately by the schedule policy.

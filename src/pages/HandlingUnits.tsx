@@ -8,7 +8,7 @@ import {
   Form,
   Input,
   InputNumber,
-  Modal,
+  Modal as AntModal,
   Popover,
   QRCode,
   Radio,
@@ -35,13 +35,11 @@ import {
   RobotOutlined,
   UnlockOutlined,
   LockOutlined,
-  ShoppingCartOutlined,
   SendOutlined,
   RightOutlined,
   QrcodeOutlined,
   PrinterOutlined,
   CompassOutlined,
-  EditOutlined,
   DeleteOutlined,
   HistoryOutlined,
   ExclamationCircleFilled,
@@ -50,9 +48,16 @@ import {
   TagOutlined,
   DownOutlined,
   ScissorOutlined,
+  UserAddOutlined,
 } from "@ant-design/icons";
 import { Warehouse2DMap } from "../components/Warehouse2DMap";
+import Modal from "../components/HandlingUnitModal";
+import HandlingUnitPrintLabel from "../components/HandlingUnitPrintLabel";
+import HandlingUnitStockHistory from "../components/HandlingUnitStockHistory";
 import { useAuth } from "../contexts/AuthContext";
+import PrepackManagement from "./PrepackManagement";
+import type { PackingLot } from "../types/packagePacking";
+import { compareHandlingUnitPickOrder } from "../../electron/handling-unit-pick-order.mjs";
 import sealedSackImage from "../assets/warehouse-sack-sealed.webp";
 import openedSackImage from "../assets/warehouse-sack-opened.webp";
 import plainCartonImage from "../assets/plain-kraft-carton.webp";
@@ -74,6 +79,7 @@ type CatalogItem = {
 };
 type UnitRow = {
   id: string;
+  sequenceNumber?: number;
   productId?: number;
   purchaseOrderId?: number;
   purchaseItemId?: number;
@@ -92,6 +98,7 @@ type UnitRow = {
   currentPcs: number;
   conversionFactor?: number;
   note?: string;
+  createdAt?: string;
   updatedAt?: string;
   hasWithdrawalHistory?: boolean;
   returnReference?: string;
@@ -139,6 +146,7 @@ type TelegramStatus = {
   lastError: string | null;
 };
 type Workspace = {
+  packedInventory: PackingLot[];
   catalog: CatalogItem[];
   register: UnitRow[];
   packagingSpecs: any[];
@@ -159,6 +167,7 @@ type Workspace = {
   };
 };
 type ShiftCheckCandidate = {
+  packed?: boolean;
   unit: UnitRow;
   withdrawnQuantity: number;
   withdrawalCount: number;
@@ -204,6 +213,129 @@ function AllocationZonePicker({
   );
 }
 
+export function QrZonePicker({
+  id,
+  value,
+  onChange,
+  units,
+  locations,
+}: {
+  id?: string;
+  value?: string;
+  onChange?: (value: string) => void;
+  units: UnitRow[];
+  locations: LocationItem[];
+}) {
+  const [open, setOpen] = useState(false);
+  const [draftValue, setDraftValue] = useState(value);
+  const activeLocations = locations.filter((location) => location.isActive);
+  const selectedLocation = activeLocations.find((location) => location.code === value);
+  const draftLocation = activeLocations.find((location) => location.code === draftValue);
+
+  useEffect(() => {
+    if (!open) setDraftValue(value);
+  }, [open, value]);
+
+  const selectMapZone = (zoneKey: string) => {
+    setDraftValue(ALLOCATION_ZONE_CODE_BY_MAP_KEY[zoneKey] || zoneKey);
+  };
+
+  return (
+    <>
+      <button
+        id={id}
+        type="button"
+        aria-haspopup="dialog"
+        aria-expanded={open}
+        className={`hu-qr-zone-trigger ${value ? "is-filled" : ""}`}
+        onClick={() => {
+          setDraftValue(value);
+          setOpen(true);
+        }}
+      >
+        <EnvironmentOutlined className="hu-qr-zone-trigger-icon" />
+        <span className="hu-qr-zone-trigger-copy">
+          <small>Khu vực lưu kho</small>
+          <b>{selectedLocation ? `${selectedLocation.code} · ${selectedLocation.name}` : value ? `${value} · Chọn lại khu vực` : "Chọn khu vực trên sơ đồ"}</b>
+        </span>
+        <RightOutlined className="hu-qr-zone-trigger-arrow" />
+      </button>
+      <Modal
+        open={open}
+        centered
+        destroyOnHidden
+        width={1120}
+        className="hu-qr-zone-modal"
+        title={
+          <div className="hu-qr-zone-modal-title">
+            <EnvironmentOutlined />
+            <div>
+              <b>Chọn khu vực lưu kho</b>
+              <small>Click trực tiếp vào khu vực trên bản đồ để gán vị trí cho tem QR.</small>
+            </div>
+          </div>
+        }
+        onCancel={() => setOpen(false)}
+        footer={
+          <Flex justify="space-between" align="center">
+            <Typography.Text type="secondary">
+              Đang chọn: <b>{draftLocation ? `${draftLocation.code} · ${draftLocation.name}` : draftValue ? "Khu vực không hoạt động — vui lòng chọn lại" : "Chưa chọn khu vực"}</b>
+            </Typography.Text>
+            <Flex gap={8}>
+              <Button onClick={() => setOpen(false)}>Hủy</Button>
+              <Button
+                type="primary"
+                disabled={!draftLocation}
+                onClick={() => {
+                  if (!draftLocation) return;
+                  onChange?.(draftLocation.code);
+                  setOpen(false);
+                }}
+              >
+                Dùng khu vực này
+              </Button>
+            </Flex>
+          </Flex>
+        }
+      >
+        <div className="hu-qr-zone-modal-grid">
+          <section className="hu-qr-zone-map-panel">
+            <Warehouse2DMap
+              units={units}
+              selectedZoneCode={draftValue}
+              selectionMode
+              onSelectZone={selectMapZone}
+            />
+          </section>
+          <aside className="hu-qr-zone-list-panel">
+            <div className="hu-qr-zone-list-heading">
+              <b>Khu vực đang hoạt động</b>
+              <small>Chọn nhanh nếu khu vực chưa có trên sơ đồ.</small>
+            </div>
+            <div className="hu-qr-zone-list">
+              {activeLocations.map((location) => (
+                <button
+                  type="button"
+                  key={location.code}
+                  className={`hu-qr-zone-list-item ${draftValue === location.code ? "is-selected" : ""}`}
+                  onClick={() => setDraftValue(location.code)}
+                >
+                  <span className="hu-qr-zone-list-code">{location.code}</span>
+                  <span className="hu-qr-zone-list-copy">
+                    <b>{location.name}</b>
+                    <small>{locationTypeMeta(location.type).label}</small>
+                  </span>
+                  {draftValue === location.code && <CheckCircleOutlined />}
+                </button>
+              ))}
+            </div>
+          </aside>
+        </div>
+      </Modal>
+    </>
+  );
+}
+
 const fmt = (value: number) =>
   Math.max(0, Number(value || 0)).toLocaleString("vi-VN");
 const fmtSigned = (value: number) => {
@@ -237,9 +369,7 @@ const locationFor = (unit: UnitRow) =>
   [unit.location?.zone, unit.location?.rack].filter(Boolean).join(" · ") ||
   "Chưa phân khu";
 const isWithdrawalTransaction = (item: any) =>
-  /^(rút hàng|lấy hàng|chuyển khu đóng gói|chuyển hàng lẻ|chuyển chờ xuất kho|chuyển khu kiểm hàng)/i.test(String(item?.type || ""));
-const historyDescriptionFor = (item: any) =>
-  isWithdrawalTransaction(item) ? "Đã rút" : item?.note || item?.destination || "--";
+  /^(rút hàng|lấy hàng|chuyển đóng gói sẵn|chuyển khu đóng gói|chuyển hàng lẻ|chuyển chờ xuất kho|chuyển khu kiểm hàng)/i.test(String(item?.type || ""));
 const statusFor = (status: string) =>
   status === "Nguyên niêm phong" ? (
     <Tag color="green">Đã niêm phong</Tag>
@@ -256,31 +386,6 @@ const statusFor = (status: string) =>
   ) : (
     <Tag>Đã hết hàng</Tag>
   );
-
-const PICK_DESTINATIONS = {
-  PACKING: {
-    label: "Khu đóng gói",
-    description: "Chuyển nội bộ, chưa làm giảm tồn SKU.",
-    transactionType: "Chuyển khu đóng gói",
-  },
-  LOOSE: {
-    label: "Khu hàng lẻ",
-    description: "Chuyển nội bộ để soạn đơn lẻ, chưa làm giảm tồn SKU.",
-    transactionType: "Chuyển hàng lẻ",
-  },
-  OUTBOUND: {
-    label: "Chờ xuất kho",
-    description: "Tồn SKU chỉ giảm khi phiếu xuất được xác nhận.",
-    transactionType: "Chuyển chờ xuất kho",
-  },
-  QUARANTINE: {
-    label: "Khu kiểm hàng",
-    description: "Chuyển chờ kiểm/điều chỉnh; cần ghi chú lý do.",
-    transactionType: "Chuyển khu kiểm hàng",
-  },
-} as const;
-
-type PickDestination = keyof typeof PICK_DESTINATIONS;
 
 const getPackageCategory = (packageType?: string): "TAI" | "THUNG" | "LE" => {
   const t = (packageType || "").toLowerCase();
@@ -299,7 +404,7 @@ const normalizeUnitName = (value?: string) =>
     .toLocaleLowerCase("vi-VN");
 
 const capacityForUnit = (unit: Pick<UnitRow, "initialPcs" | "conversionFactor">) =>
-  Math.max(Number(unit.initialPcs || 0), Number(unit.conversionFactor || 0));
+  Math.min(300, Math.max(0, Number(unit.initialPcs || unit.conversionFactor || 0)));
 
 const packagingMethodForSpec = (spec?: any): "TAI" | "THUNG" | "LE" =>
   getPackageCategory(spec?.name) === "THUNG"
@@ -406,13 +511,22 @@ const buildSplitQuantities = (total: number, targetSize: number) => {
 
 const historyActionMeta = (type?: string) => {
   const value = String(type || "Hoạt động khác");
-  if (/nhập kiện|tạo kiện/i.test(value)) return { label: value, color: "green" };
-  if (/lấy hàng|rút hàng|chuyển/i.test(value)) return { label: value, color: "blue" };
-  if (/khui|mở/i.test(value)) return { label: value, color: "orange" };
-  if (/đóng|niêm phong/i.test(value)) return { label: value, color: "cyan" };
-  if (/tách kiện|nhận từ tách/i.test(value)) return { label: value, color: "blue" };
-  if (/kiểm|điều chỉnh/i.test(value)) return { label: value, color: "gold" };
-  if (/xóa/i.test(value)) return { label: value, color: "red" };
+  if (/^NHAP$/i.test(value)) return { label: "Nhập", color: "green" };
+  if (/^POS$/i.test(value)) return { label: "POS", color: "blue" };
+  if (/^TMDT$/i.test(value)) return { label: "TMĐT", color: "purple" };
+  if (/^XUAT$/i.test(value)) return { label: "Xuất", color: "orange" };
+  if (/^TRA$/i.test(value)) return { label: "Trả", color: "gold" };
+  if (/^HOAN$/i.test(value)) return { label: "Hoàn", color: "cyan" };
+  if (/^CAN_BANG$/i.test(value)) return { label: "Cân bằng", color: "geekblue" };
+  if (/đồng bộ kiện/i.test(value)) return { label: "Đồng bộ", color: "default" };
+  if (/chuyển chờ xuất kho tmdt/i.test(value)) return { label: "Xuất TMĐT", color: "blue" };
+  if (/nhập kiện|tạo kiện/i.test(value)) return { label: "Nhập kiện", color: "green" };
+  if (/lấy hàng|rút hàng|chuyển/i.test(value)) return { label: "Chuyển", color: "blue" };
+  if (/khui|mở/i.test(value)) return { label: "Mở kiện", color: "orange" };
+  if (/đóng|niêm phong/i.test(value)) return { label: "Đóng kiện", color: "cyan" };
+  if (/tách kiện|nhận từ tách/i.test(value)) return { label: "Tách kiện", color: "blue" };
+  if (/kiểm|điều chỉnh/i.test(value)) return { label: "Điều chỉnh", color: "gold" };
+  if (/xóa/i.test(value)) return { label: "Xóa", color: "red" };
   return { label: value, color: "default" };
 };
 
@@ -453,6 +567,7 @@ const displayProductGroup = (name: string) =>
   name.replace(/^\s*khẩu\s*trang\s*/i, "").trim() || name;
 
 const workspaceLayoutDefaults: Workspace = {
+  packedInventory: [],
   catalog: [
     {
       sku: "1-5DUNI-TRANG",
@@ -759,6 +874,7 @@ const workspaceLayoutDefaults: Workspace = {
 // Product and handling-unit records are loaded only through the desktop IPC
 // bridge. Locations remain local configuration for the warehouse floor plan.
 const emptyWorkspace: Workspace = {
+  packedInventory: [],
   ...workspaceLayoutDefaults,
   catalog: [],
   register: [],
@@ -769,12 +885,19 @@ const emptyWorkspace: Workspace = {
 };
 let handlingUnitsWorkspaceCache: Pick<
   Workspace,
-  "catalog" | "register" | "recentTransactions"
+  "catalog" | "register" | "recentTransactions" | "packedInventory"
 > | null = null;
 
-export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
+export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit?: () => void; initialTab?: "units" | "prepack" }) {
   const { user } = useAuth();
   const isAdmin = user?.role === "admin";
+  const [activeModuleTab, setActiveModuleTab] = useState<"units" | "prepack" | "history">(initialTab);
+  const moduleContentRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    moduleContentRef.current?.scrollTo({ top: 0, left: 0 });
+  }, [activeModuleTab]);
+  const [historyScope, setHistoryScope] = useState<"units" | "prepack">(initialTab);
+  const [prepackCreateRequest, setPrepackCreateRequest] = useState(0);
   const [workspace, setWorkspace] = useState(() =>
     handlingUnitsWorkspaceCache
       ? { ...emptyWorkspace, ...handlingUnitsWorkspaceCache }
@@ -787,6 +910,7 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
           !handlingUnitsWorkspaceCache,
       ),
   );
+  const [workspaceLoadError, setWorkspaceLoadError] = useState<string | null>(null);
   const [selectedSku, setSelectedSku] = useState(
     () => handlingUnitsWorkspaceCache?.catalog[0]?.sku || "",
   );
@@ -976,6 +1100,7 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
   const [issuedQrLabels, setIssuedQrLabels] = useState<any[]>([]);
   const [qrSetupForm] = Form.useForm();
   const [quickScanLines, setQuickScanLines] = useState<QuickScanLine[]>([]);
+  const [showLegacyQrEntry, setShowLegacyQrEntry] = useState(false);
   const [quickManualSku, setQuickManualSku] = useState<string>();
   const [quickManualQuantity, setQuickManualQuantity] = useState<number>();
   const [quickManualSupplierId, setQuickManualSupplierId] = useState<number>();
@@ -1032,6 +1157,9 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
   const [historyType, setHistoryType] = useState("all");
   const [historyFromDate, setHistoryFromDate] = useState("");
   const [historyToDate, setHistoryToDate] = useState("");
+  const [expandedHistoryId, setExpandedHistoryId] = useState<string | number | null>(null);
+  const [ledgerHistory, setLedgerHistory] = useState<any[]>([]);
+  const [ledgerHistoryLoading, setLedgerHistoryLoading] = useState(false);
   const [locModalView, setLocModalView] = useState<"map" | "list">("map");
 
   const [selectedLocationCode, setSelectedLocationCode] =
@@ -1041,6 +1169,7 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
   const [addLocationForm] = Form.useForm();
   const [movingUnit, setMovingUnit] = useState<UnitRow | null>(null);
   const [moveLocationForm] = Form.useForm();
+  // Kept for backwards-compatible data repair access; no action button exposes this in the new workflow.
   const [editingUnit, setEditingUnit] = useState<UnitRow | null>(null);
   const [editUnitForm] = Form.useForm();
   const [isSavingUnitEdit, setIsSavingUnitEdit] = useState(false);
@@ -1056,11 +1185,6 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
     setShowLocations(true);
   };
 
-  // Rút hàng sang Khu đóng gói
-  const [showPickModal, setShowPickModal] = useState(false);
-  const [pickingUnit, setPickingUnit] = useState<UnitRow | null>(null);
-  const [pickForm] = Form.useForm();
-  const [isSubmittingPick, setIsSubmittingPick] = useState(false);
   const [mergeReturnUnit, setMergeReturnUnit] = useState<UnitRow | null>(null);
   const [mergeTargetCode, setMergeTargetCode] = useState("");
   const [mergeQuantity, setMergeQuantity] = useState<number | null>(null);
@@ -1075,8 +1199,6 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
       ? JSON.stringify(handlingUnitsWorkspaceCache)
       : "",
   );
-  const isSubmittingPickRef = useRef(false);
-  const pickRequestIdRef = useRef("");
   const [showFinalCheckModal, setShowFinalCheckModal] = useState(false);
   const [checkingUnit, setCheckingUnit] = useState<UnitRow | null>(null);
   const [finalCheckForm] = Form.useForm();
@@ -1085,6 +1207,7 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
   const finalPickVerification = Form.useWatch("finalVerification", finalCheckForm);
   const [showShiftCheckModal, setShowShiftCheckModal] = useState(false);
   const [shiftCheckScope, setShiftCheckScope] = useState<"all" | "mandatory">("all");
+  const [shiftCheckFocusCode, setShiftCheckFocusCode] = useState<string | null>(null);
   const [shiftCheckDrafts, setShiftCheckDrafts] = useState<
     Record<string, ShiftCheckDraft>
   >({});
@@ -1104,7 +1227,7 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
     {
       id: "m-0",
       sender: "bot",
-      text: "👋 Bot <b>@quanlykienhang_bot</b> hỗ trợ thao tác kho theo nhóm. Tạo nhóm, thêm bot làm quản trị viên, rồi chủ hệ thống gửi <code>/ketnoi</code> trong nhóm để nhân viên cùng rút hàng.",
+      text: "👋 Bot <b>@quanlykienhang_bot</b> hỗ trợ thao tác kho theo nhóm. Tạo nhóm, thêm bot làm quản trị viên, rồi chủ hệ thống gửi <code>/ketnoi</code> trong nhóm để nhân viên cùng tra cứu kiện hàng.",
       time: new Date().toLocaleTimeString("vi-VN", {
         hour: "2-digit",
         minute: "2-digit",
@@ -1122,11 +1245,20 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
 
     workspaceLoadInFlightRef.current = true;
     const requestId = ++workspaceLoadRequestRef.current;
+    let loadTimer: ReturnType<typeof setTimeout>;
+    let loadFailed = false;
     try {
       if (window.electronAPI?.handlingUnits?.getWorkspace) {
-        const res = await window.electronAPI.handlingUnits.getWorkspace();
+        const timeout = new Promise<never>((_, reject) => {
+          loadTimer = setTimeout(() => reject(new Error("Tải dữ liệu kiện hàng quá lâu. Kiểm tra kết nối rồi thử lại.")), 20000);
+        });
+        const res = await Promise.race([
+          window.electronAPI.handlingUnits.getWorkspace(),
+          timeout,
+        ]);
         if (requestId !== workspaceLoadRequestRef.current) return;
         if (res?.success && res.data) {
+          setWorkspaceLoadError(null);
           const catalog = Array.isArray(res.data.catalog) ? res.data.catalog : [];
           const register = Array.isArray(res.data.register) ? res.data.register : [];
           const rawData = res.data as any;
@@ -1139,8 +1271,30 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
           const qrLabels = Array.isArray(rawData.qrLabels) ? rawData.qrLabels : [];
           const suppliers = Array.isArray(rawData.suppliers) ? rawData.suppliers : [];
           const shiftCheckPolicy = rawData.shiftCheckPolicy;
-          const responseSignature = JSON.stringify({ catalog, register, recentTransactions, packagingSpecs, qrLabels, suppliers, shiftCheckPolicy });
-          handlingUnitsWorkspaceCache = { catalog, register, recentTransactions };
+          const packedInventory = Array.isArray(rawData.packedInventory) ? rawData.packedInventory : [];
+          // Avoid serializing the whole workspace on every refresh. The old
+          // signature copied several hundred history/QR records before React
+          // could paint; these revision hints still detect normal mutations
+          // while keeping refresh work proportional to the response size.
+          const compactSignature = (items: any[]) => items.map((item) => [
+            item?.id || item?.code || item?.unitId || item?.sku || item?.name || item?.reference || "",
+            item?.updatedAt || item?.createdAt || "",
+            item?.status || "",
+            item?.remainingQuantity ?? item?.currentPcs ?? item?.quantity ?? "",
+            item?.name || item?.packagingName || item?.baseUnit || "",
+            item?.location?.zone || item?.location || "",
+          ].join("~")).join(";");
+          const responseSignature = [
+            compactSignature(catalog),
+            compactSignature(register),
+            compactSignature(recentTransactions),
+            compactSignature(packagingSpecs),
+            compactSignature(qrLabels),
+            compactSignature(suppliers),
+            compactSignature(packedInventory),
+            JSON.stringify(shiftCheckPolicy || null),
+          ].join("|");
+          handlingUnitsWorkspaceCache = { catalog, register, recentTransactions, packedInventory };
           if (responseSignature === workspaceResponseSignatureRef.current) return;
           workspaceResponseSignatureRef.current = responseSignature;
           setWorkspace((prev) => ({
@@ -1152,6 +1306,7 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
             qrLabels,
             suppliers,
             shiftCheckPolicy,
+            packedInventory,
           }));
           setSelectedSku((current) =>
             catalog.some((item) => item.sku === current)
@@ -1163,16 +1318,23 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
               ? register.find((unit) => unit.id?.toUpperCase() === current.id?.toUpperCase()) || null
               : null,
           );
+        } else {
+          throw new Error(res?.error || "Không tải được dữ liệu kiện hàng.");
         }
       }
     } catch (err) {
+      loadFailed = true;
       console.warn("Load handling units error:", err);
+      if (requestId === workspaceLoadRequestRef.current) {
+        setWorkspaceLoadError(err instanceof Error ? err.message : "Không tải được dữ liệu kiện hàng.");
+      }
     } finally {
+      clearTimeout(loadTimer);
       workspaceLoadInFlightRef.current = false;
       setIsWorkspaceLoading(false);
       if (workspaceReloadQueuedRef.current) {
         workspaceReloadQueuedRef.current = false;
-        void loadWorkspace();
+        if (!loadFailed) void loadWorkspace();
       }
     }
   };
@@ -1185,9 +1347,13 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
     const unsub = window.electronAPI?.handlingUnits?.onChanged?.(() => {
       void loadWorkspace(true);
     });
+    const unsubStock = window.electronAPI?.products?.onStockChanged?.(() => {
+      void loadWorkspace(true);
+    });
     return () => {
       clearInterval(intervalTimer);
       unsub?.();
+      unsubStock?.();
     };
   }, []);
 
@@ -1197,12 +1363,14 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
       catalog: workspace.catalog,
       register: workspace.register,
       recentTransactions: workspace.recentTransactions,
+      packedInventory: workspace.packedInventory,
     };
   }, [
     isWorkspaceLoading,
     workspace.catalog,
     workspace.register,
     workspace.recentTransactions,
+    workspace.packedInventory,
   ]);
 
   useEffect(() => {
@@ -1235,7 +1403,7 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
         const catLabel =
           getPackageCategory(unit.packageType) === "TAI" ? "Tải" : "Thùng";
         message.warning(
-          `⚠️ Không thể khui! SKU [${unit.skuName}] đang có kiện ${catLabel} [${conflict.id}] đang mở (còn ${fmt(conflict.currentPcs)} ${conflict.unitName}). Vui lòng rút hết kiện cũ trước khi khui kiện ${catLabel} mới!`,
+          `⚠️ Không thể khui! SKU [${unit.skuName}] đang có kiện ${catLabel} [${conflict.id}] đang mở (còn ${fmt(conflict.currentPcs)} ${conflict.unitName}). Vui lòng dùng hết kiện cũ trước khi khui kiện ${catLabel} mới!`,
           6,
         );
         return false;
@@ -1281,43 +1449,6 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
     }
   };
 
-  const handleSealUnit = async (unit: UnitRow) => {
-    try {
-      if (window.electronAPI?.handlingUnits?.sealUnit) {
-        const res = await window.electronAPI.handlingUnits.sealUnit({
-          code: unit.id,
-        });
-        if (!res.success)
-          throw new Error(res.error || "Không thể đóng niêm phong.");
-      }
-      setWorkspace((prev) => ({
-        ...prev,
-        register: prev.register.map((u) =>
-          u.id === unit.id ? { ...u, status: "Nguyên niêm phong" } : u,
-        ),
-        recentTransactions: [
-          {
-            id: `TR-${Date.now()}`,
-            unitId: unit.id,
-            createdAt: new Date().toISOString(),
-            type: "Đóng niêm phong",
-            quantity: unit.currentPcs,
-            note: `Đóng niêm phong lại kiện ${unit.id}`,
-          },
-          ...prev.recentTransactions,
-        ],
-      }));
-      if (detail && detail.id === unit.id) {
-        setDetail({ ...detail, status: "Nguyên niêm phong" });
-      }
-      message.success(
-        `Đã đóng niêm phong lại kiện ${unit.id} (chuyển sang Nguyên niêm phong)!`,
-      );
-    } catch (err: any) {
-      message.error(err?.message || "Lỗi đóng niêm phong");
-    }
-  };
-
   const openSplitUnit = (unit: UnitRow) => {
     if (
       !["Nguyên niêm phong", "Đang sử dụng"].includes(unit.status) ||
@@ -1328,8 +1459,8 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
       return;
     }
     const defaultTarget =
-      unit.currentPcs > 500
-        ? 500
+      unit.currentPcs > 300
+        ? 300
         : Math.max(1, Math.floor(unit.currentPcs / 2));
     setSplitTargetSize(defaultTarget);
     splitOperationKeyRef.current = `split-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
@@ -1379,6 +1510,7 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
           } catch {}
           return {
             id: child.code,
+            sequenceNumber: child.sequenceNumber,
             productId: child.productId,
             purchaseOrderId: child.purchaseOrderId,
             purchaseItemId: child.purchaseItemId,
@@ -1428,7 +1560,7 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
     const hasQuantityChanges = unit.currentPcs !== unit.initialPcs;
     const hasWithdrawalHistory = unitHasWithdrawalHistory(unit);
     const lockedForNonAdmin = !isAdmin && hasWithdrawalHistory;
-    Modal.confirm({
+    AntModal.confirm({
       title: `Xóa kiện ${unit.id}?`,
       icon: <DeleteOutlined style={{ color: "#dc2626" }} />,
       content: lockedForNonAdmin
@@ -1467,50 +1599,67 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
     });
   };
 
+  const getTransferCandidates = (source: UnitRow) => workspace.register.filter(unit =>
+    unit.skuName.trim().toUpperCase() === source.skuName.trim().toUpperCase()
+    && normalizeUnitName(unit.unitName) === normalizeUnitName(source.unitName)
+    && (unit.status === "Đang sử dụng" || (unit.status === "Nguyên niêm phong" && getPackageCategory(unit.packageType) === "LE"))
+  );
+
   const getReturnMergeTargets = (source: UnitRow) =>
     workspace.register.filter((candidate) =>
       candidate.id.trim().toUpperCase() !== source.id.trim().toUpperCase()
       && candidate.skuName.trim().toUpperCase() === source.skuName.trim().toUpperCase()
-      && candidate.status === "Đang sử dụng"
+      && (candidate.status === "Đang sử dụng" || (candidate.status === "Nguyên niêm phong" && getPackageCategory(candidate.packageType) === "LE"))
       && !isReturnHandlingUnit(candidate)
       && normalizeUnitName(candidate.unitName) === normalizeUnitName(source.unitName)
       && capacityForUnit(candidate) > Number(candidate.currentPcs || 0)
     );
 
+  const getTransferMaximumQuantity = (source: UnitRow | null, targetCode: string) => {
+    if (!source || !targetCode) return 0;
+    const target = getReturnMergeTargets(source).find(unit => unit.id === targetCode);
+    return target
+      ? Math.min(Number(source.currentPcs), Math.max(0, capacityForUnit(target) - Number(target.currentPcs)))
+      : 0;
+  };
+
   const openMergeReturnUnit = (source: UnitRow) => {
     const pendingConflict = getPendingCheckConflict(source, workspace.register);
     if (pendingConflict) {
-      message.warning(pendingCheckBlockText(source, pendingConflict, "gộp hàng hoàn"), 8);
+      message.warning(pendingCheckBlockText(source, pendingConflict, "chuyển kiện"), 8);
       return;
     }
     const targets = getReturnMergeTargets(source);
-    if (!targets.length) {
+    const candidates = getTransferCandidates(source);
+    if (!targets.length && candidates.length !== 2) {
       const sameSkuOpened = workspace.register.some((candidate) =>
         candidate.id.trim().toUpperCase() !== source.id.trim().toUpperCase()
         && candidate.skuName.trim().toUpperCase() === source.skuName.trim().toUpperCase()
-        && candidate.status === "Đang sử dụng"
+        && (candidate.status === "Đang sử dụng" || (candidate.status === "Nguyên niêm phong" && getPackageCategory(candidate.packageType) === "LE"))
         && !isReturnHandlingUnit(candidate)
       );
       message.warning(
         sameSkuOpened
-          ? `SKU ${source.skuName} có kiện đang khui nhưng khác đơn vị ${source.unitName} hoặc đã hết sức chứa. Hãy rút bớt hàng ở kiện phù hợp rồi thử gộp lại.`
-          : `SKU ${source.skuName} chưa có kiện thường đang khui và còn sức chứa. Hãy khui một kiện thường cùng SKU, rút bớt hàng để tạo chỗ rồi quay lại gộp kiện hoàn.`,
+          ? `SKU ${source.skuName} có kiện đang khui nhưng khác đơn vị ${source.unitName} hoặc đã hết sức chứa. Hãy chọn kiện đích phù hợp rồi thử chuyển lại.`
+          : `SKU ${source.skuName} chưa có kiện lẻ hoặc kiện đã khui còn sức chứa. Kiện nguyên phải khui trước; kiện đích không vượt số lượng ban đầu và tối đa 300.`,
       );
       return;
     }
-    const firstTarget = targets[0];
-    const availableCapacity = Math.max(0, capacityForUnit(firstTarget) - Number(firstTarget.currentPcs || 0));
     setMergeReturnUnit(source);
-    setMergeTargetCode(firstTarget.id);
-    setMergeQuantity(Math.min(Number(source.currentPcs), availableCapacity));
+    setMergeTargetCode(candidates.length === 2 ? candidates.find(unit => unit.id !== source.id)?.id || "" : "");
+    setMergeQuantity(null);
     mergeReturnOperationKeyRef.current = `merge-return-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
   };
 
   const handleMergeReturnUnit = async () => {
-    if (!mergeReturnUnit || !mergeTargetCode || !mergeQuantity || isMergingReturnUnit) return;
+    if (!mergeReturnUnit || !mergeTargetCode || !Number.isSafeInteger(mergeQuantity) || !mergeQuantity || isMergingReturnUnit) return;
     const target = getReturnMergeTargets(mergeReturnUnit).find(unit => unit.id === mergeTargetCode);
     if (!target) {
       message.warning("Kiện đích không còn hợp lệ. Vui lòng chọn lại.");
+      return;
+    }
+    if (mergeQuantity > getTransferMaximumQuantity(mergeReturnUnit, mergeTargetCode)) {
+      message.warning("Số lượng chuyển vượt tồn kiện nguồn hoặc sức chứa kiện nhận.");
       return;
     }
     setIsMergingReturnUnit(true);
@@ -1521,118 +1670,18 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
         quantity: mergeQuantity,
         idempotencyKey: mergeReturnOperationKeyRef.current,
       });
-      if (!result?.success) throw new Error(result?.error || "Không thể gộp kiện hàng hoàn.");
+      if (!result?.success) throw new Error(result?.error || "Không thể chuyển kiện.");
 
-      message.success(`Đã gộp ${fmt(mergeQuantity)} ${mergeReturnUnit.unitName} từ ${mergeReturnUnit.id} vào ${target.id}.`);
+      message.success(`Đã chuyển ${fmt(mergeQuantity)} ${mergeReturnUnit.unitName} từ ${mergeReturnUnit.id} sang ${target.id}.`);
       setMergeReturnUnit(null);
       setMergeTargetCode("");
       setMergeQuantity(null);
       setDetail(null);
       await loadWorkspace(true);
     } catch (error: any) {
-      message.error(error?.message || "Không thể gộp kiện hàng hoàn.");
+      message.error(error?.message || "Không thể chuyển kiện.");
     } finally {
       setIsMergingReturnUnit(false);
-    }
-  };
-
-  const handlePickUnit = (unit: UnitRow) => {
-    const pendingConflict = getPendingCheckConflict(unit, workspace.register);
-    if (pendingConflict) {
-      message.warning(pendingCheckBlockText(unit, pendingConflict, "rút hàng"), 8);
-      return;
-    }
-    pickRequestIdRef.current = `HU-PICK-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    setPickingUnit(unit);
-    pickForm.setFieldsValue({
-      quantity: Math.min(50, unit.currentPcs),
-    });
-    setShowPickModal(true);
-  };
-
-  const handlePickSubmit = async () => {
-    if (isSubmittingPickRef.current) return;
-    if (!pickingUnit) return;
-    isSubmittingPickRef.current = true;
-    setIsSubmittingPick(true);
-    try {
-      const pendingConflict = getPendingCheckConflict(pickingUnit, workspace.register);
-      if (pendingConflict) {
-        throw new Error(pendingCheckBlockText(pickingUnit, pendingConflict, "rút hàng"));
-      }
-      const values = await pickForm.validateFields();
-      const qty = Number(values.quantity || 0);
-      const destination: PickDestination = "PACKING";
-      const destinationMeta = PICK_DESTINATIONS[destination];
-      if (qty <= 0 || qty > pickingUnit.currentPcs) {
-        throw new Error(`Số lượng rút phải từ 1 đến ${pickingUnit.currentPcs}`);
-      }
-      const isFinalPick = qty === pickingUnit.currentPcs;
-      const actualQty = qty;
-      let telegramWarning = "";
-      if (window.electronAPI?.handlingUnits?.pickUnit) {
-        const res = await window.electronAPI.handlingUnits.pickUnit({
-          code: pickingUnit.id,
-          quantity: qty,
-          destination,
-          note: values.note,
-          idempotencyKey: pickRequestIdRef.current,
-        });
-        if (!res.success) throw new Error(res.error || "Lỗi rút hàng.");
-        if (res.data?.duplicate) return;
-        if (res.data?.telegramNotified === false) {
-          telegramWarning =
-            res.data?.telegramError || "Không gửi được thông báo Telegram.";
-        }
-      }
-      const remaining = pickingUnit.currentPcs - qty;
-      const nextStatus = isFinalPick ? "Chờ kiểm" : "Đang sử dụng";
-      setWorkspace((prev) => ({
-        ...prev,
-        register: prev.register.map((u) =>
-          u.id === pickingUnit.id
-            ? { ...u, currentPcs: remaining, status: nextStatus }
-            : u,
-        ),
-        recentTransactions: [
-          {
-            id: `TR-${Date.now()}`,
-            unitId: pickingUnit.id,
-            createdAt: new Date().toISOString(),
-            type: isFinalPick ? "Chờ kiểm chốt hết kiện" : destinationMeta.transactionType,
-            quantity: -actualQty,
-            remaining,
-            note: isFinalPick
-              ? `Đã rút hết theo sổ; chờ kiểm số thực tế còn lại trong kiện ${pickingUnit.id}`
-              : `Rút ${fmt(actualQty)} ${pickingUnit.unitName} từ kiện ${pickingUnit.id} sang ${destinationMeta.label}${values.note ? ` · ${values.note}` : ""}`,
-          },
-          ...prev.recentTransactions,
-        ],
-      }));
-      if (detail && detail.id === pickingUnit.id) {
-        setDetail({ ...detail, currentPcs: remaining, status: nextStatus });
-      }
-      message.success(
-        isFinalPick
-          ? `Kiện ${pickingUnit.id} đã chuyển sang Chờ kiểm. Hãy mở tại tab Chờ kiểm để chốt số thực tế.`
-          : `Đã chuyển ${fmt(qty)} ${pickingUnit.unitName} sang ${destinationMeta.label}.`,
-      );
-      if (telegramWarning) {
-        message.warning(
-          `Đã ghi nhận rút hàng nhưng Telegram chưa nhận thông báo: ${telegramWarning}`,
-          8,
-        );
-      }
-      setShowPickModal(false);
-      setPickingUnit(null);
-      pickForm.resetFields();
-    } catch (err: any) {
-      if (!err?.errorFields) {
-        message.error(err?.message || "Không thể rút hàng.");
-      }
-    } finally {
-      isSubmittingPickRef.current = false;
-      setIsSubmittingPick(false);
     }
   };
 
@@ -1781,43 +1830,7 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
           }
         }
       } else if (cmd === "/rut") {
-        const targetCode = parts[1]?.toUpperCase();
-        const qty = parseInt(parts[2], 10);
-        if (!targetCode || isNaN(qty) || qty <= 0) {
-          botReply = `⚠️ <b>Vui lòng nhập đúng cú pháp!</b>\nCú pháp: <code>/rut [MÃ_KIỆN] [SỐ_LƯỢNG]</code>\n👉 Ví dụ: <code>/rut KN-5DTR-03 50</code>`;
-        } else {
-          const targetUnit = workspace.register.find(
-            (u) => u.id.toUpperCase() === targetCode,
-          );
-          if (!targetUnit) {
-            botReply = `❌ Không tìm thấy kiện <code>${targetCode}</code> trong kho!`;
-          } else if (targetUnit.status !== "Đang sử dụng") {
-            botReply = `❌ Kiện <code>${targetCode}</code> chưa khui! Hãy gửi lệnh <code>/khui ${targetCode}</code> trước.`;
-          } else if (qty > targetUnit.currentPcs) {
-            botReply = `❌ Số lượng rút (${qty}) lớn hơn tồn còn lại trong kiện (${targetUnit.currentPcs} ${targetUnit.unitName})!`;
-          } else {
-            const pendingConflict = getPendingCheckConflict(targetUnit, workspace.register);
-            if (pendingConflict) {
-              botReply = `❌ ${pendingCheckBlockText(targetUnit, pendingConflict, "rút hàng")}`;
-            } else {
-              const pickResult = await window.electronAPI.handlingUnits.pickUnit({
-                code: targetUnit.id,
-                quantity: qty,
-                destination: "PACKING",
-                note: "Rút hàng từ cửa sổ Telegram trong ứng dụng",
-                idempotencyKey: `HU-TG-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-              });
-              if (!pickResult?.success) {
-                botReply = `❌ ${pickResult?.error || "Không thể ghi nhận rút hàng vào hệ thống kho."}`;
-              } else {
-                const remaining = Number(pickResult.data?.remaining ?? (targetUnit.currentPcs - qty));
-                const nextStatus = remaining === 0 ? "Chờ kiểm" : "Đang sử dụng";
-                await loadWorkspace(true);
-                botReply = `🚀 <b>RÚT HÀNG SANG KHU ĐÓNG GÓI THÀNH CÔNG!</b>\n📦 Mã Kiện: <code>${targetUnit.id}</code>\n📉 Đã rút: <b>${fmt(qty)} ${targetUnit.unitName}</b>\n📊 Còn lại trong kiện: <b>${fmt(remaining)} ${targetUnit.unitName}</b> ${nextStatus === "Chờ kiểm" ? "<i>(Chờ kiểm thực tế)</i>" : ""}`;
-              }
-            }
-          }
-        }
+        botReply = "⚠️ Rút hàng thủ công đã ngừng sử dụng. Xuất TMDT tự động phân bổ hàng từ kiện; không cần rút thêm.";
       } else if (cmd === "/kiem") {
         const targetCode = parts[1]?.toUpperCase();
         const targetUnit = workspace.register.find(
@@ -1829,9 +1842,9 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
           botReply = `🔍 <b>THÔNG TIN KIỆN ${targetUnit.id}</b>\n🏷️ SKU: <b>${targetUnit.skuName}</b>\n📦 Quy cách: ${targetUnit.packageLabel || targetUnit.packageType}\n📊 Số lượng: <b>${fmt(targetUnit.currentPcs)} / ${fmt(targetUnit.initialPcs)} ${targetUnit.unitName}</b>\n📍 Vị trí: <b>${locationFor(targetUnit)}</b>\n🏷️ Trạng thái: <b>${targetUnit.status}</b>`;
         }
       } else if (cmd === "/help" || cmd === "/start") {
-        botReply = `📦 <b>CÁC LỆNH KHO HỖ TRỢ:</b>\n• <code>/khui [MÃ_KIỆN]</code> — Mở niêm phong kiện\n• <code>/rut [MÃ_KIỆN] [SỐ_LƯỢNG]</code> — Rút hàng sang khu đóng gói\n• <code>/ton</code> — Báo cáo tổng tồn kho\n• <code>/kiem [MÃ_KIỆN]</code> — Tra cứu chi tiết kiện`;
+        botReply = `📦 <b>CÁC LỆNH KHO HỖ TRỢ:</b>\n• <code>/khui [MÃ_KIỆN]</code> — Mở niêm phong kiện\n• <code>/ton</code> — Báo cáo tổng tồn kho\n• <code>/kiem [MÃ_KIỆN]</code> — Tra cứu chi tiết kiện`;
       } else {
-        botReply = `⚠️ Lệnh "<b>${textToSend}</b>" không hợp lệ.\n👉 Gõ <code>/help</code> hoặc <code>/ton</code>, <code>/khui [MÃ_KIỆN]</code>, <code>/rut [MÃ_KIỆN] [SỐ]</code> để thao tác.`;
+        botReply = `⚠️ Lệnh "<b>${textToSend}</b>" không hợp lệ.\n👉 Gõ <code>/help</code> hoặc <code>/ton</code>, <code>/khui [MÃ_KIỆN]</code> để thao tác.`;
       }
 
       // Gửi phản hồi của bot lên Telegram và thêm vào chatbox
@@ -1995,17 +2008,12 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
         location: { zone: values.zone, rack: values.rack || "" },
         note: values.note,
       });
-      if (!result?.success)
-        throw new Error(result?.error || "Không thể cập nhật kiện.");
+      if (!result?.success) throw new Error(result?.error || "Không thể cập nhật kiện.");
 
       const remaining = Number(values.remainingQuantity);
       let nextStatus = editingUnit.status;
       if (remaining === 0 && nextStatus !== "Chờ kiểm") nextStatus = "Đã hết";
-      if (
-        remaining > 0 &&
-        (nextStatus === "Đã hết" || nextStatus === "Chờ kiểm")
-      )
-        nextStatus = "Đang sử dụng";
+      if (remaining > 0 && (nextStatus === "Đã hết" || nextStatus === "Chờ kiểm")) nextStatus = "Đang sử dụng";
       const updatedUnit: UnitRow = {
         ...editingUnit,
         packageType: values.packagingName,
@@ -2018,17 +2026,14 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
 
       setWorkspace((previous) => ({
         ...previous,
-        register: previous.register.map((unit) =>
-          unit.id === updatedUnit.id ? updatedUnit : unit,
-        ),
+        register: previous.register.map((unit) => unit.id === updatedUnit.id ? updatedUnit : unit),
       }));
       setDetail(updatedUnit);
       setEditingUnit(null);
       editUnitForm.resetFields();
       message.success(`Đã cập nhật kiện ${updatedUnit.id}.`);
     } catch (error: any) {
-      if (!error?.errorFields)
-        message.error(error?.message || "Không thể cập nhật kiện.");
+      if (!error?.errorFields) message.error(error?.message || "Không thể cập nhật kiện.");
     } finally {
       setIsSavingUnitEdit(false);
     }
@@ -2061,6 +2066,13 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
     return index;
   }, [workspace.register]);
 
+  const packedBySku = useMemo(() => {
+    const totals = new Map<string, number>();
+    for (const lot of workspace.packedInventory) for (const component of lot.components) {
+      totals.set(component.sku, (totals.get(component.sku) || 0) + Math.max(0, lot.packedQty - (lot.issuedQty || 0)) * component.quantity);
+    }
+    return totals;
+  }, [workspace.packedInventory]);
   const allocationGaps = useMemo(() =>
     workspace.catalog
       .map((item) => {
@@ -2071,12 +2083,12 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
         return {
           ...item,
           allocated,
-          missingQuantity: Math.max(0, Number(item.stock || 0) - allocated),
+          missingQuantity: Math.max(0, Number(item.stock || 0) - allocated - (packedBySku.get(item.sku) || 0)),
         };
       })
       .filter((item) => item.missingQuantity > 0)
       .sort((a, b) => b.missingQuantity - a.missingQuantity),
-  [workspace.catalog, unitsBySku]);
+  [workspace.catalog, unitsBySku, packedBySku]);
   const allocationGapBySku = useMemo(
     () => new Map(allocationGaps.map((item) => [item.sku, item.missingQuantity])),
     [allocationGaps],
@@ -2224,6 +2236,19 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
     () => (selected ? unitsBySku.get(selected.sku) || [] : []),
     [selected, unitsBySku],
   );
+  const orderedSelectedUnits = useMemo(() => {
+    const pickView = (unit: UnitRow) => ({ code: unit.id, quantity: unit.currentPcs, createdAt: unit.createdAt,
+      status: unit.status === "Đang sử dụng" ? "opened" : unit.status === "Nguyên niêm phong" ? "sealed" : unit.status });
+    return [...selectedUnits].sort((a, b) => compareHandlingUnitPickOrder(pickView(a), pickView(b)));
+  }, [selectedUnits]);
+  const displaySequenceByUnitId = useMemo(() => {
+    // Show a compact pick queue; completed or split history must not leave
+    // gaps such as 1, 3 in the active warehouse view.
+    const activeUnits = orderedSelectedUnits.filter(
+      (unit) => !["Đã hết", "Đã tách"].includes(unit.status),
+    );
+    return new Map(activeUnits.map((unit, index) => [unit.id, index + 1] as const));
+  }, [orderedSelectedUnits]);
   const selectedStats = useMemo(
     () =>
       selectedUnits.reduce(
@@ -2240,20 +2265,20 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
       ),
     [selectedUnits],
   );
-  const selectedAllocated = selectedStats.allocated;
-  const selectedDifference =
-    selectedAllocated - Number(selected?.stock || 0);
   const sealedCount = selectedStats.sealed;
   const openedCount = selectedStats.opened;
   const pendingCheckCount = selectedStats.pendingCheck;
   const emptyCount = selectedStats.empty;
   const splitCount = selectedStats.split;
+  const activeSequenceCount = orderedSelectedUnits.filter(
+    (unit) => unit.status !== "Đã hết" && unit.status !== "Đã tách",
+  ).length;
 
   const displayedUnits = useMemo(() => {
     if (statusFilter === "all")
-      return selectedUnits.filter((u) => u.status !== "Đã hết");
-    return selectedUnits.filter((u) => u.status === statusFilter);
-  }, [selectedUnits, statusFilter]);
+      return orderedSelectedUnits.filter((u) => u.status !== "Đã hết");
+    return orderedSelectedUnits.filter((u) => u.status === statusFilter);
+  }, [orderedSelectedUnits, statusFilter]);
 
   useEffect(() => {
     setVisibleUnitLimit(100);
@@ -2265,27 +2290,26 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
   );
 
   const selectedSkuTransactions = useMemo(() => {
-    if (!selected?.sku) return [];
-    const targetSku = String(selected.sku).trim().toUpperCase();
-    const skuByUnitCode = new Map(
-      workspace.register.map((unit) => [
-        String(unit.id || "").trim().toUpperCase(),
-        String(unit.skuName || "").trim().toUpperCase(),
-      ]),
-    );
-    return workspace.recentTransactions.filter((item) => {
-      const transactionSku = String(
-        item?.sku
-          || skuByUnitCode.get(String(item?.unitId || "").trim().toUpperCase())
-          || "",
-      ).trim().toUpperCase();
-      return transactionSku === targetSku;
-    });
-  }, [selected?.sku, workspace.recentTransactions, workspace.register]);
+    return ledgerHistory;
+  }, [ledgerHistory]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const sku = String(selected?.sku || "").trim();
+    if (!sku || activeModuleTab !== "history") return undefined;
+    setLedgerHistoryLoading(true);
+    void window.electronAPI.inventoryLogs.getBySku({ sku, limit: 500 })
+      .then((result) => {
+        if (!cancelled) setLedgerHistory(result.success && Array.isArray(result.data) ? result.data : []);
+      })
+      .catch(() => { if (!cancelled) setLedgerHistory([]); })
+      .finally(() => { if (!cancelled) setLedgerHistoryLoading(false); });
+    return () => { cancelled = true; };
+  }, [selected?.sku, activeModuleTab]);
 
   const historyTypes = useMemo(
     () =>
-      [...new Set(selectedSkuTransactions.map((item) => String(item.type || "Hoạt động khác")))].sort(),
+      [...new Set(selectedSkuTransactions.map((item) => String(item.referenceType || item.type || "Hoạt động khác")))].sort(),
     [selectedSkuTransactions],
   );
 
@@ -2301,13 +2325,13 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
       .filter((item) => {
         const createdAt = new Date(item.createdAt || 0).getTime();
         const content = normalizeSearch(
-          [item.unitId, item.sku, item.type, item.note, item.actor, item.destination]
+          [item.unitId, item.sku, item.type, item.referenceType, item.reference, item.note, item.actor, item.destination]
             .filter(Boolean)
             .join(" "),
         );
         return (
           (!term || content.includes(term)) &&
-          (historyType === "all" || item.type === historyType) &&
+          (historyType === "all" || (item.referenceType || item.type) === historyType) &&
           createdAt >= fromTime &&
           createdAt <= toTime
         );
@@ -2332,7 +2356,12 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
   const shiftCheckCandidates = useMemo<ShiftCheckCandidate[]>(() => {
     const todayKey = workspace.shiftCheckPolicy?.date || localDayKey(new Date());
     const outstanding = new Map((workspace.shiftCheckPolicy?.outstanding || []).map((entry) => [entry.code, entry]));
-    const trackedCodes = new Set(workspace.shiftCheckPolicy?.trackedCodes || []);
+    const packedCandidates: ShiftCheckCandidate[] = workspace.packedInventory.flatMap(lot => {
+      const code = `PACKED:${lot.assignmentId}`.toUpperCase();
+      const duty = outstanding.get(code);
+      if (!duty) return [];
+      return [{ packed: true, unit: { id: code, skuName: lot.components.map(component => `${component.quantity} ${component.sku}`).join(' + '), variantName: lot.code, packageType: 'Combo đóng sẵn', unitName: 'combo', status: 'Đóng sẵn', initialPcs: 100000, currentPcs: Math.max(0, lot.packedQty - (lot.issuedQty || 0)), updatedAt: lot.updatedAt }, withdrawalCount: 0, withdrawnQuantity: 0, lastWithdrawalAt: new Date(duty.requiredAt).getTime() }];
+    });
     return workspace.register
       .map((unit) => {
         if (unit.status === "Đã tách" || unit.status === "split") return null;
@@ -2340,6 +2369,9 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
         const obligation = outstanding.get(code);
         const history = transactionsByUnitId.get(unit.id.trim().toUpperCase()) || [];
         const isPendingCheck = unit.status === "Chờ kiểm" || unit.status === "pending_check";
+        const obligationRequiredToday = Boolean(
+          obligation && obligation.date === todayKey,
+        );
         const latestCompletedCheck = history
           .filter(isCompletedCheckTransaction)
           .reduce(
@@ -2358,7 +2390,16 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
         // A pending package remains actionable across day boundaries. The old
         // today-only filter made carried-over pending packages disappear from
         // the end-of-shift badge even though they still blocked the same SKU.
-        if (!isPendingCheck && !obligation && (trackedCodes.has(code) || withdrawals.length === 0)) return null;
+        // A package that the TMDT physical allocation has depleted is already
+        // verified at zero. Historical tracking must not resurrect it in the
+        // end-of-shift checklist; only an outstanding duty or a new movement
+        // can make it actionable again.
+        if ((unit.status === "Đã hết" || unit.status === "empty") && !obligation) return null;
+        // An opened package that was left unchecked on an older day must not
+        // keep resurfacing as a fresh check every morning. A new withdrawal
+        // creates a new obligation with today's requiredAt; pending packages
+        // remain visible until they are explicitly finalized.
+        if (!isPendingCheck && !obligationRequiredToday && withdrawals.length === 0) return null;
         return {
           unit,
           withdrawalCount: withdrawals.length,
@@ -2374,8 +2415,9 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
         };
       })
       .filter((item): item is ShiftCheckCandidate => Boolean(item))
+      .concat(packedCandidates)
       .sort((a, b) => b.lastWithdrawalAt - a.lastWithdrawalAt);
-  }, [workspace.register, workspace.shiftCheckPolicy, transactionsByUnitId]);
+  }, [workspace.register, workspace.packedInventory, workspace.shiftCheckPolicy, transactionsByUnitId]);
 
   const mandatoryShiftCheckCandidates = useMemo(
     () => shiftCheckCandidates.filter(({ unit }) => unit.status === "Chờ kiểm" || unit.status === "pending_check"),
@@ -2385,7 +2427,10 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
   const scopedShiftCheckCandidates = shiftCheckScope === "mandatory"
     ? mandatoryShiftCheckCandidates
     : shiftCheckCandidates;
-  const visibleShiftCheckCandidates = scopedShiftCheckCandidates.slice(0, 100);
+  const visibleShiftCheckCandidates = (shiftCheckFocusCode
+    ? scopedShiftCheckCandidates.filter(({ unit }) => unit.id === shiftCheckFocusCode)
+    : scopedShiftCheckCandidates
+  ).slice(0, 100);
 
   const openShiftCheck = (scope: "all" | "mandatory" = "all") => {
     const candidates = scope === "mandatory"
@@ -2400,6 +2445,7 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
       return;
     }
     setShiftCheckScope(scope);
+    setShiftCheckFocusCode(null);
     setShiftCheckDrafts(
       Object.fromEntries(
         candidates.map(({ unit }) => [
@@ -2411,6 +2457,21 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
     shiftCheckRequestIdRef.current = `HU-SHIFT-${Date.now()}-${Math.random()
       .toString(36)
       .slice(2, 8)}`;
+    setShowShiftCheckModal(true);
+  };
+
+  const openShiftCheckForUnit = (unit: UnitRow) => {
+    const candidate = shiftCheckCandidates.find((entry) => entry.unit.id === unit.id);
+    if (!candidate) {
+      message.info("Kiện này hiện chưa phát sinh nghĩa vụ kiểm cuối ca.");
+      return;
+    }
+    setShiftCheckScope("all");
+    setShiftCheckFocusCode(unit.id);
+    shiftCheckRequestIdRef.current = `HU-SHIFT-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    setShiftCheckDrafts({
+      [unit.id]: { actualQuantity: unit.currentPcs, reason: "", note: "" },
+    });
     setShowShiftCheckModal(true);
   };
 
@@ -2451,6 +2512,7 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
         return {
           code: unit.id,
           expectedQuantity: unit.currentPcs,
+          expectedUpdatedAt: unit.id.startsWith('PACKED:') ? unit.updatedAt : undefined,
           actualQuantity,
           reason: draft?.reason || "",
           note: draft?.note || "",
@@ -2491,6 +2553,7 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
       );
       setShowShiftCheckModal(false);
       setShiftCheckDrafts({});
+      setShiftCheckFocusCode(null);
       void loadWorkspace(true);
     } catch (error: any) {
       message.error(error?.message || "Không thể hoàn tất kiểm cuối ca.");
@@ -2532,11 +2595,11 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
 
   const currentAllocAllocated = useMemo(() => {
     if (!currentAllocProduct) return 0;
-    return (unitsBySku.get(currentAllocProduct.sku) || []).reduce(
+    return (packedBySku.get(currentAllocProduct.sku) || 0) + (unitsBySku.get(currentAllocProduct.sku) || []).reduce(
       (sum, unit) => sum + unit.currentPcs,
       0,
     );
-  }, [currentAllocProduct, unitsBySku]);
+  }, [currentAllocProduct, unitsBySku, packedBySku]);
 
   const currentAllocDifference = useMemo(() => {
     if (!currentAllocProduct) return 0;
@@ -2704,7 +2767,8 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
       );
       setShowAllocation(false);
       allocationForm.resetFields();
-      setPrintUnits(created);
+      setPrintUnits(Array.isArray(saveResult.data) ? saveResult.data as UnitRow[] : created);
+      void loadWorkspace(true);
     } catch (error: any) {
       if (!error?.errorFields)
         message.error(error?.message || "Không tạo được kiện.");
@@ -2737,6 +2801,8 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
   };
 
   const openQuickCreate = () => {
+    // Quét QR là luồng nhập kiện chính; vẫn giữ thêm thủ công cho kiện lẻ.
+    setShowLegacyQrEntry(true);
     quickReceivingOperationKeyRef.current = `quick-receive-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
     setQuickScanLines([]);
     setQuickManualSku(undefined);
@@ -2752,7 +2818,6 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
       if (result?.success) setQuickGoodsCompanies(result.data || []);
     });
     setShowQuickCreate(true);
-    window.setTimeout(() => quickScanInputRef.current?.focus?.(), 120);
   };
 
   const latestQrSuggestion = (sku?: string) => {
@@ -2799,7 +2864,9 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
   const openQrLabelPrint = (label: any, size: "A6" | "A7") => {
     handlePrintLabels([{
       id: label.code,
+      sequenceNumber: label.sequenceNumber,
       skuName: label.sku,
+      color: label.color,
       packageType: label.packagingName,
       packageLabel: `${label.packagingName} · ${fmt(Number(label.conversionFactor))} ${label.baseUnit}`,
       unitName: label.baseUnit,
@@ -2833,7 +2900,9 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
       setPrintUnits(
         labels.map((label: any) => ({
           id: label.code,
+          sequenceNumber: label.sequenceNumber,
           skuName: label.sku,
+          color: label.color,
           packageType: label.packagingName,
           packageLabel: `${label.packagingName} · ${fmt(label.conversionFactor)} ${label.baseUnit}`,
           unitName: label.baseUnit,
@@ -2906,6 +2975,11 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
       playQuickScanSound("fail");
       return;
     }
+    if (factor > 300 && label.packagingName !== "Lẻ") {
+      setQuickScanError(`Kiện ${label.code} có ${factor} ${label.baseUnit}; tối đa 300. Hãy tách kiện trước khi nhập.`);
+      playQuickScanSound("fail");
+      return;
+    }
     setQuickScanLines((previous) => [
       ...previous,
       {
@@ -2949,6 +3023,10 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
       message.error("Số lượng hàng thủ công phải lớn hơn 0.");
       return;
     }
+    if (quantity > 300) {
+      message.error("Mỗi kiện tối đa 300. Hãy tách thực tế và thêm riêng từng kiện (ví dụ 300, 300, 300, 100).");
+      return;
+    }
     if (!supplier) {
       message.error("Vui lòng chọn nhà cung cấp cho hàng nhập thủ công.");
       return;
@@ -2982,7 +3060,7 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
   const quickQrLines = quickScanLines.filter((line) => line.source !== "MANUAL");
   const quickManualLines = quickScanLines.filter((line) => line.source === "MANUAL");
   const quickLineQuantity = (line: QuickScanLine) => line.loads * line.conversionFactor;
-  const quickLoadTotal = quickQrLines.reduce((total, line) => total + line.loads, 0);
+  const quickLoadTotal = quickScanLines.reduce((total, line) => total + line.loads, 0);
   const quickPieceTotal = quickScanLines.reduce(
     (total, line) => total + quickLineQuantity(line),
     0,
@@ -3147,6 +3225,16 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
       );
       setShowQuickCreate(false);
       void loadWorkspace(true);
+      const receivedUnits = (result.data as any).units;
+      if (Array.isArray(receivedUnits) && receivedUnits.length) {
+        handlePrintLabels(receivedUnits.map((unit: any) => ({
+          id: unit.code, sequenceNumber: unit.sequenceNumber, skuName: unit.sku,
+          color: unit.color,
+          packageType: unit.packagingName, unitName: unit.baseUnit,
+          initialPcs: unit.initialQuantity, currentPcs: unit.remainingQuantity,
+          status: "Nguyên niêm phong",
+        })), "A6");
+      }
     } catch (error: any) {
       message.error(error?.message || "Không thể xác nhận nhập kho.");
     } finally {
@@ -3154,13 +3242,13 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
     }
   };
 
-  if (isWorkspaceLoading) {
+  if (isWorkspaceLoading && !workspaceLoadError) {
     return (
       <main className="hu-home">
         <div className="hu-workspace-loading">
           <img
             className="hu-workspace-loading-logo"
-            src="/logo_splash.png"
+            src="./logo_splash.png"
             alt="DBY Software"
           />
           <span>Đang tải dữ liệu kiện hàng...</span>
@@ -3174,8 +3262,23 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
     );
   }
 
+  if (workspaceLoadError && !workspace.catalog.length && !workspace.register.length) {
+    return (
+      <main className="hu-home">
+        <div className="hu-workspace-loading">
+          <img className="hu-workspace-loading-logo" src="./logo_splash.png" alt="DBY Software" />
+          <span>{workspaceLoadError}</span>
+          <Button type="primary" onClick={() => { setWorkspaceLoadError(null); setIsWorkspaceLoading(true); void loadWorkspace(true); }}>
+            Thử lại
+          </Button>
+        </div>
+      </main>
+    );
+  }
+
   return (
     <main className="hu-home">
+      {workspaceLoadError && <Alert type="warning" showIcon message={workspaceLoadError} description="Đang hiển thị dữ liệu đã tải trước đó." action={<Button onClick={() => void loadWorkspace(true)}>Thử lại</Button>} />}
       <nav className="hu-module-nav" aria-label="Điều hướng quản lý kiện hàng">
         <Flex align="center" gap={8}>
           {onExit ? (
@@ -3253,26 +3356,6 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
           </Tooltip>
         </Flex>
       </nav>
-      {mandatoryShiftCheckCandidates.length > 0 && (
-        <Alert
-          type="warning"
-          showIcon
-          icon={<ExclamationCircleFilled />}
-          className="hu-shift-check-alert"
-          message={
-            <span>
-              <b>Cần kiểm và chốt:</b> có {mandatoryShiftCheckCandidates.length} kiện đang ở trạng thái Chờ kiểm.
-              {' '}Hãy nhập số thực tế trước khi tiếp tục thao tác cùng SKU.
-            </span>
-          }
-          action={
-            <Button size="small" type="primary" onClick={() => openShiftCheck("mandatory")}>
-              Kiểm ngay
-            </Button>
-          }
-          style={{ margin: "12px 16px 0", borderRadius: 10 }}
-        />
-      )}
       <section className="hu-browser">
         <aside className="hu-sku-panel">
           <Flex
@@ -3317,8 +3400,10 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
                   <div className="hu-sku-group" key={group.groupName}>
                     <button
                       type="button"
-                      className={`hu-sku-group-header ${isOpen ? "is-open" : ""}`}
-                      onClick={() => toggleGroup(group.groupName)}
+                      className={`hu-sku-group-header ${isOpen ? "is-open" : ""} ${group.children.some(item => item.sku === selected?.sku) ? "is-selected" : ""}`}
+                      onClick={() => {
+                        toggleGroup(group.groupName);
+                      }}
                     >
                       <RightOutlined className="hu-sku-group-arrow" />
                       <span className="hu-sku-group-label">
@@ -3398,8 +3483,25 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
             )}
           </div>
         </aside>
-        <section className="hu-selected-panel">
-          {selected ? (
+        <section className={`hu-selected-panel hu-selected-panel--${activeModuleTab}`}>
+          <header className="hu-workspace-heading">
+            <div>
+              <Typography.Title level={2}>Quản lý kiện hàng</Typography.Title>
+            </div>
+            {activeModuleTab === "prepack" && (isAdmin || user?.role === "manager") && (
+              <Button className="hu-packing-assign" type="primary" icon={<UserAddOutlined />} onClick={() => setPrepackCreateRequest(value => value + 1)}>Giao việc</Button>
+            )}
+          </header>
+          <div className="hu-module-tabs" role="tablist" aria-label="Phân hệ quản lý kiện hàng">
+            <button type="button" role="tab" id="hu-tab-units" aria-controls="hu-module-content" aria-selected={activeModuleTab === "units"} className={`hu-module-tab ${activeModuleTab === "units" ? "is-active" : ""}`} onClick={() => { setActiveModuleTab("units"); setHistoryScope("units"); }}>Kiện hàng</button>
+            <button type="button" role="tab" id="hu-tab-prepack" aria-controls="hu-module-content" aria-selected={activeModuleTab === "prepack"} className={`hu-module-tab ${activeModuleTab === "prepack" ? "is-active" : ""}`} onClick={() => { setActiveModuleTab("prepack"); setHistoryScope("prepack"); }}>Đóng gói sẵn</button>
+            <button type="button" role="tab" id="hu-tab-history" aria-controls="hu-module-content" aria-selected={activeModuleTab === "history"} className={`hu-module-tab ${activeModuleTab === "history" ? "is-active" : ""}`} onClick={() => setActiveModuleTab("history")}>Lịch sử</button>
+          </div>
+          <div ref={moduleContentRef} className="hu-tab-content" id="hu-module-content" role="tabpanel" aria-labelledby={`hu-tab-${activeModuleTab}`}>
+          {activeModuleTab === "history" && <div className="hu-history-scope"><Segmented value={historyScope} onChange={value => setHistoryScope(value as "units" | "prepack")} options={[{ value: "units", label: "Kiện hàng" }, { value: "prepack", label: "Đóng gói sẵn" }]} /></div>}
+          {(activeModuleTab === "prepack" || (activeModuleTab === "history" && historyScope === "prepack")) ? (
+            <PrepackManagement view={activeModuleTab === "history" ? "history" : "report"} createRequest={prepackCreateRequest} onCreateHandled={() => setPrepackCreateRequest(0)} sourceUnits={workspace.register.map(unit => ({ id: unit.id, skuName: unit.skuName, unitName: unit.unitName, status: unit.status, currentPcs: unit.currentPcs, packageType: unit.packageType }))} productSkus={selected ? workspace.catalog.filter(item => item.productGroup === selected.productGroup).map(item => item.sku) : undefined} />
+          ) : selected ? (
             <>
               <header className="hu-selected-header">
                 <div className="hu-header-left">
@@ -3422,29 +3524,11 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
                       </span>
                     </div>
                     <div className="hu-header-metric-chips">
-                      <Tooltip title="Tổng số lượng thực tế đang quản lý trong các kiện">
-                        <div className="hu-metric-chip hu-chip-stock">
-                          <span className="hu-chip-label">Tồn kiện:</span>
-                          <span className="hu-chip-val">
-                            <strong>{fmt(selectedAllocated)} {selected.unitName}</strong>
-                          </span>
-                        </div>
-                      </Tooltip>
-                      <Tooltip title="Số lượng tồn kho ghi nhận trên phần mềm hệ thống">
+                      <Tooltip title="Số tồn duy nhất dùng cho bán hàng, lấy từ tồn SKU trên phần mềm; xuất TMDT sẽ cập nhật số này một lần.">
                         <div className="hu-metric-chip hu-chip-allocated">
-                          <span className="hu-chip-label">Tồn phần mềm:</span>
+                          <span className="hu-chip-label">Tồn kho:</span>
                           <span className="hu-chip-val">
                             <strong>{fmt(selected.stock)} {selected.unitName}</strong>
-                          </span>
-                        </div>
-                      </Tooltip>
-                      <Tooltip title="Chênh lệch giữa số lượng trong kiện và tồn phần mềm">
-                        <div
-                          className={`hu-metric-chip hu-chip-unallocated ${selectedDifference !== 0 ? "has-unallocated" : "zero"}`}
-                        >
-                          <span className="hu-chip-label">Chênh lệch:</span>
-                          <span className="hu-chip-val">
-                            <strong>{fmtSigned(selectedDifference)} {selected.unitName}</strong>
                           </span>
                         </div>
                       </Tooltip>
@@ -3559,38 +3643,46 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
                     )}
                   </div>
                 </div>
-                <div className="hu-toolbar-right" />
+                <div className="hu-toolbar-right">
+                  {activeSequenceCount > 0 && (
+                    <span className="hu-sequence-order" title="Thứ tự lấy hàng: kiện đang mở, ít hàng trước; bằng số lượng thì lấy kiện cũ trước. Số thứ tự lấy hàng thay đổi theo tồn, số tem giữ nguyên.">
+                      <LockOutlined /> <b>Ít hàng trước</b> · {activeSequenceCount} kiện đang hoạt động
+                    </span>
+                  )}
+                </div>
               </div>
               <div
                 className={`hu-package-grid ${displayedUnits.length <= 2 ? "is-sparse" : ""}`}
               >
                   {visibleUnits.map((unit) => {
                     const deleteLocked = unit.status === "Đã tách" || isReturnHandlingUnit(unit) || (!isAdmin && unitHasWithdrawalHistory(unit));
-                    const pendingPickConflict = unit.status === "Đang sử dụng"
-                      ? getPendingCheckConflict(unit, workspace.register)
-                      : null;
                     return (
-                    <button
-                      type="button"
+                    <article
                       className={`hu-package-card ${unit.status === "Đang sử dụng" ? "opened" : ""} ${unit.status === "Chờ kiểm" ? "pending-check" : ""} ${unit.status === "Đã hết" ? "empty" : ""} ${unit.status === "Đã tách" ? "split" : ""}`}
                       key={unit.id}
+                      role="button"
+                      tabIndex={0}
                       onClick={() => setDetail(unit)}
+                      onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); setDetail(unit); } }}
                     >
                       <header>
-                        <div className="hu-card-title-group">
-                          <b className="hu-unit-code">{unit.id}</b>
-                          <span className="hu-unit-spec-tag">
-                            {unit.packageType}
-                          </span>
-                          {isReturnHandlingUnit(unit) && unit.returnReference && (
-                            <span className="hu-return-reference" title={`Mã vận đơn: ${unit.returnReference}`}>
-                              Mã vận đơn: {unit.returnReference}
+                        <div className="hu-card-heading">
+                          <span className="hu-sequence-badge" title="Thứ tự lấy hàng hiện tại">{String(displaySequenceByUnitId.get(unit.id) || 0)}</span>
+                          <div className="hu-card-title-group">
+                            <b className="hu-unit-code">{unit.id}</b>
+                            <span className="hu-unit-spec-tag">
+                              {unit.packageType}
                             </span>
-                          )}
+                            {isReturnHandlingUnit(unit) && unit.returnReference && (
+                              <span className="hu-return-reference" title={`Mã vận đơn: ${unit.returnReference}`}>
+                                Mã vận đơn: {unit.returnReference}
+                              </span>
+                            )}
+                          </div>
                         </div>
                         <div className="hu-card-header-actions">
                           {statusFor(unit.status)}
-                          <Tooltip title={unit.status === "Đã tách" ? "Kiện cha đã tách phải được giữ lại để tra cứu lịch sử và QR cũ" : isReturnHandlingUnit(unit) ? "Kiện hàng hoàn phải gộp để bảo toàn tồn kho, không được xóa" : deleteLocked ? "Kiện đã có lịch sử rút hàng — chỉ admin được xóa" : "Xóa kiện"}>
+                          <Tooltip title={unit.status === "Đã tách" ? "Kiện cha đã tách phải được giữ lại để tra cứu lịch sử và QR cũ" : isReturnHandlingUnit(unit) ? "Kiện hàng hoàn phải chuyển sang kiện khác để bảo toàn tồn kho, không được xóa" : deleteLocked ? "Kiện đã có lịch sử rút hàng — chỉ admin được xóa" : "Xóa kiện"}>
                             <button
                               type="button"
                               className="hu-card-delete-icon"
@@ -3655,7 +3747,7 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
                                     <Tooltip
                                       title={conflict.status === "Chờ kiểm"
                                         ? pendingCheckBlockText(unit, conflict, "khui kiện mới")
-                                        : `Đang có ${catLabel} [${conflict.id}] cùng SKU đang mở (còn ${fmt(conflict.currentPcs)} gói). Vui lòng rút hết kiện cũ trước khi khui ${catLabel} mới.`}
+                                        : `Đang có ${catLabel} [${conflict.id}] cùng SKU đang mở (còn ${fmt(conflict.currentPcs)} gói). Vui lòng dùng hết kiện cũ trước khi khui ${catLabel} mới.`}
                                     >
                                       <button
                                         className="hu-action-btn unseal"
@@ -3670,7 +3762,7 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
                                           message.warning(
                                             conflict.status === "Chờ kiểm"
                                               ? pendingCheckBlockText(unit, conflict, "khui kiện mới")
-                                              : `⚠️ SKU này đang có ${catLabel} [${conflict.id}] mở sẵn. Vui lòng rút hết kiện cũ trước khi khui thêm ${catLabel}!`,
+                                              : `⚠️ SKU này đang có ${catLabel} [${conflict.id}] mở sẵn. Vui lòng dùng hết kiện cũ trước khi khui thêm ${catLabel}!`,
                                             8,
                                           )
                                         }
@@ -3689,32 +3781,13 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
                                   </button>
                                 );
                               })()}
-                            {unit.status === "Đang sử dụng" && (
-                              isReturnHandlingUnit(unit) ? (
-                                <button
-                                  className="hu-action-btn final-check"
-                                  onClick={() => openMergeReturnUnit(unit)}
-                                >
-                                  <SwapOutlined /> Gộp vào kiện đã khui
-                                </button>
-                              ) : pendingPickConflict ? (
-                                <Tooltip title={pendingCheckBlockText(unit, pendingPickConflict, "rút hàng")}>
-                                  <button
-                                    className="hu-action-btn final-check"
-                                    style={{ opacity: 0.72, cursor: "not-allowed", background: "#fff7e6", color: "#ad6800", borderColor: "#ffd591" }}
-                                    onClick={() => message.warning(pendingCheckBlockText(unit, pendingPickConflict, "rút hàng"), 8)}
-                                  >
-                                    <LockOutlined /> Chờ kiểm {pendingPickConflict.id}
-                                  </button>
-                                </Tooltip>
-                              ) : (
-                                <button
-                                  className="hu-action-btn final-check"
-                                  onClick={() => handlePickUnit(unit)}
-                                >
-                                  <ShoppingCartOutlined /> Rút hàng
-                                </button>
-                              )
+                            {unit.status === "Đang sử dụng" && shiftCheckCandidates.some(({ unit: candidate }) => candidate.id === unit.id) && (
+                              <button
+                                className="hu-action-btn pick"
+                                onClick={() => openShiftCheckForUnit(unit)}
+                              >
+                                <CheckCircleOutlined /> Kiểm kiện
+                              </button>
                             )}
                             {unit.status === "Chờ kiểm" && (
                               <button
@@ -3747,11 +3820,11 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
                           <EnvironmentOutlined /> Xem vị trí trên sơ đồ
                         </button>
                       </footer>
-                    </button>
+                    </article>
                     );
                   })}
               </div>
-              {visibleUnits.length < displayedUnits.length && (
+              {activeModuleTab === "units" && visibleUnits.length < displayedUnits.length && (
                 <Flex justify="center" style={{ padding: "0 0 18px" }}>
                   <Button
                     onClick={() => setVisibleUnitLimit((limit) => limit + 100)}
@@ -3765,14 +3838,14 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
                 <header className="hu-global-history-header">
                   <div>
                     <Typography.Title level={5} id="hu-sku-history-title">
-                      <HistoryOutlined /> Lịch sử phân loại {selected.color || selected.sku}
+                      <HistoryOutlined /> Lịch sử {selected.color || selected.sku}
                     </Typography.Title>
                     <Typography.Text type="secondary">
-                      Chỉ hiển thị thao tác của SKU {selected.sku} thuộc {selected.productGroup}.
+                      Hoạt động của SKU {selected.sku} · {selected.productGroup}
                     </Typography.Text>
                   </div>
                   <Tag color="blue" style={{ margin: 0 }}>
-                    {selectedSkuHistory.length} hoạt động
+                    {selectedSkuHistory.length} dòng
                   </Tag>
                 </header>
                 <div className="hu-global-history-filters">
@@ -3781,13 +3854,13 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
                     prefix={<SearchOutlined />}
                     value={historySearch}
                     onChange={(event) => setHistorySearch(event.target.value)}
-                    placeholder="Tìm mã kiện, SKU, ghi chú..."
+                    placeholder="Tìm kiện, SKU, ghi chú..."
                   />
                   <Select
                     value={historyType}
                     onChange={setHistoryType}
                     options={[
-                      { value: "all", label: "Tất cả thao tác" },
+                      { value: "all", label: "Tất cả" },
                       ...historyTypes.map((type) => ({ value: type, label: type })),
                     ]}
                   />
@@ -3810,6 +3883,7 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
                   rowKey={(item) => item.id || `${item.unitId}-${item.createdAt}`}
                   size="middle"
                   dataSource={selectedSkuHistory}
+                  loading={ledgerHistoryLoading}
                   tableLayout="fixed"
                   scroll={{ x: 1080 }}
                   locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={`Chưa có hoạt động của ${selected.sku}`} /> }}
@@ -3819,62 +3893,69 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
                     showSizeChanger: false,
                     showTotal: (total) => `Tổng ${total} hoạt động`,
                   }}
+                  expandable={{
+                    expandedRowKeys: expandedHistoryId == null ? [] : [expandedHistoryId],
+                    showExpandColumn: false,
+                    expandedRowRender: (item) => (
+                      <div className="hu-history-expanded">
+                        <span><b>SKU:</b> {item.sku || selected.sku}</span>
+                        <span><b>Người thao tác:</b> {item.actor || "Hệ thống"}</span>
+                        <span><b>Mã tham chiếu:</b> {item.reference || item.destination || "--"}</span>
+                        <span><b>Ghi chú:</b> {item.note || "--"}</span>
+                      </div>
+                    ),
+                    rowExpandable: (item) => Boolean(item.note || item.actor || item.reference || item.destination),
+                  }}
                   columns={[
                     {
-                      title: "Thời gian",
+                      title: "TG / NV",
                       dataIndex: "createdAt",
-                      width: 155,
-                      render: (value) => <span className="hu-history-time">{formatHistoryTime(value)}</span>,
+                      width: 145,
+                      render: (value, item) => <div className="hu-history-ledger-meta"><span className="hu-history-time">{formatHistoryTime(value)}</span><span>👤 {item.actor || "Hệ thống"}</span></div>,
                     },
+                    { title: "SKU", dataIndex: "sku", width: 145, render: (value) => <span className="hu-history-cell-ellipsis" title={String(value || selected.sku)}>{value || selected.sku}</span> },
                     {
-                      title: "Kiện hàng",
-                      dataIndex: "unitId",
-                      width: 190,
-                      render: (value) => {
-                        const unit = workspace.register.find(
-                          (item) => item.id?.toUpperCase() === String(value || "").toUpperCase(),
-                        );
-                        return unit ? (
-                          <Button type="link" className="hu-history-unit-link" title={String(value || "")} onClick={() => setDetail(unit)}>
-                            {value}
-                          </Button>
-                        ) : (
-                          <span className="hu-history-cell-ellipsis" title={String(value || "")}>{value || "--"}</span>
-                        );
-                      },
-                    },
-                    {
-                      title: "SKU",
-                      dataIndex: "sku",
+                      title: "Loại",
+                      dataIndex: "referenceType",
                       width: 165,
-                      render: (value, item) => {
-                        const sku = value || workspace.register.find((unit) => unit.id === item.unitId)?.skuName || "--";
-                        return <span className="hu-history-cell-ellipsis" title={String(sku)}>{sku}</span>;
-                      },
-                    },
-                    {
-                      title: "Thao tác",
-                      dataIndex: "type",
-                      width: 180,
                       render: (value) => {
-                        const meta = historyActionMeta(value);
-                        return <Tag color={meta.color}>{meta.label}</Tag>;
+                        const meta = historyActionMeta(value || "");
+                        return <Tag color={meta.color} title={String(value || "")}>{meta.label}</Tag>;
                       },
                     },
                     {
-                      title: "SL thay đổi",
+                      title: "Mã CT",
+                      dataIndex: "reference",
+                      width: 140,
+                      render: (value, item) => value ? <span className="hu-history-reference" onClick={() => setExpandedHistoryId((item.id || `${item.unitId}-${item.createdAt}`) === expandedHistoryId ? null : (item.id || `${item.unitId}-${item.createdAt}`))}>{value}</span> : <span className="hu-history-muted">—</span>,
+                    },
+                    {
+                      title: "Đầu",
+                      dataIndex: "oldStock",
+                      align: "right" as const,
+                      width: 85,
+                      render: (value) => value == null ? "—" : Number(value).toLocaleString("vi-VN"),
+                    },
+                    {
+                      title: "±",
                       dataIndex: "quantity",
                       align: "right" as const,
-                      width: 115,
+                      width: 90,
                       render: (value) => <b className={Number(value) < 0 ? "is-negative" : "is-positive"}>{fmtSigned(Number(value || 0))}</b>,
                     },
                     {
-                      title: "Diễn giải",
+                      title: "Cuối",
+                      dataIndex: "newStock",
+                      align: "right" as const,
+                      width: 85,
+                      render: (value) => value == null ? "—" : Number(value).toLocaleString("vi-VN"),
+                    },
+                    {
+                      title: "Ghi chú",
                       dataIndex: "note",
                       ellipsis: true,
-                      render: (_value, item) => historyDescriptionFor(item),
+                      render: (value, item) => value || item.note || "—",
                     },
-                    { title: "Người thao tác", dataIndex: "actor", width: 135, render: (value) => value || "Hệ thống" },
                   ]}
                 />
               </section>
@@ -3882,14 +3963,16 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
           ) : (
             <Empty description="Không tìm thấy SKU demo" />
           )}
+          </div>
         </section>
       </section>
       <Modal
+        className="hu-unit-detail-modal"
         title={detail ? `Chi tiết kiện hàng · ${detail.id}` : "Chi tiết kiện"}
         open={!!detail}
         onCancel={() => setDetail(null)}
         footer={<Button onClick={() => setDetail(null)}>Đóng</Button>}
-        width={780}
+        width={1180}
         destroyOnHidden
       >
         {detail && (
@@ -4017,24 +4100,14 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
             </div>
             <div className="hu-detail-actions-row">
               {detail.status === "Đã tách" || detail.status === "Chờ kiểm" || isReturnHandlingUnit(detail) ? (
-                <Tooltip title={isReturnHandlingUnit(detail)
-                  ? "Kiện hàng hoàn đã được cộng tồn từ phiếu hoàn. Chỉ được gộp sang kiện đang khui cùng SKU hoặc chuyển vị trí."
-                  : detail.status === "Đã tách"
-                    ? "Kiện cha đã khóa sau khi tách để bảo toàn lịch sử và tổng tồn."
-                  : "Kiện đang chờ kiểm: hãy dùng Kiểm và chốt hết kiện để nhập số lượng thực tế, không sửa số lượng tại đây."}>
-                  <Button disabled icon={<LockOutlined />} size="middle">
-                    {isReturnHandlingUnit(detail) ? "Kiện hàng hoàn chỉ được gộp" : detail.status === "Đã tách" ? "Kiện cha đã khóa" : "Khóa sửa số lượng khi chờ kiểm"}
-                  </Button>
-                </Tooltip>
-              ) : (
-                <Button
-                  icon={<EditOutlined />}
-                  size="middle"
-                  onClick={() => openEditUnit(detail)}
-                >
-                  Sửa thông tin kiện
-                </Button>
-              )}
+                <Typography.Text type="secondary" className="hu-detail-action-note">
+                  {isReturnHandlingUnit(detail)
+                    ? "Kiện hàng hoàn: chuyển sang kiện đang khui cùng SKU hoặc chuyển vị trí."
+                    : detail.status === "Đã tách"
+                      ? "Kiện cha đã khóa sau khi tách; theo dõi ở các kiện con."
+                      : "Kiện đang chờ kiểm; nhập số thực tế bằng Kiểm kiện cuối ca."}
+                </Typography.Text>
+              ) : null}
               {detail.status === "Nguyên niêm phong" &&
                 (() => {
                   const conflict = getIndexedConflict(detail);
@@ -4047,7 +4120,7 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
                       <Tooltip
                         title={conflict.status === "Chờ kiểm"
                           ? pendingCheckBlockText(detail, conflict, "khui kiện mới")
-                          : `SKU này đang có ${catLabel} [${conflict.id}] đang mở (còn ${fmt(conflict.currentPcs)} ${detail.unitName}). Hãy rút hết kiện cũ trước.`}
+                          : `SKU này đang có ${catLabel} [${conflict.id}] đang mở (còn ${fmt(conflict.currentPcs)} ${detail.unitName}). Hãy dùng hết kiện cũ trước.`}
                       >
                         <Button disabled icon={<LockOutlined />} size="middle">
                           {conflict.status === "Chờ kiểm"
@@ -4069,53 +4142,16 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
                     </Button>
                   );
                 })()}
-              {detail.status === "Đang sử dụng" && (
-                isReturnHandlingUnit(detail) ? (
-                  <Button
-                    type="primary"
-                    icon={<SwapOutlined />}
-                    size="middle"
-                    style={{ background: "#f97316", borderColor: "#f97316" }}
-                    onClick={() => openMergeReturnUnit(detail)}
-                  >
-                    Gộp vào kiện đã khui cùng SKU
-                  </Button>
-                ) : (
-                  <>
-                    {(() => {
-                      const pendingConflict = getPendingCheckConflict(detail, workspace.register);
-                      return pendingConflict ? (
-                        <Tooltip title={pendingCheckBlockText(detail, pendingConflict, "rút hàng")}>
-                          <Button
-                            icon={<LockOutlined />}
-                            size="middle"
-                            style={{ color: "#ad6800", background: "#fff7e6", borderColor: "#ffd591" }}
-                            onClick={() => message.warning(pendingCheckBlockText(detail, pendingConflict, "rút hàng"), 8)}
-                          >
-                            Khóa rút — cần kiểm {pendingConflict.id}
-                          </Button>
-                        </Tooltip>
-                      ) : (
-                        <Button
-                          type="primary"
-                          icon={<ShoppingCartOutlined />}
-                          size="middle"
-                          style={{ background: "#1890ff", borderColor: "#1890ff" }}
-                          onClick={() => handlePickUnit(detail)}
-                        >
-                          Rút hàng sang Khu đóng gói
-                        </Button>
-                      );
-                    })()}
-                    <Button
-                      icon={<LockOutlined />}
-                      size="middle"
-                      onClick={() => handleSealUnit(detail)}
-                    >
-                      Đóng niêm phong lại
-                    </Button>
-                  </>
-                )
+              {detail.status === "Đang sử dụng" && shiftCheckCandidates.some(({ unit }) => unit.id === detail.id) && (
+                <Button
+                  type="primary"
+                  icon={<CheckCircleOutlined />}
+                  size="middle"
+                  style={{ background: "#d48806", borderColor: "#d48806" }}
+                  onClick={() => openShiftCheckForUnit(detail)}
+                >
+                  Kiểm kiện
+                </Button>
               )}
               {detail.status === "Chờ kiểm" && (
                 <Button
@@ -4140,183 +4176,30 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
                   </Button>
                 )}
               {detail.status !== "Đã tách" && (
-                <Button
-                  icon={<SwapOutlined />}
-                  size="middle"
-                  onClick={() => {
-                    setMovingUnit(detail);
-                    moveLocationForm.setFieldsValue({
-                      targetZone:
-                        detail.location?.zone || workspace.locations[0]?.code,
-                      targetRack: detail.location?.rack || "",
-                    });
+                <Dropdown
+                  trigger={["click"]}
+                  menu={{
+                    items: [
+                      ...(detail.currentPcs > 0 &&
+                        (detail.status === "Đang sử dụng" ||
+                          (detail.status === "Nguyên niêm phong" && getPackageCategory(detail.packageType) === "LE"))
+                        ? [{ key: "transfer", icon: <SwapOutlined />, label: "Chuyển kiện", onClick: () => openMergeReturnUnit(detail) }]
+                        : []),
+                      { key: "location", icon: <EnvironmentOutlined />, label: "Chuyển vị trí", onClick: () => {
+                        setMovingUnit(detail);
+                        moveLocationForm.setFieldsValue({
+                          targetZone: detail.location?.zone || workspace.locations[0]?.code,
+                          targetRack: detail.location?.rack || "",
+                        });
+                      } },
+                    ],
                   }}
                 >
-                  Chuyển vị trí
-                </Button>
+                  <Button icon={<MoreOutlined />}>Thao tác khác</Button>
+                </Dropdown>
               )}
             </div>
-            <section className="hu-unit-history">
-              <Flex
-                justify="space-between"
-                align="center"
-                style={{ marginBottom: 8 }}
-              >
-                <Typography.Title level={5} style={{ margin: 0 }}>
-                  Lịch sử kiện {detail.id}
-                </Typography.Title>
-                <Tag color="green" style={{ margin: 0 }}>
-                  Đồng bộ thời gian thực
-                </Tag>
-              </Flex>
-              {(() => {
-                const affectsQuantity = (item: any) =>
-                  /lấy hàng|rút hàng|chuyển khu|chuyển hàng|xuất|điều chỉnh|nhập/i.test(
-                    String(item.type || ""),
-                  );
-                const historyList = workspace.recentTransactions
-                  .filter(
-                    (item) =>
-                      item.unitId?.toUpperCase() === detail.id?.toUpperCase(),
-                  )
-                  .sort(
-                    (a, b) =>
-                      new Date(b.createdAt).getTime() -
-                      new Date(a.createdAt).getTime(),
-                  );
-                let balanceAfter = detail.currentPcs;
-                const rows = historyList.map((item) => {
-                  const rawQuantity = Number(item.quantity || 0);
-                  const quantity = affectsQuantity(item) ? rawQuantity : 0;
-                  const noteMatch = String(item.note || "").match(
-                    /còn\s+([\d.,]+)/i,
-                  );
-                  const noteRemaining = noteMatch
-                    ? Number(noteMatch[1].replace(/\./g, "").replace(",", "."))
-                    : NaN;
-                  const savedRemaining = Number(item.remaining);
-                  const rowBalance = Number.isFinite(savedRemaining)
-                    ? savedRemaining
-                    : Number.isFinite(noteRemaining)
-                      ? noteRemaining
-                      : balanceAfter;
-                  const balanceBefore = Math.max(0, rowBalance - quantity);
-                  const row = {
-                    ...item,
-                    quantity,
-                    balanceBefore,
-                    balanceAfter: rowBalance,
-                  };
-                  balanceAfter = balanceBefore;
-                  return row;
-                });
-                const currentBalance = Number(detail.currentPcs);
-                const latestRecordedBalance = rows.length
-                  ? rows[0].balanceAfter
-                  : Number(detail.initialPcs);
-                const reconciliationRow =
-                  Number.isFinite(currentBalance) &&
-                  Number.isFinite(latestRecordedBalance) &&
-                  currentBalance !== latestRecordedBalance
-                    ? {
-                        id: `HU-CURRENT-${detail.id}`,
-                        createdAt: new Date().toISOString(),
-                        type: "Đồng bộ tồn thực tế",
-                        quantity: currentBalance - latestRecordedBalance,
-                        balanceBefore: latestRecordedBalance,
-                        balanceAfter: currentBalance,
-                        note: "Cập nhật theo tồn hiện tại của kiện",
-                        isReconciliation: true,
-                      }
-                    : null;
-                const displayRows = reconciliationRow
-                  ? [reconciliationRow, ...rows]
-                  : rows;
-
-                return (
-                  <div className="hu-ledger">
-                    <div className="hu-ledger-head">
-                      <span>Thời điểm</span>
-                      <span>Chứng từ / thao tác</span>
-                      <span>Tồn đầu</span>
-                      <span>Thay đổi</span>
-                      <span>Tồn cuối</span>
-                      <span>Diễn giải</span>
-                    </div>
-                    {displayRows.length ? (
-                      displayRows.map((item) => {
-                        const eventDate = new Date(item.createdAt);
-                        const isOutbound = item.quantity < 0;
-                        const isInbound = item.quantity > 0;
-                        return (
-                          <div className="hu-ledger-row" key={item.id}>
-                            <span>
-                              {item.isReconciliation
-                                ? "Hiện tại"
-                                : eventDate.toLocaleTimeString("vi-VN", {
-                                    hour: "2-digit",
-                                    minute: "2-digit",
-                                    second: "2-digit",
-                                  })}
-                              {!item.isReconciliation && (
-                                <small>
-                                  {eventDate.toLocaleDateString("vi-VN")}
-                                </small>
-                              )}
-                            </span>
-                            <span>
-                              <b>{item.type || "Cập nhật kiện"}</b>
-                              {item.actor && <em>{item.actor}</em>}
-                            </span>
-                            <span className="hu-ledger-balance">
-                              {fmt(item.balanceBefore)}
-                            </span>
-                            <span
-                              className={
-                                isInbound
-                                  ? "hu-ledger-inbound"
-                                  : isOutbound
-                                    ? "hu-ledger-outbound"
-                                    : undefined
-                              }
-                            >
-                              {isInbound
-                                ? `+${fmt(item.quantity)}`
-                                : isOutbound
-                                  ? `−${fmt(Math.abs(item.quantity))}`
-                                  : "—"}
-                            </span>
-                            <span className="hu-ledger-balance">
-                              {fmt(item.balanceAfter)}
-                            </span>
-                            <span>{historyDescriptionFor(item)}</span>
-                          </div>
-                        );
-                      })
-                    ) : (
-                      <div className="hu-ledger-empty">
-                        Chưa phát sinh xuất/nhập sau khi tạo kiện.
-                      </div>
-                    )}
-                    <div className="hu-ledger-row hu-ledger-opening">
-                      <span>
-                        {detail.receiptCode ? "Theo phiếu nhập" : "Số dư đầu"}
-                      </span>
-                      <span>
-                        <b>Nhập tạo kiện</b>
-                        {detail.receiptCode && <em>{detail.receiptCode}</em>}
-                      </span>
-                      <span className="hu-ledger-balance">0</span>
-                      <span className="hu-ledger-inbound">+{fmt(detail.initialPcs)}</span>
-                      <span className="hu-ledger-balance">
-                        {fmt(detail.initialPcs)}
-                      </span>
-                      <span>Tạo kiện {detail.id}</span>
-                    </div>
-                  </div>
-                );
-              })()}
-            </section>
+            <HandlingUnitStockHistory sku={detail.skuName} />
           </div>
         )}
       </Modal>
@@ -4397,7 +4280,6 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
             <Warehouse2DMap
               units={workspace.register}
               onSelectUnit={(u) => setDetail(u as UnitRow)}
-              onPickUnit={(u) => handlePickUnit(u as UnitRow)}
               onUnsealUnit={(u) => handleUnsealUnit(u as UnitRow)}
               selectedZoneCode={selectedLocationCode}
               highlightedUnitId={locationFocusUnit?.id}
@@ -4825,9 +4707,10 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
           if (isSubmittingShiftCheck) return;
           setShowShiftCheckModal(false);
           setShiftCheckDrafts({});
+          setShiftCheckFocusCode(null);
         }}
         onOk={submitShiftCheck}
-        okText={`${shiftCheckScope === "mandatory" ? "Chốt" : "Hoàn tất kiểm"} ${visibleShiftCheckCandidates.length} kiện`}
+        okText={`${shiftCheckScope === "mandatory" ? "Chốt" : "Hoàn tất kiểm"} ${visibleShiftCheckCandidates.length} mục`}
         cancelText="Để kiểm sau"
         confirmLoading={isSubmittingShiftCheck}
         closable={!isSubmittingShiftCheck}
@@ -4844,7 +4727,7 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
           message={shiftCheckScope === "mandatory" ? "Nhập số lượng thực tế để chốt kiện" : "Nhập số lượng đếm thực tế trong từng kiện"}
           description={shiftCheckScope === "mandatory"
             ? "Kiện chỉ được mở lại thao tác sau khi đã chốt số thực tế."
-            : "Từ 30/09/2026, phải hoàn thành trước hết ngày (23:59); chưa hoàn thành phạt người được phân công 50.000đ/ngày. Nếu lệch tồn, cần ghi lý do điều chỉnh. Kết quả không thay thế Kiểm hàng trong Quản lý kho."}
+            : "Đếm hàng còn trong kiện và số combo đóng sẵn chưa xuất; không tháo combo để đếm lại. Từ 30/09/2026, hoàn thành trước 23:59; chưa hoàn thành phạt 50.000đ/người/ngày. Kết quả độc lập với Kiểm hàng trong Quản lý kho."}
           style={{ marginBottom: 14 }}
         />
         {scopedShiftCheckCandidates.length > 100 && (
@@ -4864,7 +4747,7 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
               fixed: "left",
               render: (_, item) => (
                 <div className="hu-shift-unit-cell">
-                  <b>{item.unit.id}</b>
+                  <b>{item.packed ? item.unit.variantName : item.unit.id}</b>
                   <small>{item.unit.skuName}</small>
                 </div>
               ),
@@ -4874,10 +4757,22 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
               width: 140,
               render: (_, item) => (
                 <div className="hu-shift-withdrawal-cell">
-                  <b>-{fmt(item.withdrawnQuantity)} {item.unit.unitName}</b>
-                  <small>
-                    {item.withdrawalCount} lần · {formatHistoryTime(new Date(item.lastWithdrawalAt).toISOString())}
-                  </small>
+                  {item.packed ? (
+                    <>
+                      <b>Combo đóng sẵn</b>
+                      <small>Chưa kiểm từ ngày trước · {formatHistoryTime(new Date(item.lastWithdrawalAt).toISOString())}</small>
+                    </>
+                  ) : item.withdrawalCount > 0 ? (
+                    <>
+                      <b>-{fmt(item.withdrawnQuantity)} {item.unit.unitName}</b>
+                      <small>{item.withdrawalCount} lần · {formatHistoryTime(new Date(item.lastWithdrawalAt).toISOString())}</small>
+                    </>
+                  ) : (
+                    <>
+                      <b>Chưa kiểm từ ngày trước</b>
+                      <small>Không có phát sinh rút mới · {formatHistoryTime(new Date(item.lastWithdrawalAt).toISOString())}</small>
+                    </>
+                  )}
                 </div>
               ),
             },
@@ -5279,8 +5174,8 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
                     ]}
                   />
                 </Form.Item>
-                <Form.Item name="conversionFactor" label="Quy đổi về đơn vị nhỏ nhất" rules={[{ required: true, message: "Nhập hệ số quy đổi" }]}>
-                  <InputNumber min={1} precision={0} style={{ width: "100%" }} addonAfter="đơn vị" />
+                <Form.Item name="conversionFactor" label="Quy đổi về đơn vị nhỏ nhất" rules={[{ required: true, message: "Nhập hệ số quy đổi" }, { type: "number", max: 300, message: "Mỗi kiện tối đa 300 đơn vị" }]}>
+                  <InputNumber min={1} max={300} precision={0} style={{ width: "100%" }} addonAfter="đơn vị" />
                 </Form.Item>
                 <Form.Item name="baseUnit" label="Đơn vị nhỏ nhất" rules={[{ required: true, message: "Nhập đơn vị cơ sở" }]}>
                   <Input placeholder="Ví dụ: gói, hộp, cái" />
@@ -5289,15 +5184,7 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
                   <InputNumber min={1} max={500} precision={0} style={{ width: "100%" }} addonAfter="tem" />
                 </Form.Item>
                 <Form.Item name="zone" label="Khu vực lưu kho" className="hu-qr-field-full" rules={[{ required: true, message: "Chọn khu vực lưu kho trước khi phát hành tem" }]}>
-                  <Select
-                    showSearch
-                    optionFilterProp="label"
-                    placeholder="Chọn vị trí sẽ để kiện"
-                    options={workspace.locations.filter((location) => location.isActive).map((location) => ({
-                      value: location.code,
-                      label: `${location.code} · ${location.name}`,
-                    }))}
-                  />
+                  <QrZonePicker units={workspace.register} locations={workspace.locations} />
                 </Form.Item>
               </div>
               <div className="hu-qr-quick-hint">
@@ -5372,10 +5259,12 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
       >
         <div className="hu-quick-create">
           <section className="hu-quick-scan-workspace">
+            <div className="hu-quick-entry-guide"><b>Tách hàng trước khi nhập</b><p>Ví dụ 1.000 gói: nhập lần lượt 300, 300, 300 và 100. Hệ thống tạo từng kiện và in tem số thứ tự sau khi xác nhận.</p><Button size="small" type="link" onClick={() => setShowLegacyQrEntry(value => !value)}>{showLegacyQrEntry ? 'Ẩn ô quét QR' : 'Hiện ô quét QR'}</Button></div>
+            {showLegacyQrEntry && <>
             <div className="hu-quick-scan-head">
               <div>
                 <h3>Quét QR kiện hàng</h3>
-                <p>QR xác định đúng dạng kiện và quy cách; chỉ kiểm lại số kiện khi cần.</p>
+                <p>Quét mã QR trên tem đã phát hành để tự điền đúng SKU, quy cách và số lượng kiện.</p>
               </div>
               <span className="hu-quick-ready"><i /> Sẵn sàng quét</span>
             </div>
@@ -5404,16 +5293,17 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
                 <CheckCircleOutlined /> Đã quét: <b>{quickLastCode}</b>
               </div>
             )}
+            </>}
             <div className="hu-quick-manual-entry">
               <div className="hu-quick-manual-title">
-                <div><PlusOutlined /><span><b>Thêm hàng lẻ</b><small>Nhập trực tiếp theo số lượng thực tế</small></span></div>
+                <div><PlusOutlined /><span><b>Thêm một kiện</b><small>Ghi đúng số lượng ban đầu thực tế của kiện đã tách</small></span></div>
               </div>
               <div className="hu-quick-manual-fields">
                 <Select
                   showSearch
                   optionFilterProp="label"
                   value={quickManualSku}
-                  placeholder="Chọn SKU hàng lẻ"
+                  placeholder="Chọn SKU / màu của kiện"
                   options={workspace.catalog.map((item) => ({
                     value: item.sku,
                     label: `${item.sku} · ${item.variantName} (${item.unitName})`,
@@ -5458,7 +5348,7 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
                   <Button type="text" danger icon={<DeleteOutlined />} onClick={() => setQuickScanLines((previous) => previous.filter((item) => item.id !== line.id))} aria-label={`Xóa ${line.qrCode || line.sku}`} />
                 </div>
               )) : (
-                <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="Quét QR hoặc thêm hàng thủ công để bắt đầu" className="hu-quick-empty" />
+                <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="Thêm từng kiện đã tách thực tế để bắt đầu" className="hu-quick-empty" />
               )}
             </div>
             <div className="hu-quick-total"><InboxOutlined /><span>Tạm nhập kho:</span>{quickLoadTotal > 0 && <b>{quickLoadTotal} kiện</b>}{quickLoadTotal > 0 && quickManualLines.length > 0 && <i>+</i>}{quickManualLines.length > 0 && <strong>{quickManualSummary} hàng lẻ</strong>}{quickManualLines.length === 0 && quickLoadTotal > 0 && <><i>=</i><strong>{fmt(quickPieceTotal)} {quickBaseUnit}</strong></>}</div>
@@ -5523,7 +5413,7 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
             {quickReceiptFileName && <div className="hu-quick-file"><CheckCircleOutlined /> {quickReceiptFileName}<span>Sẽ upload Cloudflare R2</span></div>}
           </aside>
         </div>
-        <footer className="hu-quick-footer"><span>Hàng lẻ được ghi nhận trực tiếp vào <b>tồn kho và thẻ kho</b>, không tạo kiện.</span><div><Button onClick={() => setShowQuickCreate(false)}>Hủy</Button><Button type="primary" icon={<CheckCircleOutlined />} disabled={!quickScanLines.length || isQuickConfirming} loading={isQuickConfirming} onClick={confirmQuickReceiving}>{quickManualLines.length ? "Xác nhận nhập kho" : "Xác nhận nhập & tạo kiện"}</Button></div></footer>
+        <footer className="hu-quick-footer"><span>Mỗi dòng là <b>một kiện đã tách thực tế, tối đa 300</b>. Nhập đúng số lượng; tem ghi số thứ tự riêng, không cần quét QR khi nhập thủ công.</span><div><Button onClick={() => setShowQuickCreate(false)}>Hủy</Button><Button type="primary" icon={<CheckCircleOutlined />} disabled={!quickScanLines.length || isQuickConfirming} loading={isQuickConfirming} onClick={confirmQuickReceiving}>Xác nhận nhập & tạo kiện</Button></div></footer>
       </Modal>
       {/* MODAL TẠO KIỆN HÀNG MỚI */}
       <Modal
@@ -5676,7 +5566,7 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
                     );
                     allocationForm.setFieldValue(
                       "conversionFactor",
-                      spec?.conversionFactor || (m === "THUNG" ? 50 : 1200),
+                      Math.min(300, Number(spec?.conversionFactor || (m === "THUNG" ? 50 : 300))),
                     );
                   } else {
                     allocationForm.setFieldValue("looseQty", undefined);
@@ -5720,10 +5610,11 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
                 >
                   <InputNumber
                     min={1}
+                    max={300}
                     precision={0}
                     style={{ width: "100%" }}
                     addonAfter={`${currentAllocUnitName}/tải`}
-                    placeholder={`Mặc định: 1.200 ${currentAllocUnitName}`}
+                    placeholder={`Tối đa 300 ${currentAllocUnitName}/tải`}
                   />
                 </Form.Item>
               </Flex>
@@ -5753,10 +5644,11 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
                 >
                   <InputNumber
                     min={1}
+                    max={300}
                     precision={0}
                     style={{ width: "100%" }}
                     addonAfter={`${currentAllocUnitName}/thùng`}
-                    placeholder={`Mặc định: 50 hoặc 250 ${currentAllocUnitName}`}
+                    placeholder={`Tối đa 300 ${currentAllocUnitName}/thùng`}
                   />
                 </Form.Item>
               </Flex>
@@ -5773,6 +5665,7 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
               >
                 <InputNumber
                   min={1}
+                  max={300}
                   precision={0}
                   style={{ width: "100%" }}
                   addonAfter={currentAllocUnitName}
@@ -5816,7 +5709,8 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
       </Modal>
 
       <Modal
-        title={mergeReturnUnit ? `Gộp kiện hàng hoàn · ${mergeReturnUnit.id}` : "Gộp kiện hàng hoàn"}
+        title="Chuyển kiện"
+        className="hu-transfer-modal"
         open={!!mergeReturnUnit}
         onCancel={() => {
           if (isMergingReturnUnit) return;
@@ -5825,11 +5719,11 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
           setMergeQuantity(null);
         }}
         onOk={handleMergeReturnUnit}
-        okText="Xác nhận gộp kiện"
+        okText="Xác nhận chuyển"
         confirmLoading={isMergingReturnUnit}
         okButtonProps={{
-          disabled: !mergeTargetCode || !mergeQuantity || mergeQuantity <= 0,
-          style: { background: "#f97316", borderColor: "#f97316" },
+          disabled: !Number.isSafeInteger(mergeQuantity) || Number(mergeQuantity) <= 0
+            || Number(mergeQuantity) > getTransferMaximumQuantity(mergeReturnUnit, mergeTargetCode),
         }}
         closable={!isMergingReturnUnit}
         maskClosable={!isMergingReturnUnit}
@@ -5838,131 +5732,123 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
       >
         {mergeReturnUnit && (() => {
           const targets = getReturnMergeTargets(mergeReturnUnit);
-          const selectedTarget = targets.find(unit => unit.id === mergeTargetCode);
-          const availableCapacity = selectedTarget
-            ? Math.max(0, capacityForUnit(selectedTarget) - Number(selectedTarget.currentPcs || 0))
-            : 0;
-          const maximumQuantity = Math.min(Number(mergeReturnUnit.currentPcs), availableCapacity);
+          const candidates = getTransferCandidates(mergeReturnUnit)
+            .sort((a, b) => (displaySequenceByUnitId.get(a.id) || a.sequenceNumber || Number.MAX_SAFE_INTEGER)
+              - (displaySequenceByUnitId.get(b.id) || b.sequenceNumber || Number.MAX_SAFE_INTEGER)
+              || a.id.localeCompare(b.id));
+          const compact = candidates.length === 2;
+          const selectedTarget = candidates.find(unit => unit.id === mergeTargetCode);
+          const maximumQuantity = getTransferMaximumQuantity(mergeReturnUnit, mergeTargetCode);
+          const swapDirection = () => {
+            if (!selectedTarget || isMergingReturnUnit) return;
+            setMergeReturnUnit(selectedTarget);
+            setMergeTargetCode(mergeReturnUnit.id);
+            const nextMaximum = getTransferMaximumQuantity(selectedTarget, mergeReturnUnit.id);
+            setMergeQuantity(quantity => quantity && quantity <= nextMaximum ? quantity : null);
+            mergeReturnOperationKeyRef.current = `merge-return-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+          };
+          const compactCard = (unit: UnitRow, role: "source" | "target") => (
+            <div className="hu-transfer-card is-selected" data-role={role}>
+              <img src={imageFor(unit)} alt="" />
+              <span className="hu-transfer-card-main">
+                <strong>Kiện {displaySequenceByUnitId.get(unit.id) || unit.sequenceNumber || unit.id}</strong>
+                <span><b>{fmt(unit.currentPcs)}</b> {unit.unitName} <small>/ {fmt(capacityForUnit(unit))}</small></span>
+                <small className="hu-transfer-code">{unit.id}</small>
+              </span>
+            </div>
+          );
+          const transferQuantity = Number.isSafeInteger(mergeQuantity) && Number(mergeQuantity) > 0 && Number(mergeQuantity) <= maximumQuantity
+            ? Number(mergeQuantity) : 0;
+          const card = (unit: UnitRow, role: "source" | "target") => {
+            const selected = role === "source" ? unit.id === mergeReturnUnit.id : unit.id === mergeTargetCode;
+            const canReceive = targets.some(target => target.id === unit.id);
+            const disabled = role === "source"
+              ? Number(unit.currentPcs) <= 0 || !!getPendingCheckConflict(unit, workspace.register)
+              : !canReceive;
+            const sequence = displaySequenceByUnitId.get(unit.id) || unit.sequenceNumber;
+            return (
+              <button
+                type="button"
+                key={unit.id}
+                className={`hu-transfer-card ${selected ? "is-selected" : ""}`}
+                data-role={role}
+                disabled={disabled || isMergingReturnUnit}
+                aria-pressed={selected}
+                onClick={() => {
+                  if (role === "source") {
+                    setMergeReturnUnit(unit);
+                    setMergeTargetCode("");
+                    setMergeQuantity(null);
+                  } else {
+                    setMergeTargetCode(unit.id);
+                    setMergeQuantity(null);
+                  }
+                }}
+              >
+                <img src={imageFor(unit)} alt="" />
+                <span className="hu-transfer-card-main">
+                  <strong>{sequence ? `Kiện ${sequence}` : unit.id}</strong>
+                  <span><b>{fmt(unit.currentPcs)}</b> {unit.unitName} <small>/ {fmt(capacityForUnit(unit))}</small></span>
+                  <small className="hu-transfer-code">{unit.id}</small>
+                </span>
+                <span className="hu-transfer-radio" aria-hidden="true" />
+              </button>
+            );
+          };
           return (
-            <div style={{ display: "grid", gap: 16 }}>
-              <Alert
-                type="info"
-                showIcon
-                message="Chỉ chuyển số lượng giữa hai kiện"
-                description="Tồn tổng của SKU không cộng thêm lần nữa. Backend sẽ từ chối nếu hai kiện khác SKU phân loại."
-              />
-              <div className="hu-move-preview">
-                <div><strong>Kiện hàng hoàn:</strong> <code>{mergeReturnUnit.id}</code></div>
-                <div><strong>SKU phân loại:</strong> <Tag color="purple">{mergeReturnUnit.skuName}</Tag></div>
-                <div><strong>Số lượng chờ gộp:</strong> <b style={{ color: "#f97316" }}>{fmt(mergeReturnUnit.currentPcs)} {mergeReturnUnit.unitName}</b></div>
+            <div className="hu-transfer-body">
+              {compact && selectedTarget ? <div className="hu-transfer-pickers hu-transfer-pickers--compact">
+                <section className="hu-transfer-zone">
+                  <h3>Kiện chuyển đi</h3>
+                  {compactCard(mergeReturnUnit, "source")}
+                </section>
+                <button type="button" className="hu-transfer-swap" title="Đổi chiều chuyển"
+                  disabled={isMergingReturnUnit || Number(selectedTarget.currentPcs) <= 0 || !!getPendingCheckConflict(selectedTarget, workspace.register)}
+                  onClick={swapDirection}><SwapOutlined /><span>Đổi chiều</span></button>
+                <section className="hu-transfer-zone">
+                  <h3>Kiện nhận</h3>
+                  {compactCard(selectedTarget, "target")}
+                </section>
+              </div> : <div className="hu-transfer-pickers">
+                <section className="hu-transfer-zone">
+                  <h3>1. Nguồn kiện chuyển đi</h3>
+                  <div className="hu-transfer-list">{candidates.map(unit => card(unit, "source"))}</div>
+                </section>
+                <span className="hu-transfer-arrow" aria-hidden="true">→</span>
+                <section className="hu-transfer-zone">
+                  <h3>2. Kiện nhận</h3>
+                  <div className="hu-transfer-list">{candidates.map(unit => card(unit, "target"))}</div>
+                </section>
+              </div>}
+              <div className="hu-transfer-sku">Chỉ chuyển cùng SKU: <strong>{mergeReturnUnit.skuName}</strong></div>
+              {selectedTarget && maximumQuantity <= 0 && <Alert type="warning" showIcon message={isReturnHandlingUnit(selectedTarget)
+                ? "Kiện hàng hoàn chỉ được chuyển đi. Bấm đổi chiều để chọn kiện nhận phù hợp."
+                : Number(mergeReturnUnit.currentPcs) <= 0 ? "Kiện chuyển đi đã hết hàng."
+                : "Kiện nhận đã đầy, không còn sức chứa. Bấm đổi chiều hoặc chọn kiện nhận khác."} />}
+              <div className="hu-transfer-quantity">
+                <label htmlFor="hu-transfer-quantity">Số lượng chuyển</label>
+                <button type="button" disabled={maximumQuantity <= 0 || isMergingReturnUnit} onClick={() => setMergeQuantity(Math.max(1, Number(mergeQuantity || 1) - 1))}>−</button>
+                <InputNumber id="hu-transfer-quantity" min={1} max={maximumQuantity || undefined} precision={0}
+                  disabled={maximumQuantity <= 0 || isMergingReturnUnit} value={mergeQuantity ?? undefined}
+                  onChange={value => setMergeQuantity(value === null ? null : Number(value))}
+                  addonAfter={mergeReturnUnit.unitName} placeholder="Nhập số lượng" />
+                <button type="button" disabled={maximumQuantity <= 0 || isMergingReturnUnit} onClick={() => setMergeQuantity(Math.min(maximumQuantity, Number(mergeQuantity || 0) + 1))}>+</button>
+                <div className="hu-transfer-presets">
+                  {[10, 30, 50].map(quantity => <button type="button" key={quantity}
+                    className={mergeQuantity === quantity ? "is-selected" : ""}
+                    disabled={!selectedTarget || quantity > maximumQuantity || isMergingReturnUnit}
+                    onClick={() => setMergeQuantity(quantity)}>{quantity}</button>)}
+                </div>
+                {selectedTarget && <small>Tối đa {fmt(maximumQuantity)} {mergeReturnUnit.unitName}</small>}
               </div>
-              <div>
-                <label style={{ display: "block", marginBottom: 7, fontWeight: 700 }}>Kiện đang khui cùng SKU</label>
-                <Select
-                  value={mergeTargetCode || undefined}
-                  style={{ width: "100%" }}
-                  placeholder="Chọn kiện đích"
-                  onChange={(code) => {
-                    const target = targets.find(unit => unit.id === code);
-                    const capacity = target ? Math.max(0, capacityForUnit(target) - Number(target.currentPcs || 0)) : 0;
-                    setMergeTargetCode(code);
-                    setMergeQuantity(Math.min(Number(mergeReturnUnit.currentPcs), capacity));
-                  }}
-                  options={targets.map(unit => ({
-                    value: unit.id,
-                    label: `${unit.id} · ${unit.packageType} · còn ${fmt(unit.currentPcs)}/${fmt(capacityForUnit(unit))} ${unit.unitName}`,
-                  }))}
-                />
-              </div>
-              <div>
-                <label style={{ display: "block", marginBottom: 7, fontWeight: 700 }}>Số lượng cần gộp</label>
-                <InputNumber
-                  min={1}
-                  max={maximumQuantity}
-                  precision={0}
-                  value={mergeQuantity ?? undefined}
-                  onChange={(value) => setMergeQuantity(value === null ? null : Number(value))}
-                  addonAfter={mergeReturnUnit.unitName}
-                  style={{ width: "100%" }}
-                />
-                {selectedTarget && (
-                  <small style={{ display: "block", marginTop: 6, color: "#64748b" }}>
-                    Kiện {selectedTarget.id} còn sức chứa {fmt(availableCapacity)} {selectedTarget.unitName}.
-                    Sau khi gộp sẽ có {fmt(Number(selectedTarget.currentPcs) + Number(mergeQuantity || 0))}/{fmt(selectedTarget.initialPcs)} {selectedTarget.unitName}.
-                  </small>
-                )}
+              <div className="hu-transfer-preview">
+                <div className="hu-transfer-preview-heading"><strong>Xem trước thay đổi</strong><span>Tổng tồn không đổi</span></div>
+                <div><span>{`Kiện ${displaySequenceByUnitId.get(mergeReturnUnit.id) || mergeReturnUnit.sequenceNumber || mergeReturnUnit.id}`}</span><b>{fmt(mergeReturnUnit.currentPcs)}</b><span>→</span><strong>{transferQuantity ? fmt(Number(mergeReturnUnit.currentPcs) - transferQuantity) : "—"} {mergeReturnUnit.unitName}</strong></div>
+                <div><span>{selectedTarget ? `Kiện ${displaySequenceByUnitId.get(selectedTarget.id) || selectedTarget.sequenceNumber || selectedTarget.id}` : "Chọn kiện nhận"}</span><b>{selectedTarget ? fmt(selectedTarget.currentPcs) : "—"}</b><span>→</span><strong>{selectedTarget && transferQuantity ? fmt(Number(selectedTarget.currentPcs) + transferQuantity) : "—"} {mergeReturnUnit.unitName}</strong></div>
               </div>
             </div>
           );
         })()}
-      </Modal>
-
-      <Modal
-        title={pickingUnit ? `Rút hàng · Kiện ${pickingUnit.id}` : "Rút hàng"}
-        open={showPickModal}
-        onCancel={() => {
-          if (isSubmittingPick) return;
-          setShowPickModal(false);
-          setPickingUnit(null);
-          pickForm.resetFields();
-        }}
-        onOk={handlePickSubmit}
-        okText="Xác nhận chuyển hàng"
-        confirmLoading={isSubmittingPick}
-        closable={!isSubmittingPick}
-        maskClosable={!isSubmittingPick}
-        cancelButtonProps={{ disabled: isSubmittingPick }}
-        destroyOnHidden
-      >
-        {pickingUnit && (
-          <Form form={pickForm} layout="vertical">
-            <div className="hu-move-preview" style={{ marginBottom: 14 }}>
-              <div>
-                <strong>Mã kiện:</strong> <code>{pickingUnit.id}</code>
-              </div>
-              <div>
-                <strong>Sản phẩm / SKU:</strong> {pickingUnit.skuName}
-              </div>
-              <div>
-                <strong>Tồn dồn trong kiện:</strong>{" "}
-                <b style={{ color: "#00a85a" }}>
-                  {fmt(pickingUnit.currentPcs)} {pickingUnit.unitName}
-                </b>
-              </div>
-              <div>
-                <strong>Vị trí hiện tại:</strong>{" "}
-                <Tag color="blue">{locationFor(pickingUnit)}</Tag>
-              </div>
-            </div>
-            <Form.Item
-              name="quantity"
-              label={`LẤY HÀNG - SỐ LƯỢNG (${pickingUnit.unitName})`}
-              rules={[
-                { required: true, message: "Vui lòng nhập số lượng cần rút" },
-                {
-                  type: "number",
-                  min: 1,
-                  max: pickingUnit.currentPcs,
-                  message: `Số lượng từ 1 đến ${pickingUnit.currentPcs}`,
-                },
-              ]}
-            >
-              <InputNumber
-                className="hu-pick-quantity-input"
-                style={{ width: "100%" }}
-                placeholder="0"
-                min={1}
-                max={pickingUnit.currentPcs}
-              />
-            </Form.Item>
-            <div className="hu-pick-destination-note">
-              Hàng lấy ra sẽ chuyển vào <b>Khu đóng gói</b>.
-            </div>
-            <Form.Item name="note" label="Ghi chú" style={{ marginBottom: 0 }}>
-              <Input placeholder="Tuỳ chọn" />
-            </Form.Item>
-          </Form>
-        )}
       </Modal>
 
       <Modal
@@ -5996,7 +5882,7 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
               {telegramStatus?.isGroupConnected ? (
                 <>
                   ✅ Bot đang kết nối với nhóm <b>{telegramStatus.groupTitle}</b>.
-                  Nhân viên trong nhóm có thể dùng menu để rút hàng và hệ thống
+                  Nhân viên trong nhóm có thể dùng menu để tra cứu kiện và hệ thống
                   sẽ ghi lại tài khoản Telegram thực hiện.
                 </>
               ) : (
@@ -6069,27 +5955,12 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
                   🔓 /khui {displayedUnits[0].id}
                 </Button>
               )}
-              {displayedUnits.find((u) => u.status === "Đang sử dụng") && (
-                <Button
-                  size="small"
-                  onClick={() =>
-                    handleSendTelegramTest(
-                      `/rut ${displayedUnits.find((u) => u.status === "Đang sử dụng")!.id} 50`,
-                    )
-                  }
-                  loading={isSendingTelegram}
-                >
-                  📦 /rut{" "}
-                  {displayedUnits.find((u) => u.status === "Đang sử dụng")!.id}{" "}
-                  50
-                </Button>
-              )}
             </Flex>
           </div>
 
           <Flex gap={8} style={{ marginTop: 4 }}>
             <Input
-              placeholder="Nhập lệnh (/khui, /rut, /ton, /kiem...) hoặc tin nhắn test"
+              placeholder="Nhập lệnh (/khui, /ton, /kiem...) hoặc tin nhắn test"
               value={telegramTestMsg}
               onChange={(e) => setTelegramTestMsg(e.target.value)}
               onPressEnter={() => handleSendTelegramTest()}
@@ -6113,10 +5984,6 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
               <li>
                 <code>/khui [MÃ_KIỆN]</code> — Mở niêm phong kiện để bắt đầu lấy
                 lẻ (VD: <code>/khui KN-5DTR-01</code>)
-              </li>
-              <li>
-                <code>/rut [MÃ_KIỆN] [SỐ_LƯỢNG]</code> — Rút hàng sang Khu đóng
-                gói (VD: <code>/rut KN-5DTR-03 50</code>)
               </li>
               <li>
                 <code>/ton</code> — Báo cáo nhanh tổng số kiện, tổng tồn vật lý
@@ -6153,7 +6020,7 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
             splittingUnit.currentPcs,
             splitTargetSize,
           );
-          const isValid = quantities.length >= 2 && quantities.length <= 20;
+          const isValid = quantities.length >= 2 && quantities.length <= 20 && quantities.every((quantity) => quantity <= 300);
           return (
             <div className="hu-split-modal-body">
               <div className="hu-split-source">
@@ -6175,7 +6042,7 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
               <InputNumber
                 className="hu-split-size-input"
                 min={1}
-                max={Math.max(1, splittingUnit.currentPcs - 1)}
+                max={Math.min(300, Math.max(1, splittingUnit.currentPcs - 1))}
                 precision={0}
                 controls={false}
                 value={splitTargetSize}
@@ -6191,7 +6058,7 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
                   setSplitTargetSize((value) =>
                     Math.min(
                       Math.max(1, Math.floor(Number(value || 1))),
-                      Math.max(1, splittingUnit.currentPcs - 1),
+                      Math.min(300, Math.max(1, splittingUnit.currentPcs - 1)),
                     ),
                   )
                 }
@@ -6230,7 +6097,7 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
                 type="warning"
                 showIcon
                 message="Xác nhận sau khi đã tách hàng ngoài kho"
-                description="Mã QR cũ sẽ chuyển sang Đã tách và bị khóa hoàn toàn. Hệ thống tạo QR mới cho từng kiện con; tổng tồn sản phẩm không thay đổi. Hãy dán đúng tem mới lên từng kiện."
+                description="Kiện cha chuyển sang Đã tách để giữ lịch sử. Mỗi kiện con có số thứ tự và tem mới, ghi đúng số lượng thực tế; tổng tồn sản phẩm không thay đổi."
               />
 
               <Flex justify="flex-end" gap={8}>
@@ -6248,7 +6115,7 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
                   onClick={() => void handleSplitUnit()}
                   style={{ background: "#0284c7", borderColor: "#0284c7" }}
                 >
-                  Xác nhận tách và tạo QR mới
+                  Xác nhận tách và in tem
                 </Button>
               </Flex>
             </div>
@@ -6264,7 +6131,7 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
           <Flex align="center" gap={8}>
             <PrinterOutlined style={{ color: "#0284c7", fontSize: 20 }} />
             <div>
-              <b>In tem dán kiện hàng / tải dứa (WMS Label)</b>
+              <b>In tem số kiện · Màu sắc · SKU</b>
               <Typography.Text
                 type="secondary"
                 style={{ display: "block", fontSize: 12 }}
@@ -6293,81 +6160,12 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
                   (item) => item.sku === unit.skuName,
                 );
                 return (
-            <div
-              className={`hu-print-label ${printLabelSize.toLowerCase()}`}
-              key={unit.id}
-            >
-              {/* HEADER TEM */}
-              <div className="hu-pl-header">
-                <div className="hu-pl-brand">
-                  <b>DBY POS & WMS</b>
-                  <span>HỆ THỐNG QUẢN LÝ KHO</span>
-                </div>
-                <div className="hu-pl-tag">TEM ĐỊNH DANH KIỆN HÀNG</div>
-              </div>
-
-              {/* MÃ KIỆN LỚN */}
-              <div className="hu-pl-code-banner">
-                <small>MÃ KIỆN VẬT LÝ</small>
-                <h1>{unit.id}</h1>
-              </div>
-
-              {/* THÂN TEM: QR CODE + CHI TIẾT */}
-              <div className="hu-pl-body">
-                <div className="hu-pl-qr-col">
-                  <div className="hu-pl-qr-border">
-                    <QRCode
-                      value={unit.qrPayload || `https://t.me/quanlykienhang_bot?start=khui_${unit.id.replace(/[^A-Za-z0-9]/g, "_")}`}
-                      type="svg"
-                      size={printLabelSize === "A6" ? 140 : 100}
-                      bordered={false}
-                      color="#000000"
-                    />
-                  </div>
-                  <span className="hu-pl-scan-text">
-                    QUÉT ĐỂ KHUI & RÚT HÀNG
-                  </span>
-                </div>
-
-                <div className="hu-pl-info-col">
-                  <div className="hu-pl-info-item">
-                    <label>SẢN PHẨM / SKU:</label>
-                    <strong>{catalogItem?.variantName || unit.skuName}</strong>
-                    <code className="hu-pl-sku-code">
-                      SKU: {unit.skuName}
-                    </code>
-                  </div>
-
-                  <div className="hu-pl-info-grid">
-                    <div className="hu-pl-info-item">
-                      <label>QUY CÁCH:</label>
-                      <b>{unit.packageLabel || unit.packageType}</b>
-                    </div>
-                    <div className="hu-pl-info-item">
-                      <label>VỊ TRÍ LƯU KHO:</label>
-                      <b className="hu-pl-loc-val">{locationFor(unit)}</b>
-                    </div>
-                    <div className="hu-pl-info-item">
-                      <label>PHIẾU NHẬP:</label>
-                      <b>{unit.receiptCode || "N/A"}</b>
-                    </div>
-                  </div>
-                </div>
-              </div>
-
-              <div className="hu-pl-hero-qty">
-                <strong>{fmt(unit.initialPcs)}</strong>
-                <b>{unit.unitName}</b>
-              </div>
-
-              {/* FOOTER TEM */}
-              <div className="hu-pl-footer">
-                <span>
-                  Telegram Bot: <b>@quanlykienhang_bot</b>
-                </span>
-                <span>Ngày in: {new Date().toLocaleDateString("vi-VN")}</span>
-              </div>
-            </div>
+                  <HandlingUnitPrintLabel
+                    key={unit.id}
+                    unit={unit}
+                    labelSize={printLabelSize}
+                    catalogColor={catalogItem?.color}
+                  />
                 );
               },
             )}

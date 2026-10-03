@@ -7,7 +7,17 @@ if (!process.argv[2] || stage === source || !fs.existsSync(path.join(stage, "ipc
 }
 const config = JSON.parse(fs.readFileSync(path.join(stage, "drive-backend-config.json"), "utf8"));
 if (new URL(config.endpoint).protocol !== "https:" || !fs.existsSync(path.join(stage, "drive-backend.js"))) throw new Error("Missing Drive backend runtime");
-for (const name of ["gdrive-token.json", "gdrive-token.bin", "gdrive-credentials.json", "google-oauth-config.json", "r2-daily-evidence-bootstrap.json"]) {
+// These files are runtime credentials/configuration and must never cross the
+// source-to-stage boundary. Keep this guard centralized because every release
+// tier copies the Electron directory before running the archive scanner.
+for (const name of [
+  "gdrive-token.json",
+  "gdrive-token.bin",
+  "gdrive-credentials.json",
+  "google-oauth-config.json",
+  "r2-daily-evidence-bootstrap.json",
+  "wms-bot-runtime.js",
+]) {
   fs.rmSync(path.join(stage, name), { force: true });
 }
 console.log("Shared backends staged: HTTPS endpoint present; Google and R2 credentials excluded.");

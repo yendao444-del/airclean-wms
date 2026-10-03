@@ -11,6 +11,7 @@ if (!archivePath || !fs.existsSync(archivePath)) {
 const forbiddenNames = [
   /(^|[\\/])\.env(?:\.|$)/i,
   /(^|[\\/])(?:config|supabase-storage|gdrive-token|gdrive-credentials|google-oauth-config|r2-daily-evidence-bootstrap|wms-bot-runtime)\.json?$/i,
+  /(^|[\\/])wms-bot-runtime\.js$/i,
   /(^|[\\/])(?:.*credentials.*|.*private.*key.*)\.(?:json|pem|key|p12|pfx)$/i,
   /(^|[\\/])[^/\\]*(?:\.db|\.sqlite|\.backup[^/\\]*\.json)$/i,
 ];

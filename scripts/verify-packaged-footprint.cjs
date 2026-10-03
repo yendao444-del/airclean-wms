@@ -3,9 +3,18 @@ const path = require('path');
 
 const appRoot = path.resolve(process.argv[2] || 'release4/win-unpacked/resources/app');
 const nodeModulesRoot = path.join(appRoot, 'node_modules');
+const forbiddenCredentialFiles = [
+  '.env',
+  'electron/config.js',
+  'electron/supabase-storage.json',
+  'electron/gdrive-token.json',
+  'electron/gdrive-credentials.json',
+  'electron/r2-daily-evidence-bootstrap.json',
+  'electron/google-oauth-config.json',
+  'electron/wms-bot-runtime.js',
+];
 
 const requiredRuntimeModules = [
-  'dotenv',
   '@prisma/client',
   '.prisma',
   '@supabase/supabase-js',
@@ -17,7 +26,6 @@ const requiredRuntimeModules = [
   'glob',
   'googleapis',
   'nodemailer',
-  'uuid',
   'ws',
   'xlsx',
 ];
@@ -41,6 +49,12 @@ const getDirectorySize = (directory) => {
 
 if (!fs.existsSync(nodeModulesRoot)) {
   throw new Error(`Packaged node_modules was not found: ${nodeModulesRoot}`);
+}
+const packagedCredentials = forbiddenCredentialFiles.filter((name) =>
+  fs.existsSync(path.join(appRoot, ...name.split('/'))),
+);
+if (packagedCredentials.length > 0) {
+  throw new Error(`Packaged credential files must be removed: ${packagedCredentials.join(', ')}`);
 }
 
 const missing = requiredRuntimeModules.filter((moduleName) =>

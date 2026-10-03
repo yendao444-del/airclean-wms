@@ -1,7 +1,7 @@
 const { ipcMain, dialog, shell, app, nativeImage, safeStorage } = require("electron");
 const path = require("path");
 const { selectDailyStockCheck, POLICY_VERSION: STOCK_CHECK_SELECTION_VERSION } = require("./stock-check-selection.cjs");
-require("dotenv").config({ path: path.join(__dirname, "..", ".env") });
+if (!app.isPackaged) require("dotenv").config({ path: path.join(__dirname, "..", ".env") });
 
 function getTrustedDevelopmentOrigin() {
   const fallback = "http://127.0.0.1:5173";
@@ -18,6 +18,12 @@ function getTrustedDevelopmentOrigin() {
 }
 
 const TRUSTED_DEVELOPMENT_ORIGIN = getTrustedDevelopmentOrigin();
+const { createAppOriginPolicy } = require('./app-origin-policy.cjs');
+const { isTrustedAppSender } = createAppOriginPolicy({
+  appRoot: path.resolve(__dirname, '..'),
+  developmentOrigin: TRUSTED_DEVELOPMENT_ORIGIN,
+  isPackaged: app.isPackaged,
+});
 
 // Fail closed for ordinary sessions until every destructive workflow has a
 // verified backup and rollback path. Admins have a server-validated break-glass
@@ -131,6 +137,10 @@ const DATA_SAFETY_ALLOWED_CHANNELS = new Set([
   "prepack:submitEvidence",
   "prepack:accept",
   "prepack:issue",
+  // Independent packing assignments: serialized daily records with revisions;
+  // these channels never mutate inventory or legacy prepack tasks.
+  "packagePacking:create",
+  "packagePacking:update",
   // Stock-check unit reconciliation is role-gated, transactional and uses an
   // expected-balance guard so a stale screen cannot overwrite a newer count.
   "handlingUnits:updateUnit",
@@ -142,6 +152,7 @@ const DATA_SAFETY_ALLOWED_CHANNELS = new Set([
   "handlingUnits:mergeReturnUnit",
   "handlingUnits:requestFinalCheck",
   "handlingUnits:finalizeShiftCheck",
+  "handlingUnits:confirmReconciliation",
   // Purchase creation claims an idempotency key and commits the receipt,
   // stock ledger, stock values, and metadata in one serializable transaction.
   "purchases:create",
@@ -267,6 +278,8 @@ const {
 } = require("./attendance-rewards");
 const { reconcileEcommerceOrderFines } = require("./ecommerce-order-fines");
 const { reconcilePrepackShortfallFines } = require("./prepack-fines");
+const { MAX_QUANTITY: HANDLING_UNIT_MAX_QUANTITY, assertPackageQuantity, readLabelNumbers, assignLabelNumbers } = require("./handling-unit-labels.cjs");
+const { assertMergePolicy } = require("./handling-unit-merge-policy.cjs");
 const { recordShiftEvents, readShiftPolicy, reconcileShiftFines, assigneeFor: shiftAssigneeFor, dayKey: shiftDayKey } = require("./handling-unit-shift-policy.cjs");
 
 // Fine reconciliation scans the shared attendance ledger and can be expensive
@@ -295,6 +308,7 @@ try {
 // Set Prisma environment variables from runtime-only configuration.
 const isPostgresUrl = (value) =>
   typeof value === "string" && /^postgres(?:ql)?:\/\//i.test(value.trim());
+const { desktopPrismaUrl, withDatabaseReadDeadline, createPrismaReadRecovery } = require('./prisma-pool-policy.cjs');
 // A shell or another local project can leave DATABASE_URL/DIRECT_URL behind.
 // Never pass a non-PostgreSQL value to Prisma; use the packaged fallback instead.
 const databaseUrl = isPostgresUrl(config.DATABASE_URL)
@@ -312,7 +326,7 @@ const { PrismaClient, Prisma } = require("@prisma/client");
 const fs = require("fs");
 const { buildPackingReadModel, buildPackingPayrollSummary } = require("./packing-read-model");
 const { readPackingPayrollOrders } = require("./packing-payroll-source");
-const { createLoginDeadline, loginErrorMessage } = require("./login-deadline");
+const { createLoginDeadline, loginErrorMessage, isTransientDatabaseConnectionError, readWithConnectionRetry } = require("./login-deadline");
 const {
   calculateMarketplaceSlaDeadline,
   getBangkokDateParts,
@@ -413,9 +427,8 @@ const MAX_PURCHASE_RECEIPT_BYTES = 2 * 1024 * 1024;
 const PURCHASE_RECEIPT_R2_PREFIX = "r2://";
 const PURCHASE_RECEIPT_R2_KEY_PATTERN =
   /^purchase-receipts\/[A-Za-z0-9_-]{1,120}\/[a-f0-9]{64}\.jpg$/;
-const DAILY_EVIDENCE_R2_CACHE_TTL_MS = 30 * 60 * 1000;
-const DAILY_EVIDENCE_R2_CACHE_MAX_ITEMS = 50;
-const dailyEvidenceR2ImageCache = new Map();
+const { createEvidenceImageCache } = require("./evidence-image-cache.cjs");
+const dailyEvidenceR2ImageCache = createEvidenceImageCache();
 
 function readJsonFile(filePath) {
   try {
@@ -585,31 +598,20 @@ async function rollbackFreshDailyEvidenceUpload(objectKey) {
 }
 
 async function downloadDailyEvidenceBufferFromR2(objectKey, mimeType) {
-  const cached = dailyEvidenceR2ImageCache.get(objectKey);
-  if (cached && cached.expiresAt > Date.now() && cached.mimeType === mimeType) {
-    dailyEvidenceR2ImageCache.delete(objectKey);
-    dailyEvidenceR2ImageCache.set(objectKey, cached);
-    return cached.buffer;
-  }
-  if (cached) dailyEvidenceR2ImageCache.delete(objectKey);
-
-  const response = await requestDailyEvidenceR2(objectKey, { method: "GET" });
-  const buffer = Buffer.from(await response.arrayBuffer());
-  if (!buffer.length || buffer.length >= MAX_EVIDENCE_STORAGE_BYTES) {
-    throw new Error("Ảnh bằng chứng trên R2 không hợp lệ hoặc vượt quá 500 KB.");
-  }
+  const buffer = await dailyEvidenceR2ImageCache.getOrLoad(objectKey, async () => {
+    const response = await requestDailyEvidenceR2(objectKey, { method: "GET" });
+    const data = Buffer.from(await response.arrayBuffer());
+    if (!data.length || data.length >= MAX_EVIDENCE_STORAGE_BYTES) {
+      throw new Error("Ảnh bằng chứng trên R2 không hợp lệ hoặc vượt quá 500 KB.");
+    }
+    if (!isValidEvidenceImage(data, mimeType)) {
+      throw new Error("Dữ liệu trên R2 không phải ảnh bằng chứng hợp lệ.");
+    }
+    return data;
+  });
+  // Validate even cache hits if a caller supplied a different content type.
   if (!isValidEvidenceImage(buffer, mimeType)) {
     throw new Error("Dữ liệu trên R2 không phải ảnh bằng chứng hợp lệ.");
-  }
-  dailyEvidenceR2ImageCache.set(objectKey, {
-    buffer,
-    mimeType,
-    expiresAt: Date.now() + DAILY_EVIDENCE_R2_CACHE_TTL_MS,
-  });
-  while (dailyEvidenceR2ImageCache.size > DAILY_EVIDENCE_R2_CACHE_MAX_ITEMS) {
-    const oldestKey = dailyEvidenceR2ImageCache.keys().next().value;
-    if (!oldestKey) break;
-    dailyEvidenceR2ImageCache.delete(oldestKey);
   }
   return buffer;
 }
@@ -792,32 +794,10 @@ const GDRIVE_FOLDER_ID = "invoice-root";
 const TELEGRAM_BOT_TOKEN = config.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_CHAT_ID = config.TELEGRAM_CHAT_ID;
 
-// OAuth client credentials for an installed desktop app are not confidential,
-// but the rest of electron/config.js is. Production therefore reads a small
-// generated file instead of loading the database/service configuration bundle.
-function loadPackagedGoogleOAuthConfig() {
-  try {
-    const oauthConfigPath = path.join(__dirname, "google-oauth-config.json");
-    if (!fs.existsSync(oauthConfigPath)) return {};
-    const parsed = JSON.parse(fs.readFileSync(oauthConfigPath, "utf8"));
-    return {
-      clientId: String(parsed?.clientId || "").trim(),
-      clientSecret: String(parsed?.clientSecret || "").trim(),
-    };
-  } catch (error) {
-    console.error(
-      "[Drive] Cannot read packaged Google OAuth config:",
-      error?.message || error,
-    );
-    return {};
-  }
-}
-
-const packagedGoogleOAuthConfig = loadPackagedGoogleOAuthConfig();
-const OAUTH_CLIENT_ID =
-  config.OAUTH_CLIENT_ID || packagedGoogleOAuthConfig.clientId;
-const OAUTH_CLIENT_SECRET =
-  config.OAUTH_CLIENT_SECRET || packagedGoogleOAuthConfig.clientSecret;
+// OAuth credentials are runtime configuration. Never write them into the
+// installer or a generated file under electron/.
+const OAUTH_CLIENT_ID = String(config.OAUTH_CLIENT_ID || "").trim();
+const OAUTH_CLIENT_SECRET = String(config.OAUTH_CLIENT_SECRET || "").trim();
 
 // Google Drive auth (OAuth2 — dùng storage của user, không bị quota limit)
 let driveClient = null;
@@ -1083,17 +1063,27 @@ async function sendTelegramDocument(buffer, fileName, caption) {
 
       // chat_id
       parts.push(
-        `--${boundary}\r\nContent-Disposition: form-data; name="chat_id"\r\n\r\n${TELEGRAM_CHAT_ID}`,
+        `--${boundary}
+Content-Disposition: form-data; name="chat_id"
+
+${TELEGRAM_CHAT_ID}`,
       );
       // caption
       if (caption) {
         parts.push(
-          `--${boundary}\r\nContent-Disposition: form-data; name="caption"\r\n\r\n${caption}`,
+          `--${boundary}
+Content-Disposition: form-data; name="caption"
+
+${caption}`,
         );
       }
       // document
       parts.push(
-        `--${boundary}\r\nContent-Disposition: form-data; name="document"; filename="${fileName}"\r\nContent-Type: application/octet-stream\r\n\r\n`,
+        `--${boundary}
+Content-Disposition: form-data; name="document"; filename="${fileName}"
+Content-Type: application/octet-stream
+
+`,
       );
 
       const header = Buffer.from(parts.join("\r\n") + "\r\n", "utf-8");
@@ -1322,6 +1312,7 @@ async function backupInvoiceToCloudAndTelegram(order, invoiceNumber, taxCode) {
 
 let prisma;
 let prismaDirectTx; // Dùng DIRECT_URL cho transactions nặng (bypass PgBouncer)
+let prismaAuth; // Dedicated single-connection client so login is not starved by background work.
 
 const RUNTIME_INDEX_MIGRATION_KEY =
   "runtimeMigration:20260823210000:addPurchaseEinvoiceOrderIndexes";
@@ -1464,7 +1455,7 @@ function getPrismaDirectTx() {
     console.time("âš¡ lazy-init prismaDirectTx");
     prismaDirectTx = new PrismaClient({
       log: ["error", "warn"],
-      datasources: { db: { url: directDatabaseUrl } },
+      datasources: { db: { url: desktopPrismaUrl(directDatabaseUrl, { transactions: true }) } },
     });
     prismaDirectTx
       .$connect()
@@ -1475,6 +1466,27 @@ function getPrismaDirectTx() {
     console.timeEnd("âš¡ lazy-init prismaDirectTx");
   }
   return prismaDirectTx;
+}
+
+function getPrismaAuth() {
+  if (!prismaAuth) {
+    // Keep authentication on the pooler endpoint used by the app. The direct
+    // 5432 endpoint is not reachable on every workstation, while this client
+    // still gets its own single connection and cannot be starved by the main
+    // Prisma pool.
+    const authUrl = new URL(desktopPrismaUrl(databaseUrl || directDatabaseUrl, { transactions: false }));
+    authUrl.searchParams.set("connection_limit", "1");
+    authUrl.searchParams.set("pool_timeout", "3");
+    authUrl.searchParams.set("connect_timeout", "5");
+    prismaAuth = new PrismaClient({
+      log: ["error"],
+      datasources: { db: { url: authUrl.toString() } },
+    });
+    prismaAuth.$connect()
+      .then(() => console.log("✅ Connected Prisma Auth (login priority)"))
+      .catch((error) => console.warn("⚠️ Prisma Auth connect failed:", error.message));
+  }
+  return prismaAuth;
 }
 
 try {
@@ -1500,10 +1512,16 @@ try {
     log: ["error", "warn"],
     datasources: {
       db: {
-        url: databaseUrl,
+        url: desktopPrismaUrl(databaseUrl),
       },
     },
   });
+  prisma.$use(createPrismaReadRecovery({
+    replay: params => {
+      const delegate = params.model[0].toLowerCase() + params.model.slice(1);
+      return prisma[delegate][params.action](params.args);
+    },
+  }));
   console.log("✅ Prisma Client initialized successfully");
 
   // Test connection - REQUIRED
@@ -1561,6 +1579,7 @@ try {
 // ========================================
 let currentSession = null; // { id, username, role }
 const SESSION_STATUS_CACHE_TTL_MS = 10_000;
+const SESSION_STATUS_READ_TIMEOUT_MS = 10_000;
 let sessionStatusCache = { userId: null, status: null, checkedAt: 0 };
 let sessionStatusCheckInFlight = null;
 const REMEMBER_TOKENS_KEY = "authRememberTokensV1";
@@ -1825,6 +1844,7 @@ const TRANSIENT_PRISMA_CONNECTION_CODES = new Set([
 ]);
 
 function isTransientPrismaConnectionError(error) {
+  if (isTransientDatabaseConnectionError(error)) return true;
   if (TRANSIENT_PRISMA_CONNECTION_CODES.has(String(error?.code || ""))) {
     return true;
   }
@@ -1843,15 +1863,22 @@ function waitForPrismaRetry(delayMs) {
 }
 
 async function findSessionStatusUserWithRetry(userId) {
+  const deadlineAt = Date.now() + SESSION_STATUS_READ_TIMEOUT_MS;
   for (let attempt = 0; attempt < 2; attempt += 1) {
+    const attemptStartedAt = Date.now();
     try {
-      return await prisma.user.findUnique({
+      // A stalled auth connection must not indefinitely gate every IPC.
+      // Retry only this read on the existing main pool, never bypass validation
+      // or replay token writes. Both attempts share the same total deadline.
+      const remaining = deadlineAt - Date.now();
+      return await withDatabaseReadDeadline(() => (attempt === 0 ? getPrismaAuth() : prisma).user.findUnique({
         where: { id: userId },
         select: { id: true, status: true, passwordChangedAt: true },
-      });
+      }), attempt === 0 ? Math.min(3000, remaining) : remaining);
     } catch (error) {
-      if (!isTransientPrismaConnectionError(error) || attempt === 1) throw error;
-      await waitForPrismaRetry(300);
+      console.warn(`[Auth] Session read pool=${attempt === 0 ? "auth" : "main"} ms=${Date.now() - attemptStartedAt} code=${String(error?.code || "UNKNOWN")}`);
+      if (attempt === 1 || (!isTransientPrismaConnectionError(error)
+          && error?.code !== "DATABASE_READ_TIMEOUT") || Date.now() >= deadlineAt) throw error;
     }
   }
   return null;
@@ -1859,10 +1886,10 @@ async function findSessionStatusUserWithRetry(userId) {
 
 async function getSessionStatusUser(userId) {
   const now = Date.now();
-  if (
-    sessionStatusCache.userId === userId &&
-    now - sessionStatusCache.checkedAt < SESSION_STATUS_CACHE_TTL_MS
-  ) {
+  const cacheAge = sessionStatusCache.userId === userId
+    ? now - sessionStatusCache.checkedAt
+    : Number.POSITIVE_INFINITY;
+  if (cacheAge < SESSION_STATUS_CACHE_TTL_MS) {
     return { id: userId, status: sessionStatusCache.status, passwordChangedAt: sessionStatusCache.passwordChangedAt };
   }
   if (sessionStatusCheckInFlight?.userId === userId) {
@@ -1888,25 +1915,7 @@ const ipcHandle = ipcMain.handle.bind(ipcMain);
 ipcMain.handle = (channel, listener) =>
   ipcHandle(channel, async (...args) => {
     const event = args[0];
-    const senderFrame = event?.senderFrame;
-    const senderUrl = senderFrame?.url || event?.sender?.getURL?.() || "";
-    let trustedSender = false;
-    try {
-      const parsedSenderUrl = new URL(senderUrl);
-      const isMainFrame =
-        !event?.sender?.mainFrame || senderFrame === event.sender.mainFrame;
-      const isTrustedDevOrigin =
-        !app.isPackaged &&
-        parsedSenderUrl.origin === TRUSTED_DEVELOPMENT_ORIGIN;
-      const isTrustedPackagedPage =
-        parsedSenderUrl.protocol === "file:" &&
-        decodeURIComponent(parsedSenderUrl.pathname)
-          .replace(/\\/g, "/")
-          .toLowerCase()
-          .endsWith("/dist/index.html");
-      trustedSender = isMainFrame && (isTrustedDevOrigin || isTrustedPackagedPage);
-    } catch {}
-    if (!trustedSender) {
+    if (!isTrustedAppSender(event)) {
       throw new Error(`IPC sender không hợp lệ cho channel ${channel}`);
     }
     // Safety mode protects ordinary staff/manager sessions. An authenticated
@@ -1935,7 +1944,17 @@ ipcMain.handle = (channel, listener) =>
       !SESSION_STATUS_EXEMPT_CHANNELS.has(channel) &&
       prisma
     ) {
-      const sessionUser = await getSessionStatusUser(currentSession.id);
+      const checkedSession = currentSession;
+      let sessionUser;
+      try {
+        sessionUser = await getSessionStatusUser(checkedSession.id);
+      } catch (error) {
+        console.warn("[Auth] Session check failed:", String(error?.code || "UNKNOWN"));
+        throw new Error("Chưa xác minh được phiên đăng nhập do kết nối cơ sở dữ liệu đang bận. Vui lòng thử lại sau ít giây.");
+      }
+      if (currentSession !== checkedSession) {
+        throw new Error("Phiên đăng nhập đã thay đổi. Vui lòng thử lại.");
+      }
       if (!sessionUser || sessionUser.status !== "active") {
         const resigned = sessionUser?.status === "resigned";
         currentSession = null;
@@ -2258,14 +2277,14 @@ function assertStrongPassword(password) {
   return value;
 }
 
-async function recordFailedLogin(user) {
-  if (!user || !prisma) return;
+async function recordFailedLogin(user, client = prisma) {
+  if (!user || !client) return;
   const expiredLock =
     user.loginLockedUntil &&
     new Date(user.loginLockedUntil).getTime() <= Date.now();
   const attempts =
     (expiredLock ? 0 : Number(user.loginFailedAttempts || 0)) + 1;
-  await prisma.user.update({
+  await client.user.update({
     where: { id: user.id },
     data: {
       loginFailedAttempts: attempts,
@@ -2378,10 +2397,11 @@ function hashRememberToken(token) {
 }
 
 async function readRememberTokens() {
-  if (!prisma) return [];
-  const config = await prisma.appConfig.findUnique({
+  const client = typeof getPrismaAuth === "function" ? getPrismaAuth() : prisma;
+  if (!client) return [];
+  const config = await readWithConnectionRetry(() => client.appConfig.findUnique({
     where: { key: REMEMBER_TOKENS_KEY },
-  });
+  }));
   if (!config) return [];
   try {
     const parsed = JSON.parse(config.value);
@@ -2392,8 +2412,11 @@ async function readRememberTokens() {
 }
 
 async function mutateRememberTokens(mutator) {
-  if (!prisma) return [];
-  return getPrismaDirectTx().$transaction(
+  // Advisory-lock waits must not occupy the only connection used by every
+  // authenticated IPC. Use the existing main pool for token transactions.
+  const client = prisma;
+  if (!client) return [];
+  return client.$transaction(
     async (tx) => {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${REMEMBER_TOKENS_KEY}))`;
       const config = await tx.appConfig.findUnique({
@@ -5404,6 +5427,27 @@ async function batchStockUpdate(tx, skuChanges, logContext, options = {}) {
   // lock could contain a stale variants JSON document from another client.
   const lockedSkuCache = await buildSkuCache(tx);
   const { productMap, comboMap } = lockedSkuCache;
+  if (String(logContext?.referenceType || '').toUpperCase().startsWith('TMDT')) {
+    const affectedSkus = skuChanges
+      .filter((item) => Number(item.quantity) < 0)
+      .flatMap((item) => (comboMap.get(item.sku)?.items || [{ sku: item.sku }]).map((component) => component.sku));
+    const stockBySku = new Map(
+      [...productMap].map(([sku, info]) => [
+        sku,
+        Number(info.isVariant
+          ? parseJsonArray(info.product.variants)[info.variantIndex]?.stock || 0
+          : info.product.stock || 0),
+      ]),
+    );
+    await reconciliation.synchronize(
+      tx,
+      affectedSkus,
+      stockBySku,
+      logContext?.createdBy || currentSession?.username || 'System',
+      appendHandlingUnitsTransactions,
+    );
+    await tmdtPhysicalStock.allocate(tx, skuChanges, comboMap, logContext, appendHandlingUnitsTransactions, { softwareAuthoritative: true });
+  }
 
   // Bước 1: Resolve combo → flat list of actual SKU changes
   const flatChanges = new Map(); // sku → tổng quantity
@@ -5535,6 +5579,10 @@ async function deductItemOrCombo(
   logContext,
   options = {},
 ) {
+  if (quantity > 0 && String(logContext?.referenceType || '').toUpperCase().startsWith('TMDT')) {
+    await lockGlobalInventoryMutation(tx);
+    await tmdtPhysicalStock.restore(tx, variantSku, quantity, logContext.reference, logContext.createdBy || 'System', appendHandlingUnitsTransactions);
+  }
   const combo = await tx.comboProduct.findUnique({
     where: { sku: variantSku },
   });
@@ -7435,6 +7483,7 @@ ipcMain.handle("handlingUnits:getWorkspace", async (_event, options = {}) => {
       qrLabelsCfg,
       suppliers,
       splitRecords,
+      packedInventoryCfg,
     ] = await Promise.all([
         prisma.product.findMany({
           where: {
@@ -7453,6 +7502,26 @@ ipcMain.handle("handlingUnits:getWorkspace", async (_event, options = {}) => {
         (async () => {
           try {
             return await prisma.handlingUnit.findMany({
+              // Keep the workspace payload limited to fields used by the
+              // renderer; the default Prisma projection also carries unused
+              // relation metadata as the model evolves.
+              select: {
+                code: true,
+                productId: true,
+                purchaseOrderId: true,
+                purchaseItemId: true,
+                sku: true,
+                color: true,
+                packagingName: true,
+                baseUnit: true,
+                conversionFactor: true,
+                initialQuantity: true,
+                remainingQuantity: true,
+                status: true,
+                zone: true,
+                updatedAt: true,
+                createdAt: true,
+              },
               orderBy: { createdAt: "asc" },
             });
           } catch (error) {
@@ -7488,25 +7557,34 @@ ipcMain.handle("handlingUnits:getWorkspace", async (_event, options = {}) => {
           where: { key: { startsWith: "handlingUnitSplitParent:" } },
           select: { key: true, value: true },
         }),
+        prisma.appConfig.findUnique({
+          where: { key: packagePackingModule.INVENTORY_KEY },
+          select: { value: true },
+        }),
       ]);
 
     const products = productCandidates;
     const packagingSpecs = parseJsonArray(packagingSpecsCfg?.value)
       .filter((item) => item?.status !== "retired")
       .sort((a, b) => String(a?.sku || "").localeCompare(String(b?.sku || "")));
+    const packagingSpecByIdentity = new Map();
+    packagingSpecs.forEach((candidate) => {
+      const key = [candidate?.sku, candidate?.name, candidate?.baseUnit, candidate?.conversionFactor]
+        .map((value) => String(value ?? "").trim().toLowerCase())
+        .join("|");
+      if (key !== "|||") packagingSpecByIdentity.set(key, candidate);
+    });
+    const packagingSpecById = new Map(packagingSpecs.map((candidate) => [Number(candidate?.id), candidate]));
     const qrLabels = parseJsonArray(qrLabelsCfg?.value)
       .filter((item) => ["issued", "printed", "scanning"].includes(item?.status))
       .map((item) => {
         const currentZone = String(item?.location?.zone || "").trim();
         if (currentZone && currentZone !== "Chưa phân khu") return item;
-        const spec = packagingSpecs.find(
-          (candidate) =>
-            Number(candidate?.id) === Number(item?.packagingSpecId) ||
-            (candidate?.sku === item?.sku &&
-              candidate?.name === item?.packagingName &&
-              candidate?.baseUnit === item?.baseUnit &&
-              Number(candidate?.conversionFactor) === Number(item?.conversionFactor)),
-        );
+        const identityKey = [item?.sku, item?.packagingName, item?.baseUnit, item?.conversionFactor]
+          .map((value) => String(value ?? "").trim().toLowerCase())
+          .join("|");
+        const spec = packagingSpecById.get(Number(item?.packagingSpecId))
+          || packagingSpecByIdentity.get(identityKey);
         const specZone = String(spec?.location?.zone || "").trim();
         return specZone && specZone !== "Chưa phân khu"
           ? { ...item, location: normalizeHandlingLocation(spec.location) }
@@ -7591,6 +7669,7 @@ ipcMain.handle("handlingUnits:getWorkspace", async (_event, options = {}) => {
       currentPcs: row.remainingQuantity,
       conversionFactor: row.conversionFactor,
       note: "",
+      createdAt: row.createdAt,
       updatedAt: row.updatedAt,
       parentUnitCode: parentByChild.get(String(row.code).toUpperCase()) || undefined,
       childUnits: splitByParent.get(String(row.code).toUpperCase()) || undefined,
@@ -7650,6 +7729,25 @@ ipcMain.handle("handlingUnits:getWorkspace", async (_event, options = {}) => {
       ...unit,
       hasWithdrawalHistory: withdrawalCodes.has(String(unit.id).toUpperCase()),
     }));
+    // These two ledgers are independent reads. Run them together so the
+    // first workspace paint does not pay their database latency in series.
+    const [labelNumbers, shiftCheckPolicy] = await Promise.all([
+      readLabelNumbers(prisma),
+      blindStockCheck ? Promise.resolve(undefined) : readShiftPolicy(prisma),
+    ]);
+    const qrLabelsForWorkspace = qrLabels.map((label) => ({
+      ...label,
+      sequenceNumber: (() => {
+        const storedNumber = Number(label?.sequenceNumber);
+        if (Number.isSafeInteger(storedNumber) && storedNumber > 0) return storedNumber;
+        const ledgerNumber = labelNumbers.units[String(label?.code || "").toUpperCase()]?.number;
+        if (Number.isSafeInteger(Number(ledgerNumber)) && Number(ledgerNumber) > 0) return Number(ledgerNumber);
+        const legacySuffix = String(label?.code || "").match(/-(\d+)$/)?.[1];
+        const fallbackNumber = Number(legacySuffix);
+        return Number.isSafeInteger(fallbackNumber) && fallbackNumber > 0 ? fallbackNumber : undefined;
+      })(),
+    }));
+    register = register.map((unit) => ({ ...unit, sequenceNumber: labelNumbers.units[String(unit.id).toUpperCase()]?.number }));
 
     if (blindStockCheck) {
       // The stock-check workspace needs package identity and location, but not
@@ -7662,6 +7760,9 @@ ipcMain.handle("handlingUnits:getWorkspace", async (_event, options = {}) => {
       });
     }
 
+    // Finish all reads before scheduling maintenance; a refresh triggered by
+    // its broadcast is coalesced and cannot start another stock transaction.
+    if (!stockCheckWorkspace) void scheduleHandlingUnitWorkspaceSync(currentSession?.username || 'System');
     return {
       success: true,
       data: {
@@ -7670,14 +7771,15 @@ ipcMain.handle("handlingUnits:getWorkspace", async (_event, options = {}) => {
           : [...catalog.values()],
         register: register,
         packagingSpecs: packagingSpecs,
-        qrLabels,
+        qrLabels: qrLabelsForWorkspace,
         suppliers,
-        shiftCheckPolicy: blindStockCheck ? undefined : await readShiftPolicy(prisma),
+        shiftCheckPolicy,
         recentTransactions: blindStockCheck
           ? []
           : Array.isArray(recentTransactions)
           ? recentTransactions
           : [],
+        packedInventory: blindStockCheck ? [] : packagePackingModule.decodeInventory(packedInventoryCfg).lots,
       },
     };
   } catch (error) {
@@ -7744,8 +7846,12 @@ ipcMain.handle("handlingUnits:saveRegister", async (_event, records = []) => {
     });
     await prisma.$transaction(async (tx) => {
       const existing = await tx.handlingUnit.findMany({
-        select: { code: true },
+        select: { code: true, initialQuantity: true },
       });
+      const oldByCode = new Map(existing.map((unit) => [unit.code, unit]));
+      for (const item of register) {
+        if (oldByCode.get(item.id)?.initialQuantity !== item.initialPcs) assertPackageQuantity(item.initialPcs);
+      }
       const incomingCodes = new Set(register.map((item) => item.id));
       for (const code of existing.map((item) => item.code)) {
         if (!incomingCodes.has(code))
@@ -7832,8 +7938,8 @@ ipcMain.handle("handlingUnits:createUnits", async (_event, records = []) => {
         color: String(item?.color || "").trim() || null,
         packagingName: String(item?.packageType || "Kiện").trim() || "Kiện",
         baseUnit: String(item?.unitName || "Cái").trim() || "Cái",
-        initialQuantity: Math.max(0, Math.floor(Number(item?.initialPcs || 0))),
-        remainingQuantity: Math.max(0, Math.floor(Number(item?.currentPcs || 0))),
+        initialQuantity: Number(item?.initialPcs),
+        remainingQuantity: Number(item?.currentPcs),
         status:
           item?.status === "Đang sử dụng"
             ? "opened"
@@ -7852,9 +7958,18 @@ ipcMain.handle("handlingUnits:createUnits", async (_event, records = []) => {
     if (new Set(units.map((item) => item.code)).size !== units.length)
       throw new Error("Mã kiện bị trùng trong lô tạo mới.");
     units.forEach((item) => {
+      assertPackageQuantity(item.initialQuantity);
       if (item.remainingQuantity > item.initialQuantity) {
         throw new Error(
           `Số dư kiện ${item.code} không thể lớn hơn tồn ban đầu.`,
+        );
+      }
+      if (
+        getHandlingUnitPackageCategory(item.packagingName) !== "LE" &&
+        item.initialQuantity > HANDLING_UNIT_MAX_QUANTITY
+      ) {
+        throw new Error(
+          `Kiện ${item.code} có ${item.initialQuantity} ${item.baseUnit}; kiện Tải/Thùng tối đa ${HANDLING_UNIT_MAX_QUANTITY}. Hãy tách kiện trước khi nhập.`,
         );
       }
     });
@@ -7901,6 +8016,8 @@ ipcMain.handle("handlingUnits:createUnits", async (_event, records = []) => {
     });
 
     const createResult = await prisma.$transaction(async (tx) => {
+      await lockGlobalInventoryMutation(tx);
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${packagePackingModule.INVENTORY_KEY}))`;
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('handling-units-create'))`;
       const existingUnits = await tx.handlingUnit.findMany({
         where: { code: { in: createRows.map((item) => item.code) } },
@@ -7922,7 +8039,21 @@ ipcMain.handle("handlingUnits:createUnits", async (_event, records = []) => {
         throw new Error("Một hoặc nhiều mã kiện đã tồn tại với dữ liệu khác.");
       }
 
+      const { productMap } = await buildSkuCache(tx);
+      const stockBySku = new Map();
+      for (const row of createRows) {
+        const info = productMap.get(row.sku);
+        if (!info || info.product.id !== row.productId) throw new Error(`SKU ${row.sku} không khớp sản phẩm của kiện.`);
+        stockBySku.set(row.sku, Number(info.isVariant ? parseJsonArray(info.product.variants)[info.variantIndex]?.stock || 0 : info.product.stock || 0));
+      }
+      require('./handling-unit-allocation-policy.cjs').assertAllocationCapacity({
+        incoming: createRows,
+        existing: await tx.handlingUnit.findMany({ where: { sku: { in: [...stockBySku.keys()] } } }),
+        packedLots: packagePackingModule.decodeInventory(await tx.appConfig.findUnique({ where: { key: packagePackingModule.INVENTORY_KEY } })).lots,
+        stockBySku,
+      });
       await tx.handlingUnit.createMany({ data: createRows });
+      await assignLabelNumbers(tx, createRows);
       await appendHandlingUnitsTransactions(
         tx,
         units.map((item) => ({
@@ -7945,7 +8076,8 @@ ipcMain.handle("handlingUnits:createUnits", async (_event, records = []) => {
         codes: createRows.map((item) => item.code),
       });
     }
-    return { success: true, data: records, duplicate: createResult.duplicate };
+    const numbers = await readLabelNumbers(prisma);
+    return { success: true, data: records.map((item) => ({ ...item, sequenceNumber: numbers.units[String(item.id || item.code).toUpperCase()]?.number })), duplicate: createResult.duplicate };
   } catch (error) {
     console.error("Create handling units error:", error);
     return {
@@ -8236,6 +8368,12 @@ ipcMain.handle("handlingUnits:issueQrLabels", async (_event, payload = {}) => {
       throw new Error("Dạng kiện chỉ được chọn: Tải, Thùng hoặc Lẻ.");
     }
     if (quantity > 500) throw new Error("Mỗi lần chỉ được phát hành tối đa 500 tem.");
+    assertPackageQuantity(conversionFactor);
+    if (conversionFactor > HANDLING_UNIT_MAX_QUANTITY && packagingName !== "Lẻ") {
+      throw new Error(
+        `Quy cách ${conversionFactor} ${baseUnit} vượt giới hạn ${HANDLING_UNIT_MAX_QUANTITY}. Hãy tách kiện trước khi phát hành tem.`,
+      );
+    }
 
     const result = await prisma.$transaction(async (tx) => {
       await lockHandlingConfigKeys(tx, [
@@ -8321,6 +8459,8 @@ ipcMain.handle("handlingUnits:issueQrLabels", async (_event, payload = {}) => {
           issuedAt,
         });
       }
+      const labelNumbers = await assignLabelNumbers(tx, labels);
+      labels.forEach((label) => { label.sequenceNumber = labelNumbers[label.code].number; });
       registry.push(...labels);
       await writeHandlingConfigArray(tx, HANDLING_PACKAGING_SPECS_KEY, specs);
       await writeHandlingConfigArray(tx, HANDLING_QR_LABELS_KEY, registry);
@@ -8366,6 +8506,7 @@ ipcMain.handle("handlingUnits:quickReceive", async (_event, payload = {}) => {
       const sku = String(line?.sku || "").trim();
       const supplierId = Number(line?.supplierId);
       const quantity = Math.floor(Number(line?.quantity));
+      assertPackageQuantity(Number(line?.quantity));
       const unitPrice = Number(line?.unitPrice);
       const qrCode = String(line?.qrCode || "").trim().toUpperCase();
       if (!sku || !Number.isInteger(supplierId) || supplierId <= 0) {
@@ -8379,6 +8520,14 @@ ipcMain.handle("handlingUnits:quickReceive", async (_event, payload = {}) => {
       }
       if (source === "QR" && !qrCode) {
         throw new Error(`Dòng ${index + 1}: thiếu mã QR.`);
+      }
+      if (
+        source === "QR" &&
+        quantity > HANDLING_UNIT_MAX_QUANTITY
+      ) {
+        throw new Error(
+          `Dòng ${index + 1}: kiện ${quantity} ${String(line?.baseUnit || "đơn vị")} vượt giới hạn ${HANDLING_UNIT_MAX_QUANTITY}. Hãy tách kiện trước khi nhập.`,
+        );
       }
       return {
         source,
@@ -8563,12 +8712,18 @@ ipcMain.handle("handlingUnits:quickReceive", async (_event, payload = {}) => {
               ),
             };
             await savePurchaseItemPackaging(purchase.id, items, tx);
-            supplierLines.filter((line) => line.source === "QR").forEach((line) => {
+            supplierLines.forEach((line) => {
               const product = productBySku.get(line.sku);
               const purchaseItem = savedItemsBySku.get(line.sku);
-              const label = labelByCode.get(line.qrCode);
+              const label = line.source === "QR" ? labelByCode.get(line.qrCode) : {
+                code: `HU-${crypto.randomUUID()}`,
+                packagingName: line.packagingName || "Hàng lẻ",
+                baseUnit: line.baseUnit,
+                conversionFactor: line.quantity,
+                location: line.location,
+              };
               unitRows.push({
-                code: line.qrCode,
+                code: label.code,
                 purchaseOrderId: purchase.id,
                 purchaseItemId: purchaseItem.id,
                 productId: product.productId,
@@ -8601,21 +8756,38 @@ ipcMain.handle("handlingUnits:quickReceive", async (_event, payload = {}) => {
             purchases.push(purchase);
           }
           await savePurchaseItemCompanies(purchaseItemCompanies, tx);
+          let receivedNumbers = {};
           if (unitRows.length) {
+            const allocationPolicy = require('./handling-unit-allocation-policy.cjs');
+            const refreshedProducts = await tx.product.findMany({ select: { id: true, sku: true, stock: true, variants: true } });
+            const stockBySku = new Map();
+            for (const line of lines) {
+              const product = refreshedProducts.find(candidate => candidate.id === productBySku.get(line.sku).productId);
+              const variant = parseJsonArray(product?.variants).find(item => String(item?.sku || '') === line.sku);
+              stockBySku.set(line.sku, Number(variant ? variant.stock : product?.stock || 0));
+            }
+            allocationPolicy.assertAllocationCapacity({
+              incoming: unitRows,
+              existing: await tx.handlingUnit.findMany({ where: { sku: { in: [...stockBySku.keys()] } } }),
+              packedLots: packagePackingModule.decodeInventory(await tx.appConfig.findUnique({ where: { key: packagePackingModule.INVENTORY_KEY } })).lots,
+              stockBySku,
+            });
             await tx.handlingUnit.createMany({ data: unitRows });
+            receivedNumbers = await assignLabelNumbers(tx, unitRows);
             await appendHandlingUnitsTransactions(tx, unitRows.map((unit) => ({
               unitId: unit.code,
               type: "Nhập kiện",
               quantity: unit.initialQuantity,
               remaining: unit.remainingQuantity,
               actor: currentSession?.username || "Renderer",
-              note: `Nhập nhanh từ tem QR ${unit.code}`,
+              note: `Nhập nhanh kiện ${unit.code}`,
             })));
           }
           await writeHandlingConfigArray(tx, HANDLING_QR_LABELS_KEY, registry);
           const operationResult = {
             purchases: purchases.map((purchase) => ({ id: purchase.id, poNumber: purchase.poNumber, supplierName: supplierNameById.get(purchase.supplierId) })),
             unitCodes: unitRows.map((unit) => unit.code),
+            units: unitRows.map((unit) => ({ ...unit, sequenceNumber: receivedNumbers[unit.code]?.number })),
           };
           await tx.appConfig.update({
             where: { key: operationKey },
@@ -8805,6 +8977,8 @@ ipcMain.handle("handlingUnits:allocate", async (_event, payload = {}) => {
         );
       const product = await resolveProductForHandlingSku(tx, sku);
       const totalQuantity = fullUnits * spec.conversionFactor + looseQuantity;
+      if (fullUnits) assertPackageQuantity(spec.conversionFactor);
+      if (looseQuantity) assertPackageQuantity(looseQuantity);
 
       const createdCodes = [];
       const locationCode = toHandlingUnitLocationCode(location);
@@ -8887,6 +9061,7 @@ ipcMain.handle("handlingUnits:allocate", async (_event, payload = {}) => {
           createdBy: currentSession?.id || null,
         },
       });
+      await assignLabelNumbers(tx, createdCodes.map((code) => ({ code, sku })));
       return { replayed: false, createdCodes, quantity: totalQuantity };
     });
     return { success: true, data: result };
@@ -8976,6 +9151,7 @@ ipcMain.handle("handlingUnits:updateUnit", async (_event, payload = {}) => {
     const result = await prisma.$transaction(async (tx) => {
       const before = await tx.handlingUnit.findUnique({ where: { code } });
       if (!before) throw new Error(`Không tìm thấy kiện [${code}].`);
+      if (initialQuantity !== Number(before.initialQuantity)) assertPackageQuantity(initialQuantity);
       if (before.status === "split") {
         throw new Error(await buildSplitHandlingUnitMessage(tx, code));
       }
@@ -9110,6 +9286,14 @@ ipcMain.handle("handlingUnits:splitUnit", async (_event, payload = {}) => {
         if (parent.status === "empty" || Number(parent.remainingQuantity) <= 1) {
           throw new Error(`Kiện [${code}] không còn đủ hàng để tách thành nhiều kiện.`);
         }
+        if (
+          getHandlingUnitPackageCategory(parent.packagingName) !== "LE" &&
+          childQuantities.some((quantity) => quantity > HANDLING_UNIT_MAX_QUANTITY)
+        ) {
+          throw new Error(
+            `Mỗi kiện con tối đa ${HANDLING_UNIT_MAX_QUANTITY} ${parent.baseUnit}. Hãy giảm kích thước kiện con rồi thử lại.`,
+          );
+        }
         if (!['sealed', 'opened'].includes(parent.status)) {
           throw new Error(`Trạng thái hiện tại của kiện [${code}] không cho phép tách.`);
         }
@@ -9123,6 +9307,7 @@ ipcMain.handle("handlingUnits:splitUnit", async (_event, payload = {}) => {
           (total, quantity) => total + quantity,
           0,
         );
+        childQuantities.forEach(assertPackageQuantity);
         if (totalChildren !== Number(parent.remainingQuantity)) {
           throw new Error(
             `Tổng các kiện con (${totalChildren}) phải đúng bằng tồn hiện tại của kiện cha (${parent.remainingQuantity} ${parent.baseUnit}).`,
@@ -9171,6 +9356,7 @@ ipcMain.handle("handlingUnits:splitUnit", async (_event, payload = {}) => {
         }));
 
         await tx.handlingUnit.createMany({ data: childRows });
+        const childNumbers = await assignLabelNumbers(tx, childRows);
         const updatedParent = await tx.handlingUnit.update({
           where: { code },
           data: {
@@ -9237,7 +9423,7 @@ ipcMain.handle("handlingUnits:splitUnit", async (_event, payload = {}) => {
         });
         return {
           parent: updatedParent,
-          children: createdChildren,
+          children: createdChildren.map((child) => ({ ...child, sequenceNumber: childNumbers[child.code].number })),
           childCodes,
           duplicate: false,
         };
@@ -9274,15 +9460,9 @@ ipcMain.handle("handlingUnits:splitUnit", async (_event, payload = {}) => {
 // ────────────────────────────────────────────────────────────────────────────
 // TELEGRAM BOT SERVICE — QUẢN LÝ KIỆN HÀNG WMS (@quanlykienhang_bot)
 // ────────────────────────────────────────────────────────────────────────────
-// Production packages embed only the WMS bot token in a generated, ignored
-// runtime module. Environment configuration still overrides it for emergency
-// rotation without rebuilding the app.
-let bundledTelegramWmsBotToken = "";
-try {
-  bundledTelegramWmsBotToken = String(require("./wms-bot-runtime") || "").trim();
-} catch {}
-const TELEGRAM_WMS_BOT_TOKEN =
-  config.TELEGRAM_WMS_BOT_TOKEN || bundledTelegramWmsBotToken;
+// The WMS bot token is runtime configuration and is deliberately absent from
+// the installer so it can be rotated without rebuilding or redistributing the app.
+const TELEGRAM_WMS_BOT_TOKEN = String(config.TELEGRAM_WMS_BOT_TOKEN || "").trim();
 const TELEGRAM_WMS_DEFAULT_CHAT = "1397184795";
 const TELEGRAM_WMS_GROUP_CONFIG_KEY = "telegramWmsGroupConfig";
 const TELEGRAM_WMS_LEASE_KEY = "telegramWmsPollingLease";
@@ -10791,18 +10971,28 @@ async function getTelegramHandlingUnitCatalog(units) {
   return metadataByCode;
 }
 
-function compareHandlingUnitsFifo(left, right) {
+function compareHandlingUnitsForPicking(left, right) {
+  const statusRank = (unit) => {
+    const status = String(unit?.status || "");
+    if (status === "opened" || status === "Đang sử dụng") return 0;
+    if (status === "pending_check" || status === "Chờ kiểm") return 1;
+    if (status === "sealed" || status === "Nguyên niêm phong") return 2;
+    return 3;
+  };
+  const rankDifference = statusRank(left) - statusRank(right);
+  if (rankDifference) return rankDifference;
+
+  const leftQuantity = Number(left?.remainingQuantity ?? left?.currentPcs);
+  const rightQuantity = Number(right?.remainingQuantity ?? right?.currentPcs);
+  if (Number.isFinite(leftQuantity) && Number.isFinite(rightQuantity) && leftQuantity !== rightQuantity) {
+    return leftQuantity - rightQuantity;
+  }
+
   const leftCreatedAt = Date.parse(left?.createdAt || "");
   const rightCreatedAt = Date.parse(right?.createdAt || "");
   const leftTime = Number.isFinite(leftCreatedAt) ? leftCreatedAt : Number.MAX_SAFE_INTEGER;
   const rightTime = Number.isFinite(rightCreatedAt) ? rightCreatedAt : Number.MAX_SAFE_INTEGER;
   if (leftTime !== rightTime) return leftTime - rightTime;
-
-  const leftId = Number(left?.id);
-  const rightId = Number(right?.id);
-  if (Number.isFinite(leftId) && Number.isFinite(rightId) && leftId !== rightId) {
-    return leftId - rightId;
-  }
 
   return getHandlingUnitCode(left).localeCompare(getHandlingUnitCode(right), "vi", {
     numeric: true,
@@ -10860,7 +11050,7 @@ function getKhuiKienGroups(list) {
   return [...groups.values()]
     .map((group) => ({
       ...group,
-      units: group.units.sort(compareHandlingUnitsFifo),
+      units: group.units.sort(compareHandlingUnitsForPicking),
     }))
     .sort((left, right) => {
       const skuComparison = left.sku.localeCompare(right.sku, "vi", { numeric: true });
@@ -11016,7 +11206,7 @@ async function sendRutHangVariantMenu(chatId, anchorCode, messageId = null) {
       const opened = variant.units.find(
         (unit) => unit.status === "opened" || unit.status === "Đang sử dụng",
       );
-      const anchor = opened || variant.units.sort(compareHandlingUnitsFifo)[0];
+      const anchor = opened || variant.units.sort(compareHandlingUnitsForPicking)[0];
       const pendingCode = pendingSkuCodes.get(variant.sku.toUpperCase());
       return [{
         text: `${pendingCode ? "🔒" : "🎨"} ${variant.name} · ${variant.units.length} kiện`,
@@ -11063,7 +11253,7 @@ async function sendRutHangUnitMenu(chatId, anchorCode, messageId = null, request
         if (unit.status === "pending_check" || unit.status === "Chờ kiểm") return 1;
         return 2;
       };
-      return rank(left) - rank(right) || compareHandlingUnitsFifo(left, right);
+      return rank(left) - rank(right) || compareHandlingUnitsForPicking(left, right);
     });
   const pageCount = Math.max(1, Math.ceil(units.length / TELEGRAM_KHUI_UNIT_PAGE_SIZE));
   const page = Math.min(Math.max(Number(requestedPage) || 0, 0), pageCount - 1);
@@ -11129,7 +11319,7 @@ async function sendRutHangUnitMenu(chatId, anchorCode, messageId = null, request
   const text =
     `📦 <b>${anchorUnit.color || getHandlingUnitSku(anchorUnit)}</b>\n` +
     `<i>Chọn mã kiện cần thao tác</i>\n\n` +
-    `📦 Kiện đang mở được xếp đầu tiên.\n🔒 Kiện còn nguyên niêm phong.`;
+    `📦 Ưu tiên kiện đang mở, ít hàng trước; bằng số lượng thì kiện cũ trước.\n🔒 Kiện còn nguyên niêm phong.`;
   await renderTelegramWmsMenu(chatId, messageId, text, inlineKeyboard);
 }
 
@@ -11174,7 +11364,7 @@ async function sendKhuiKienMenu(chatId, messageId = null, requestedPage = 0) {
 
   const totalUnits = groups.reduce((sum, group) => sum + group.units.length, 0);
   const skuCount = new Set(groups.map((group) => group.sku.toUpperCase())).size;
-  const text = `🔓 <b>CHỌN SẢN PHẨM CẦN KHUI</b>\n\nCó <b>${totalUnits} kiện</b> hợp lệ thuộc <b>${skuCount} SKU</b>. Bot chỉ hiện nhóm sản phẩm; sau khi chọn sẽ đề xuất 1 kiện theo FIFO.`;
+  const text = `🔓 <b>CHỌN SẢN PHẨM CẦN KHUI</b>\n\nCó <b>${totalUnits} kiện</b> hợp lệ thuộc <b>${skuCount} SKU</b>. Bot chỉ hiện nhóm sản phẩm; sau khi chọn sẽ đề xuất kiện ít hàng trước.`;
   await renderTelegramWmsMenu(chatId, messageId, text, inlineKeyboard);
 }
 
@@ -11211,7 +11401,7 @@ async function sendKhuiKienSuggestion(
     `📦 <b>Mã kiện:</b> <code>${code}</code>\n` +
     `📊 <b>Số lượng:</b> ${quantity.toLocaleString("vi-VN")} ${unitName}\n` +
     `📍 <b>Vị trí:</b> ${location}\n` +
-    `🧭 <b>Nguyên tắc:</b> FIFO — kiện nhập kho trước\n\n` +
+    `🧭 <b>Nguyên tắc:</b> kiện đang mở, ít hàng trước; nếu bằng nhau thì kiện cũ trước\n\n` +
     (hiddenCount > 0
       ? `Còn <b>${hiddenCount} kiện</b> cùng SKU đang được thu gọn.`
       : `Đây là kiện nguyên niêm phong cuối cùng của SKU này.`);
@@ -11274,7 +11464,7 @@ async function sendKhuiKienUnitPage(chatId, anchorCode, requestedPage = 0, messa
   ]);
   inlineKeyboard.push([{ text: "🔙 Chọn SKU khác", callback_data: "menu_khui" }]);
 
-  const text = `📋 <b>CÁC KIỆN NGUYÊN CỦA ${group.sku}</b>\nLoại: <b>${group.packagingName}</b>\n\nSắp xếp theo FIFO. Kiện có dấu ⭐ là kiện được ưu tiên khui trước.`;
+  const text = `📋 <b>CÁC KIỆN NGUYÊN CỦA ${group.sku}</b>\nLoại: <b>${group.packagingName}</b>\n\nSắp xếp theo số lượng còn lại tăng dần. Kiện có dấu ⭐ là kiện được ưu tiên khui trước.`;
   await renderTelegramWmsMenu(chatId, messageId, text, inlineKeyboard);
 }
 
@@ -12303,10 +12493,19 @@ function stopTelegramWmsPolling() {
 // configured warehouse group. Delay startup until after the shell has had
 // time to paint; this service is not needed for first paint.
 if (TELEGRAM_WMS_BOT_TOKEN) {
-  telegramWmsStartTimer = setTimeout(() => {
+  const startTelegramWmsAfterSession = () => {
     telegramWmsStartTimer = null;
+    // The lease check is a database write/read pair.  Do not start it while
+    // the renderer is still restoring or establishing the user's session.
+    // Otherwise Telegram and login can contend for the same Supabase pool.
+    if (!currentSession) {
+      telegramWmsStartTimer = setTimeout(startTelegramWmsAfterSession, 5000);
+      telegramWmsStartTimer.unref?.();
+      return;
+    }
     startTelegramWmsPolling();
-  }, 5000);
+  };
+  telegramWmsStartTimer = setTimeout(startTelegramWmsAfterSession, 5000);
   telegramWmsStartTimer.unref?.();
 }
 
@@ -12533,7 +12732,7 @@ ipcMain.handle("handlingUnits:mergeReturnUnit", async (_event, payload = {}) => 
 
     const sourceCode = String(payload.sourceCode || "").trim().toUpperCase();
     const targetCode = String(payload.targetCode || "").trim().toUpperCase();
-    const quantity = Math.floor(Number(payload.quantity || 0));
+    const quantity = Number(payload.quantity || 0);
     const idempotencyKey = String(payload.idempotencyKey || "").trim();
     if (!sourceCode || !targetCode || sourceCode === targetCode)
       throw new Error("Kiện nguồn và kiện đích không hợp lệ.");
@@ -12564,31 +12763,10 @@ ipcMain.handle("handlingUnits:mergeReturnUnit", async (_event, payload = {}) => 
         tx.handlingUnit.findUnique({ where: { code: sourceCode } }),
         tx.handlingUnit.findUnique({ where: { code: targetCode } }),
       ]);
-      if (!source) throw new Error(`Không tìm thấy kiện hàng hoàn [${sourceCode}].`);
+      if (!source) throw new Error(`Không tìm thấy kiện nguồn [${sourceCode}].`);
       if (!target) throw new Error(`Không tìm thấy kiện đích [${targetCode}].`);
 
-      const normalizedSourceType = String(source.packagingName || "")
-        .normalize("NFD")
-        .replace(/[\u0300-\u036f]/g, "")
-        .replace(/đ/g, "d")
-        .toLowerCase();
-      const normalizedTargetType = String(target.packagingName || "")
-        .normalize("NFD")
-        .replace(/[\u0300-\u036f]/g, "")
-        .replace(/đ/g, "d")
-        .toLowerCase();
-      if (!normalizedSourceType.includes("hang hoan"))
-        throw new Error(`Kiện [${sourceCode}] không phải kiện hàng hoàn.`);
-      if (normalizedTargetType.includes("hang hoan"))
-        throw new Error("Kiện đích phải là kiện thường đang khui, không phải kiện hàng hoàn khác.");
-      if (source.status !== "opened")
-        throw new Error(`Kiện hàng hoàn [${sourceCode}] không ở trạng thái đang sử dụng.`);
-      if (target.status !== "opened")
-        throw new Error(`Kiện đích [${targetCode}] chưa được khui hoặc không còn sử dụng.`);
-      if (String(source.sku).trim().toUpperCase() !== String(target.sku).trim().toUpperCase())
-        throw new Error(`Không thể gộp khác SKU phân loại: ${source.sku} và ${target.sku}.`);
-      if (normalizeHandlingBaseUnit(source.baseUnit) !== normalizeHandlingBaseUnit(target.baseUnit))
-        throw new Error(`Hai kiện khác đơn vị cơ sở: ${source.baseUnit} và ${target.baseUnit}.`);
+      const { isReturnSource } = assertMergePolicy(source, target, quantity);
       const pendingConflict = await tx.handlingUnit.findFirst({
         where: {
           sku: source.sku,
@@ -12598,16 +12776,8 @@ ipcMain.handle("handlingUnits:mergeReturnUnit", async (_event, payload = {}) => 
         select: { code: true },
       });
       if (pendingConflict) {
-        throw new Error(`SKU ${source.sku} đang có kiện [${pendingConflict.code}] chờ kiểm thực tế. Hãy chốt kiện đó trước khi gộp hàng hoàn.`);
+        throw new Error(`SKU ${source.sku} đang có kiện [${pendingConflict.code}] chờ kiểm thực tế. Hãy chốt kiện đó trước khi gộp.`);
       }
-      if (quantity > Number(source.remainingQuantity))
-        throw new Error(`Kiện hàng hoàn chỉ còn ${source.remainingQuantity} ${source.baseUnit}.`);
-
-      const availableCapacity = handlingUnitCapacity(target) - Number(target.remainingQuantity);
-      if (quantity > availableCapacity) {
-        throw new Error(`Kiện đích [${targetCode}] chỉ còn sức chứa ${Math.max(0, availableCapacity)} ${target.baseUnit}.`);
-      }
-
       const nextSourceQuantity = Number(source.remainingQuantity) - quantity;
       const nextTargetQuantity = Number(target.remainingQuantity) + quantity;
       const [updatedSource, updatedTarget] = await Promise.all([
@@ -12621,7 +12791,7 @@ ipcMain.handle("handlingUnits:mergeReturnUnit", async (_event, payload = {}) => 
         }),
         tx.handlingUnit.update({
           where: { code: targetCode },
-          data: { remainingQuantity: nextTargetQuantity, updatedAt: new Date() },
+          data: { remainingQuantity: nextTargetQuantity, status: "opened", updatedAt: new Date() },
         }),
       ]);
 
@@ -12630,7 +12800,7 @@ ipcMain.handle("handlingUnits:mergeReturnUnit", async (_event, payload = {}) => 
         {
           unitId: sourceCode,
           sku: source.sku,
-          type: "Gộp hàng hoàn - chuyển đi",
+          type: isReturnSource ? "Gộp hàng hoàn - chuyển đi" : "Gộp kiện - chuyển đi",
           quantity: -quantity,
           remaining: nextSourceQuantity,
           actor,
@@ -12640,12 +12810,12 @@ ipcMain.handle("handlingUnits:mergeReturnUnit", async (_event, payload = {}) => 
         {
           unitId: targetCode,
           sku: target.sku,
-          type: "Nhận gộp hàng hoàn",
+          type: isReturnSource ? "Nhận gộp hàng hoàn" : "Nhận gộp kiện",
           quantity,
           remaining: nextTargetQuantity,
           actor,
           reference: sourceCode,
-          note: `Nhận ${quantity} ${target.baseUnit} từ kiện hàng hoàn ${sourceCode}`,
+          note: `Nhận ${quantity} ${target.baseUnit} từ kiện ${sourceCode}`,
         },
       ]);
       await tx.appConfig.create({
@@ -12916,7 +13086,7 @@ ipcMain.handle("handlingUnits:finalizePick", async (_event, payload = {}) => {
 });
 
 const isHandlingUnitWithdrawalHistory = (item) =>
-  /chuyển khu đóng gói|chuyển hàng lẻ|chuyển chờ xuất kho|chuyển khu kiểm hàng|lấy hàng|rút hàng/i.test(
+  /chuyển đóng gói sẵn|chuyển khu đóng gói|chuyển hàng lẻ|chuyển chờ xuất kho|chuyển khu kiểm hàng|lấy hàng|rút hàng/i.test(
     String(item?.type || ""),
   );
 
@@ -12945,8 +13115,9 @@ ipcMain.handle("handlingUnits:finalizeShiftCheck", async (_event, payload = {}) 
 
     const normalizedItems = items.map((item) => ({
       code: String(item?.code || "").trim().toUpperCase(),
-      expectedQuantity: Math.max(0, Math.floor(Number(item?.expectedQuantity))),
-      actualQuantity: Math.max(0, Math.floor(Number(item?.actualQuantity))),
+      expectedQuantity: item?.expectedQuantity,
+      actualQuantity: item?.actualQuantity,
+      expectedUpdatedAt: item?.expectedUpdatedAt,
       reason: String(item?.reason || "").trim(),
       note: String(item?.note || "").trim(),
     }));
@@ -12954,8 +13125,8 @@ ipcMain.handle("handlingUnits:finalizeShiftCheck", async (_event, payload = {}) 
       normalizedItems.some(
         (item) =>
           !item.code ||
-          !Number.isFinite(item.expectedQuantity) ||
-          !Number.isFinite(item.actualQuantity),
+          !Number.isSafeInteger(item.expectedQuantity) || item.expectedQuantity < 0 ||
+          !Number.isSafeInteger(item.actualQuantity) || item.actualQuantity < 0,
       )
     ) {
       throw new Error("Số lượng kiểm cuối ca không hợp lệ.");
@@ -12971,6 +13142,9 @@ ipcMain.handle("handlingUnits:finalizeShiftCheck", async (_event, payload = {}) 
     if (!operationKey) throw new Error("Mã chống kiểm cuối ca trùng không hợp lệ.");
 
     const result = await prisma.$transaction(async (tx) => {
+      await lockGlobalInventoryMutation(tx);
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${packagePackingModule.INVENTORY_KEY}))`;
+      const packedInventory = packagePackingModule.decodeInventory(await tx.appConfig.findUnique({ where: { key: packagePackingModule.INVENTORY_KEY } }));
       const completed = await tx.appConfig.findUnique({ where: { key: operationKey } });
       if (completed) {
         return { items: JSON.parse(completed.value || "[]"), duplicate: true };
@@ -12994,6 +13168,13 @@ ipcMain.handle("handlingUnits:finalizeShiftCheck", async (_event, payload = {}) 
       const historyEntries = [];
 
       for (const item of normalizedItems) {
+        if (item.code.startsWith('PACKED:')) {
+          if (!outstandingCodes.has(item.code)) throw new Error('Combo này không có nghĩa vụ kiểm cuối ca chưa hoàn thành.');
+          const result = packagePackingModule.checkPackedCount(packedInventory, item, currentSession.username);
+          checked.push(result.checked);
+          historyEntries.push(result.history);
+          continue;
+        }
         const unit = await tx.handlingUnit.findUnique({ where: { code: item.code } });
         if (!unit) throw new Error(`Không tìm thấy kiện [${item.code}].`);
         if (unit.status === "split" || unit.status === "Đã tách") {
@@ -13074,6 +13255,10 @@ ipcMain.handle("handlingUnits:finalizeShiftCheck", async (_event, payload = {}) 
         });
       }
 
+      if (normalizedItems.some(item => item.code.startsWith('PACKED:'))) {
+        const value = JSON.stringify(packedInventory);
+        await tx.appConfig.upsert({ where: { key: packagePackingModule.INVENTORY_KEY }, create: { key: packagePackingModule.INVENTORY_KEY, value }, update: { value } });
+      }
       await appendHandlingUnitsTransactions(tx, historyEntries);
       await tx.appConfig.create({
         data: { key: operationKey, value: JSON.stringify(checked) },
@@ -14622,14 +14807,24 @@ function sendVatTelegramDocument(buffer, fileName, caption) {
         "----FormBoundary" + Math.random().toString(36).substring(2);
       const parts = [];
       parts.push(
-        `--${boundary}\r\nContent-Disposition: form-data; name="chat_id"\r\n\r\n${VAT_TELEGRAM_CHAT}`,
+        `--${boundary}
+Content-Disposition: form-data; name="chat_id"
+
+${VAT_TELEGRAM_CHAT}`,
       );
       if (caption)
         parts.push(
-          `--${boundary}\r\nContent-Disposition: form-data; name="caption"\r\n\r\n${caption}`,
+          `--${boundary}
+Content-Disposition: form-data; name="caption"
+
+${caption}`,
         );
       parts.push(
-        `--${boundary}\r\nContent-Disposition: form-data; name="document"; filename="${fileName}"\r\nContent-Type: application/octet-stream\r\n\r\n`,
+        `--${boundary}
+Content-Disposition: form-data; name="document"; filename="${fileName}"
+Content-Type: application/octet-stream
+
+`,
       );
 
       const header = Buffer.from(parts.join("\r\n") + "\r\n", "utf-8");
@@ -17612,7 +17807,9 @@ ipcMain.handle("system:deleteBackup", async (event, backupPath) => {
 // DAILY TASKS HANDLERS
 // ========================================
 
-const MAX_EVIDENCE_IMAGES = 5;
+// Hard upper bound shared by desktop configuration, QR mobile submission and
+// evidence preview requests. Keep this in sync with DailyTasks.tsx.
+const MAX_EVIDENCE_IMAGES = 8;
 const MOBILE_DAILY_EVIDENCE_PORT = 47822;
 const MOBILE_DAILY_EVIDENCE_TTL_MS = 8 * 60 * 60 * 1000;
 const MOBILE_DAILY_EVIDENCE_MAX_TASKS = 30;
@@ -20421,6 +20618,8 @@ ipcMain.handle(
 // cannot be rendered by <img> without the OAuth session. Fetch the file through
 // the authenticated Drive client and return a short-lived data URL instead.
 const DRIVE_EVIDENCE_FETCH_TIMEOUT_MS = 10000;
+// Scope private Drive cache to the authenticated client, not a global file id.
+const driveEvidenceImageCaches = new WeakMap();
 
 function isRetryableDriveDownloadError(error) {
   if (isGoogleReauthError(error)) return false;
@@ -20429,6 +20628,15 @@ function isRetryableDriveDownloadError(error) {
 }
 
 async function downloadDriveEvidenceImage(drive, fileId, mimeType) {
+  let cache = driveEvidenceImageCaches.get(drive);
+  if (!cache) {
+    cache = createEvidenceImageCache();
+    driveEvidenceImageCaches.set(drive, cache);
+  }
+  return cache.getOrLoad(`${fileId}:${mimeType}`, () => fetchDriveEvidenceImage(drive, fileId, mimeType));
+}
+
+async function fetchDriveEvidenceImage(drive, fileId, mimeType) {
   let lastError = null;
   for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
@@ -20588,8 +20796,10 @@ ipcMain.handle(
   async (event, taskId, requestedImages = [], requestId = "") => {
     try {
       const task = await getDailyTaskEvidenceAccess(taskId);
-      const driveStatus = await ensureDriveReady();
-      if (!driveStatus.success) throw new Error(driveStatus.error);
+      // files.get itself authenticates the read. An extra about.get before
+      // each preview adds a serial network round trip without granting access.
+      const drive = getDriveClient();
+      if (!drive) throw new Error("Chưa có phiên đăng nhập Google Drive hợp lệ.");
       const currentEvidence = getSubmittedEvidenceImages(
         parseTaskAttachments(task.attachments)?.evidence,
       );
@@ -20632,7 +20842,7 @@ ipcMain.handle(
             if (!fileId) throw new Error("Liên kết Google Drive không hợp lệ.");
             const mimeType = getDriveEvidenceMimeType(image?.mimeType);
             const url = await downloadDriveEvidenceImage(
-              driveStatus.drive,
+              drive,
               fileId,
               mimeType,
             );
@@ -20677,43 +20887,76 @@ ipcMain.handle(
   },
 );
 
+let evidencePenaltyReadCache = null;
+let evidencePenaltyRefreshInFlight = null;
+const EVIDENCE_PENALTY_CACHE_TTL_MS = 5000;
+
+async function readEvidencePenaltyRows() {
+  const rows = await prisma.appConfig.findMany({
+    where: {
+      OR: [
+        { key: { startsWith: TASK_PENALTY_KEY_PREFIX } },
+        { key: { startsWith: ASSIGNMENT_EVIDENCE_PENALTY_KEY_PREFIX } },
+        { key: { startsWith: REJECTED_EVIDENCE_PENALTY_KEY_PREFIX } },
+      ],
+    },
+  });
+  const penalties = rows
+    .map((row) => {
+      try {
+        return JSON.parse(row.value);
+      } catch {
+        return null;
+      }
+    })
+    .filter(Boolean)
+    .filter(
+      (penalty) =>
+        !penalty?.dueAt ||
+        !isDailyTaskPenaltyRestDay(new Date(penalty.dueAt)),
+    );
+  evidencePenaltyReadCache = { data: penalties, loadedAt: Date.now() };
+  return penalties;
+}
+
+function refreshEvidencePenaltyReadModel(options = {}) {
+  if (evidencePenaltyRefreshInFlight) return evidencePenaltyRefreshInFlight;
+  const task = (async () => {
+    try {
+      await reconcileEvidencePenalties();
+      await reconcileSnapshotEvidencePenalties(new Date(), {
+        startDate: options.startDate,
+        endDate: options.endDate,
+      });
+      await cleanupTemporarilyUnfinedTaskPenalties();
+      return await readEvidencePenaltyRows();
+    } catch (error) {
+      console.warn("[Daily Tasks] Background evidence penalty refresh failed:", error?.message || error);
+      return evidencePenaltyReadCache?.data || [];
+    }
+  })();
+  evidencePenaltyRefreshInFlight = task;
+  task.finally(() => {
+    if (evidencePenaltyRefreshInFlight === task) evidencePenaltyRefreshInFlight = null;
+  }).catch(() => undefined);
+  return task;
+}
+
 ipcMain.handle("dailyTasks:listEvidencePenalties", async (_event, options = {}) => {
   try {
     requireRole();
-    await reconcileEvidencePenalties();
-    await reconcileSnapshotEvidencePenalties(new Date(), {
-      startDate: options.startDate,
-      endDate: options.endDate,
-    });
-    await cleanupTemporarilyUnfinedTaskPenalties();
-    const rows = await prisma.appConfig.findMany({
-      where: {
-        OR: [
-          { key: { startsWith: TASK_PENALTY_KEY_PREFIX } },
-          { key: { startsWith: ASSIGNMENT_EVIDENCE_PENALTY_KEY_PREFIX } },
-          { key: { startsWith: REJECTED_EVIDENCE_PENALTY_KEY_PREFIX } },
-        ],
-      },
-    });
-    const penalties = rows
-      .map((row) => {
-        try {
-          return JSON.parse(row.value);
-        } catch {
-          return null;
-        }
-      })
-      .filter(Boolean);
-    return {
-      success: true,
-      // Never expose a system fine whose deadline falls on Sunday or a
-      // fixed holiday, including a row generated by an older version.
-      data: penalties.filter(
-        (penalty) =>
-          !penalty?.dueAt ||
-          !isDailyTaskPenaltyRestDay(new Date(penalty.dueAt)),
-      ),
-    };
+    if (options.awaitRefresh && evidencePenaltyRefreshInFlight) {
+      const data = await evidencePenaltyRefreshInFlight;
+      return { success: true, data, stale: false };
+    }
+    const cache = evidencePenaltyReadCache;
+    const fresh = cache && Date.now() - cache.loadedAt < EVIDENCE_PENALTY_CACHE_TTL_MS;
+    const data = fresh ? cache.data : await readEvidencePenaltyRows();
+    // Existing rows are available immediately. Reconciliation is single-flight
+    // and refreshes the read model for the next request without delaying paint.
+    const needsRefresh = !fresh;
+    if (needsRefresh) void refreshEvidencePenaltyReadModel(options);
+    return { success: true, data, stale: needsRefresh };
   } catch (error) {
     return { success: false, error: error.message };
   }
@@ -22339,9 +22582,18 @@ function scheduleNextDailyTaskAutoReset() {
   dailyTaskAutoResetTimer.unref?.();
 }
 
-// Reset once when Electron starts, then again just after every local midnight.
-// The database marker keeps this safe when several desktop clients are open.
-const dailyTaskStartupResetTimer = setTimeout(async () => {
+// Reset once after the initial login/read burst, then again just after every
+// local midnight.  Never run the startup check before a user session exists:
+// it competed with session restore and could exhaust a small Supabase pool
+// before the user even reached the login screen.  The explicit UI action and
+// the midnight timer remain available if nobody logs in during startup.
+let dailyTaskStartupResetTimer;
+const runDailyTaskStartupReset = async () => {
+  if (!currentSession) {
+    dailyTaskStartupResetTimer = setTimeout(runDailyTaskStartupReset, 5000);
+    dailyTaskStartupResetTimer.unref?.();
+    return;
+  }
   try {
     const result = await performDailyTaskReset();
     if (!result.success) {
@@ -22354,7 +22606,8 @@ const dailyTaskStartupResetTimer = setTimeout(async () => {
   } finally {
     scheduleNextDailyTaskAutoReset();
   }
-}, 1000);
+};
+dailyTaskStartupResetTimer = setTimeout(runDailyTaskStartupReset, 10_000);
 dailyTaskStartupResetTimer.unref?.();
 
 // ========================================
@@ -23573,6 +23826,9 @@ ipcMain.handle(
       if (existingRequest) return await existingRequest;
 
       const request = (async () => {
+        // A scanner may commit while the cold read is in progress. Retry the
+        // whole snapshot once; never cache rows from mismatched revisions.
+        for (let attempt = 0; attempt < 2; attempt += 1) {
         const revisionStartedAt = Date.now();
         const before = await getPackingSourceRevision(dateFilter);
         const sourceStartedAt = Date.now();
@@ -23596,7 +23852,7 @@ ipcMain.handle(
         const after = await getPackingSourceRevision(dateFilter);
         const validatedAt = Date.now();
         if (before.revision !== after.revision) {
-          throw new Error("Dữ liệu đóng gói vừa thay đổi. Vui lòng tải lại để đối chiếu chính xác.");
+          continue;
         }
         const normalizedExports = exports.map((row) => ({
           ...row,
@@ -23611,7 +23867,7 @@ ipcMain.handle(
         const data = actor.role === "staff"
           ? allData.filter((row) => {
             const packer = normalizeActorName(row.packer);
-            return actorKeys.some((key) => packer === key || packer.includes(key) || key.includes(packer));
+            return Boolean(packer) && actorKeys.includes(packer);
           })
           : allData;
         packingPayrollSummaryCache.set(cacheKey, data);
@@ -23626,6 +23882,8 @@ ipcMain.handle(
           + ` model=${modelReadyAt - validatedAt}ms`,
         );
         return { success: true, data, revision: before.revision, cached: false };
+        }
+        throw new Error("Dữ liệu đóng gói vừa thay đổi. Vui lòng tải lại để đối chiếu chính xác.");
       })();
       packingPayrollSummaryInFlight.set(requestKey, request);
       try {
@@ -24297,12 +24555,12 @@ ipcMain.handle("ecommerceExports:create", async (event, data) => {
               tx,
               resolvedItems
                 .filter((item) => item.variantSku)
-                .map((item) => ({ sku: item.variantSku, quantity: -item.quantity })),
+                .map((item) => ({ sku: item.variantSku, quantity: -item.quantity, reference: data.orderNumber || data.ecommerceExportCode || `TMDT-${newRecord.id}` })),
               {
                 type: "ecom_sale",
                 referenceType: "TMDT",
                 reference:
-                  data.orderNumber || data.ecommerceExportCode || "Lưu thủ công",
+                  data.orderNumber || data.ecommerceExportCode || `TMDT-${newRecord.id}`,
                 note: `Xuất hàng TMDT: ${data.customerName}`,
                 createdBy: data.createdBy || "System",
               },
@@ -24886,12 +25144,12 @@ async function execEcommerceExportUpdate(id, data, { snapshotPickup = false, all
             tx,
             newItems
               .filter((item) => item.variantSku)
-              .map((item) => ({ sku: item.variantSku, quantity: -item.quantity })),
+              .map((item) => ({ sku: item.variantSku, quantity: -item.quantity, reference: data.orderNumber || data.ecommerceExportCode || oldRecord.orderNumber || oldRecord.ecommerceExportCode || `TMDT-${oldRecord.id}` })),
             {
               type: "ecom_sale",
               referenceType: "TMDT_EDIT",
               reference:
-                data.orderNumber || data.ecommerceExportCode || "Sua thu cong",
+                data.orderNumber || data.ecommerceExportCode || oldRecord.orderNumber || oldRecord.ecommerceExportCode || `TMDT-${newRecord.id}`,
               note:
                 "Tao/Sua don TMDT: " +
                 (data.customerName || oldRecord.customerName || "TMDT"),
@@ -25544,7 +25802,7 @@ ipcMain.handle("ecommerceExports:importSnapshot", async (event, payload = {}) =>
               tx,
               items
                 .filter((item) => item.variantSku)
-                .map((item) => ({ sku: item.variantSku, quantity: -item.quantity })),
+                .map((item) => ({ sku: item.variantSku, quantity: -item.quantity, reference: record.orderNumber || record.ecommerceExportCode || `TMDT-${current.id}` })),
               {
                 type: "ecom_sale",
                 referenceType: "TMDT_SHIPPING_RECONCILE",
@@ -25837,6 +26095,7 @@ ipcMain.handle("ecommerceExports:bulkCreate", async (event, records) => {
                   skuChanges.push({
                     sku: item.variantSku,
                     quantity: -item.quantity,
+                    reference: data.orderNumber || data.ecommerceExportCode,
                   });
                 }
               }
@@ -27789,6 +28048,14 @@ async function getPrepackDraftConfig(client = prisma) {
   return parsePrepackDraftConfig(row?.value);
 }
 
+const PREPACK_DRAFT_LOCK_KEY = "prepackDraftQuantities:v1";
+async function withPrepackDraftLock(work) {
+  return prisma.$transaction(async (tx) => {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${PREPACK_DRAFT_LOCK_KEY}))`;
+    return work(tx);
+  }, { maxWait: 5000, timeout: 15000 });
+}
+
 async function writePrepackDraftConfig(client, drafts) {
   if (!client?.appConfig) return;
   await client.appConfig.upsert({
@@ -27798,9 +28065,8 @@ async function writePrepackDraftConfig(client, drafts) {
   });
 }
 
-async function clearPrepackDrafts(batchIds) {
-  if (!prisma?.appConfig || !Array.isArray(batchIds) || !batchIds.length) return;
-  const drafts = await getPrepackDraftConfig();
+async function clearPrepackDrafts(tx, batchIds) {
+  const drafts = await getPrepackDraftConfig(tx);
   const ids = new Set(batchIds.map(Number));
   let changed = false;
   Object.keys(drafts).forEach((key) => {
@@ -27809,7 +28075,7 @@ async function clearPrepackDrafts(batchIds) {
       changed = true;
     }
   });
-  if (changed) await writePrepackDraftConfig(prisma, drafts);
+  if (changed) await writePrepackDraftConfig(tx, drafts);
 }
 
 function normalizePrepackComponents(rawComponents) {
@@ -27886,6 +28152,105 @@ async function resolvePrepackProduct(payload) {
   };
 }
 
+const packagePackingModule = require('./package-packing.cjs');
+const tmdtPhysicalStock = require('./tmdt-physical-stock.cjs');
+const reconciliation = require('./handling-unit-reconciliation.cjs');
+const { createWorkspaceSync, runWorkspaceTransaction } = require('./handling-unit-workspace-sync.cjs');
+async function runHandlingUnitWorkspaceSync(actor) {
+  return runWorkspaceTransaction(getPrismaDirectTx(), async tx => {
+        const { productMap } = await buildSkuCache(tx);
+        const registered = await tx.handlingUnit.findMany({ select: { sku: true }, distinct: ['sku'] });
+        const inventory = packagePackingModule.decodeInventory(await tx.appConfig.findUnique({ where: { key: packagePackingModule.INVENTORY_KEY } }));
+        const skus = [...new Set([...registered.map(item => item.sku), ...inventory.lots.flatMap(lot => (lot.components || []).map(c => c.sku))])];
+        return reconciliation.synchronize(tx, skus, handlingUnitSoftwareStocks(productMap), actor, appendHandlingUnitsTransactions);
+  });
+}
+const scheduleHandlingUnitWorkspaceSync = createWorkspaceSync({
+  run: runHandlingUnitWorkspaceSync,
+  changed: result => broadcastHandlingUnitsChanged('SOFTWARE_STOCK_SYNC', { count: result.history.length }),
+  failed: error => console.warn('[HandlingUnits] Background stock sync deferred:', error?.message || error),
+});
+function handlingUnitSoftwareStocks(productMap) {
+  return new Map([...productMap].map(([sku, info]) => [sku, Number(info.isVariant
+    ? parseJsonArray(info.product.variants)[info.variantIndex]?.stock || 0
+    : info.product.stock || 0)]));
+}
+const packagePackingService = packagePackingModule.createPackagePackingService({
+  getDb: () => prisma,
+  getSession: () => currentSession,
+  recordTransfers: async (tx, entries) => {
+    await appendHandlingUnitsTransactions(tx, entries);
+    for (const entry of entries.filter(item => item.quantity < 0)) await markHandlingUnitWithdrawal(tx, entry.unitId);
+  },
+});
+for (const method of ['list', 'create', 'update', 'inventory']) {
+  ipcMain.handle(`packagePacking:${method}`, async (_event, payload = {}) => {
+    try {
+      const data = await packagePackingService[method](payload);
+      if (method === 'update' && ['submit', 'return', 'accept'].includes(payload.action)) broadcastHandlingUnitsChanged('PACKAGE_PACKING', { assignmentId: data.id });
+      return { success: true, data };
+    }
+    catch (error) { return { success: false, error: error.message }; }
+  });
+}
+
+ipcMain.handle('handlingUnits:getReconciliation', async (_event, rawSku = '') => {
+  try {
+    requireRole('admin', 'manager', 'staff');
+    const sku = String(rawSku || '').trim();
+    if (!sku) throw new Error('Thiếu SKU cần đối soát.');
+    const { productMap } = await buildSkuCache(prisma);
+    const info = productMap.get(sku);
+    if (!info) throw new Error(`Không tìm thấy SKU ${sku}.`);
+    const stock = Number(info.isVariant ? parseJsonArray(info.product.variants)[info.variantIndex]?.stock || 0 : info.product.stock || 0);
+    const [units, inventory, row] = await Promise.all([
+      prisma.handlingUnit.findMany({ where: { sku }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] }),
+      prisma.appConfig.findUnique({ where: { key: packagePackingModule.INVENTORY_KEY } }),
+      prisma.appConfig.findUnique({ where: { key: reconciliation.baselineKey(sku) } }),
+    ]);
+    const baseline = row ? JSON.parse(row.value) : null;
+    return { success: true, data: reconciliation.preview(sku, stock, units, packagePackingModule.decodeInventory(inventory).lots, baseline, handlingUnitSoftwareStocks(productMap)) };
+  } catch (error) { return { success: false, error: error.message }; }
+});
+
+ipcMain.handle('handlingUnits:confirmReconciliation', async (_event, payload = {}) => {
+  try {
+    requireRole('admin');
+    const sku = String(payload.sku || '').trim();
+    if (!sku) throw new Error('Thiếu SKU cần đối soát.');
+    if (!/^[A-Za-z0-9_-]{8,100}$/.test(payload.requestId || '')) throw new Error('Mã chống ghi trùng không hợp lệ.');
+    const requestHash = reconciliation.fingerprint(payload);
+    const result = await prisma.$transaction(async (tx) => {
+      await lockGlobalInventoryMutation(tx);
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${packagePackingModule.INVENTORY_KEY}))`;
+      const { productMap } = await buildSkuCache(tx);
+      const info = productMap.get(sku);
+      if (!info) throw new Error(`Không tìm thấy SKU ${sku}.`);
+      const stock = Number(info.isVariant ? parseJsonArray(info.product.variants)[info.variantIndex]?.stock || 0 : info.product.stock || 0);
+      const previous = await tx.appConfig.findUnique({ where: { key: `handlingUnitReconciliationOp:${payload.requestId}` } });
+      if (previous) {
+        const saved = JSON.parse(previous.value);
+        if (saved.requestHash !== requestHash) throw new Error('Mã thao tác đã dùng với dữ liệu khác.');
+        return { ...saved, duplicate: true };
+      }
+      const stocks = handlingUnitSoftwareStocks(productMap);
+      await tx.$queryRaw`SELECT "id" FROM "HandlingUnit" WHERE "sku" = ${sku} ORDER BY "createdAt" ASC, "id" ASC FOR UPDATE`;
+      const before = await reconciliation.snapshot(tx, sku, stock, stocks);
+      reconciliation.validateCounts(before, payload);
+      const synced = await reconciliation.synchronize(tx, [sku], stocks, currentSession.username, appendHandlingUnitsTransactions);
+      const baseline = { version: 2, mode: 'software-authoritative', confirmedAt: new Date().toISOString(), confirmedBy: currentSession.username, stock,
+        before: { ...before, baseline: before.baseline ? { confirmedAt: before.baseline.confirmedAt, confirmedBy: before.baseline.confirmedBy } : null },
+        synchronized: synced, note: 'Tự động đồng bộ theo tồn phần mềm; không nhập tồn thực tế thủ công.' };
+      await tx.appConfig.upsert({ where: { key: reconciliation.baselineKey(sku) }, create: { key: reconciliation.baselineKey(sku), value: JSON.stringify(baseline) }, update: { value: JSON.stringify(baseline) } });
+      const saved = { sku, confirmedAt: baseline.confirmedAt, confirmedBy: baseline.confirmedBy, requestHash, baseline };
+      await tx.appConfig.upsert({ where: { key: `handlingUnitReconciliationOp:${payload.requestId}` }, create: { key: `handlingUnitReconciliationOp:${payload.requestId}`, value: JSON.stringify(saved) }, update: { value: JSON.stringify(saved) } });
+      return saved;
+    }, { timeout: 30000, maxWait: 10000 });
+    broadcastHandlingUnitsChanged('HANDLING_UNITS_RECONCILIATION', { sku });
+    return { success: true, data: result };
+  } catch (error) { return { success: false, error: error.message }; }
+});
+
 ipcMain.handle("prepack:list", async (_event, filters = {}) => {
   const startedAt = Date.now();
   try {
@@ -27942,26 +28307,32 @@ ipcMain.handle("prepack:saveDraft", async (_event, payload = {}) => {
     const batchId = Number(payload.batchId);
     const workDateKey = normalizePrepackWorkDateKey(payload.workDateKey);
     if (!Number.isInteger(batchId) || batchId <= 0 || !workDateKey) throw new Error("Bản nháp đóng gói không hợp lệ.");
-    const batch = await prisma.prepackBatch.findUnique({ where: { id: batchId }, select: { id: true, packerId: true, packerUsername: true, packerName: true } });
-    if (!batch) throw new Error("Không tìm thấy chỉ tiêu đóng gói.");
-    const ownsBatch = actor.id === batch.packerId || actor.username === batch.packerUsername;
-    if (!ownsBatch && !["admin", "manager"].includes(actor.role)) throw new Error("Bạn không được sửa bản nháp của nhân viên khác.");
     const hasQuantity = payload.quantity !== null && payload.quantity !== undefined && payload.quantity !== "";
     const quantity = hasQuantity ? parseNonNegativePrepackQuantity(payload.quantity, "Số lượng thực tế") : null;
-    const drafts = await getPrepackDraftConfig();
-    const key = `${workDateKey}:${batchId}`;
-    if (quantity === null) delete drafts[key];
-    else drafts[key] = {
-      batchId,
-      workDateKey,
-      quantity,
-      packerUsername: batch.packerUsername,
-      packerName: batch.packerName,
-      updatedAt: new Date().toISOString(),
-    };
-    const keys = Object.keys(drafts);
-    if (keys.length > 3000) keys.sort((left, right) => String(drafts[left]?.updatedAt || "").localeCompare(String(drafts[right]?.updatedAt || ""))).slice(0, keys.length - 3000).forEach((oldKey) => delete drafts[oldKey]);
-    await writePrepackDraftConfig(prisma, drafts);
+    await withPrepackDraftLock(async (tx) => {
+      const batch = await tx.prepackBatch.findUnique({ where: { id: batchId }, select: { id: true, packerId: true, packerUsername: true, packerName: true, status: true, reportedAt: true } });
+      if (!batch) throw new Error("Không tìm thấy chỉ tiêu đóng gói.");
+      const ownsBatch = actor.id === batch.packerId || actor.username === batch.packerUsername;
+      if (!ownsBatch && !["admin", "manager"].includes(actor.role)) throw new Error("Bạn không được sửa bản nháp của nhân viên khác.");
+      if (["cancelled", "rejected", "waiting_acceptance"].includes(batch.status) ||
+          (batch.reportedAt && getBangkokDateKey(batch.reportedAt) === workDateKey)) {
+        throw new Error("Lô đã báo cáo hoặc không còn nhận bản nháp.");
+      }
+      const drafts = await getPrepackDraftConfig(tx);
+      const key = `${workDateKey}:${batchId}`;
+      if (quantity === null) delete drafts[key];
+      else drafts[key] = {
+        batchId,
+        workDateKey,
+        quantity,
+        packerUsername: batch.packerUsername,
+        packerName: batch.packerName,
+        updatedAt: new Date().toISOString(),
+      };
+      const keys = Object.keys(drafts);
+      if (keys.length > 3000) keys.sort((left, right) => String(drafts[left]?.updatedAt || "").localeCompare(String(drafts[right]?.updatedAt || ""))).slice(0, keys.length - 3000).forEach((oldKey) => delete drafts[oldKey]);
+      await writePrepackDraftConfig(tx, drafts);
+    });
     return { success: true, data: { batchId, quantity, workDateKey } };
   } catch (error) {
     console.error("Prepack draft error:", error);
@@ -28282,6 +28653,7 @@ ipcMain.handle("prepack:reportActual", async (_event, payload = {}) => {
       },
     };
     const result = await prisma.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${PREPACK_DRAFT_LOCK_KEY}))`;
       const batches = await tx.prepackBatch.findMany({ where: { id: { in: batchIds } } });
       if (batches.length !== batchIds.length) throw new Error("Không tìm thấy đủ lô đóng gói.");
       const assignedPackers = [...new Map(batches.map((batch) => [
@@ -28330,9 +28702,9 @@ ipcMain.handle("prepack:reportActual", async (_event, payload = {}) => {
           createdBy: actor.fullName,
         },
       });
+      await clearPrepackDrafts(tx, batchIds);
       return { task, batchIds };
-    });
-    await clearPrepackDrafts(batchIds);
+    }, { maxWait: 5000, timeout: 15000 });
     return { success: true, data: result };
   } catch (error) {
     console.error("Prepack actual report error:", error);
@@ -29959,7 +30331,73 @@ let attendanceReadCache = null;
 let attendanceSnapshotReadInFlight = null;
 let attendanceCoreReadCache = null;
 let attendanceCoreReadInFlight = null;
+// Locked payroll snapshots are immutable while their period remains locked.
+// Keep the targeted period read in memory so reopening Attendance does not
+// repeatedly parse the large attendanceData JSON document.  The AppConfig
+// updatedAt revision is checked before serving an entry, so a write from
+// another window/machine can never leave this cache authoritative.
+const lockedPeriodSnapshotCache = new Map();
 let attendanceMaintenanceInFlight = null;
+let attendanceMaintenanceTimer = null;
+const ATTENDANCE_FINE_PATCH_KEY = "attendanceFinePatchesV1";
+
+function normalizeAttendanceFinePatches(value) {
+  const source = value && typeof value === "object" ? value : {};
+  return {
+    version: 1,
+    manual: source.manual && typeof source.manual === "object" ? source.manual : {},
+    system: source.system && typeof source.system === "object" ? source.system : {},
+  };
+}
+
+function applyAttendanceFinePatches(data, patchValue) {
+  const patches = normalizeAttendanceFinePatches(patchValue);
+  const extraFines = Array.isArray(data?.extraFines) ? [...data.extraFines] : [];
+  const fineOverrides = data?.fineOverrides && typeof data.fineOverrides === "object"
+    ? { ...data.fineOverrides }
+    : {};
+  const fineAuditLog = Array.isArray(data?.fineAuditLog) ? [...data.fineAuditLog] : [];
+  const auditIds = new Set(fineAuditLog.map((entry) => String(entry?.id || "")).filter(Boolean));
+
+  for (const [fineId, patch] of Object.entries(patches.manual)) {
+    if (!fineId) continue;
+    const id = String(patch?.fine?.id || fineId);
+    for (let index = extraFines.length - 1; index >= 0; index -= 1) {
+      if (String(extraFines[index]?.id || "") === id) extraFines.splice(index, 1);
+    }
+    const audit = patch?.audit;
+    if (audit?.id && !auditIds.has(String(audit.id))) {
+      fineAuditLog.push(audit);
+      auditIds.add(String(audit.id));
+    }
+  }
+
+  for (const [overrideKey, patch] of Object.entries(patches.system)) {
+    if (!overrideKey) continue;
+    const fine = patch?.fine && typeof patch.fine === "object" ? patch.fine : {};
+    fineOverrides[overrideKey] = { ...fine, disabled: true };
+    const audit = patch?.audit;
+    if (audit?.id && !auditIds.has(String(audit.id))) {
+      fineAuditLog.push(audit);
+      auditIds.add(String(audit.id));
+    }
+  }
+
+  return { ...(data || {}), extraFines, fineOverrides, fineAuditLog };
+}
+
+async function readAttendanceFinePatchRecord(client = prisma) {
+  const record = await client.appConfig.findUnique({
+    where: { key: ATTENDANCE_FINE_PATCH_KEY },
+    select: { value: true, updatedAt: true },
+  });
+  let value = {};
+  try { value = record?.value ? JSON.parse(record.value) : {}; } catch { value = {}; }
+  return {
+    value: normalizeAttendanceFinePatches(value),
+    updatedAt: record?.updatedAt?.toISOString?.() || null,
+  };
+}
 
 function nextPrematureFineVisibilityAt(fines) {
   let next = null;
@@ -29976,6 +30414,7 @@ function nextPrematureFineVisibilityAt(fines) {
 function invalidateAttendanceSnapshotCaches() {
   attendanceReadCache = null;
   attendanceCoreReadCache = null;
+  lockedPeriodSnapshotCache.clear();
 }
 
 function stripAttendancePayrollSnapshots(data, includedPeriod = null) {
@@ -29996,19 +30435,27 @@ async function getAttendanceCoreSnapshot() {
   if (attendanceCoreReadInFlight) return attendanceCoreReadInFlight;
   const request = (async () => {
     if (attendanceCoreReadCache) {
-      const revision = await prisma.appConfig.findUnique({
-        where: { key: "attendanceData" },
-        select: { updatedAt: true },
-      });
-      const revisionKey = revision?.updatedAt?.toISOString() || null;
-      const visibilityBoundary = attendanceCoreReadCache.nextFineVisibilityAt;
+      const [revision, patchRevision] = await Promise.all([
+        prisma.appConfig.findUnique({
+          where: { key: "attendanceData" },
+          select: { updatedAt: true },
+        }),
+        prisma.appConfig.findUnique({
+          where: { key: ATTENDANCE_FINE_PATCH_KEY },
+          select: { updatedAt: true },
+        }),
+      ]);
+      const revisionKey = `${revision?.updatedAt?.toISOString() || ""}|${patchRevision?.updatedAt?.toISOString() || ""}`;
+      const cachedSnapshot = attendanceCoreReadCache;
+      const visibilityBoundary = cachedSnapshot?.nextFineVisibilityAt;
       const visibilityStillValid = !visibilityBoundary || Date.now() < visibilityBoundary;
-      if (attendanceCoreReadCache && revisionKey === attendanceCoreReadCache.updatedAt && visibilityStillValid) {
-        return { data: attendanceCoreReadCache.data, updatedAt: revisionKey, cached: true };
+      if (cachedSnapshot && revisionKey === cachedSnapshot.revision && visibilityStillValid) {
+        return { data: cachedSnapshot.data, updatedAt: cachedSnapshot.updatedAt, cached: true };
       }
     }
 
-    const rows = await prisma.$queryRaw(Prisma.sql`
+    const [rows, patchRecord] = await Promise.all([
+      prisma.$queryRaw(Prisma.sql`
       WITH source AS MATERIALIZED (
         SELECT "value"::jsonb AS data, "updatedAt" FROM "AppConfig"
         WHERE "key" = 'attendanceData' LIMIT 1
@@ -30024,7 +30471,9 @@ async function getAttendanceCoreSnapshot() {
         ), '[]'::jsonb)
       )::text AS "value", "updatedAt"
       FROM source
-    `);
+    `),
+      readAttendanceFinePatchRecord(),
+    ]);
     const record = rows?.[0] || null;
     let data = {};
     try {
@@ -30034,6 +30483,7 @@ async function getAttendanceCoreSnapshot() {
     }
     // Do not paint a stale no-registration fine before the workday closes.
     // Background reconciliation still removes it from the shared ledger.
+    data = applyAttendanceFinePatches(data, patchRecord.value);
     const nextFineVisibilityAt = nextPrematureFineVisibilityAt(data.extraFines);
     if (Array.isArray(data.extraFines)) {
       const now = new Date();
@@ -30043,7 +30493,8 @@ async function getAttendanceCoreSnapshot() {
       };
     }
     const updatedAt = record?.updatedAt?.toISOString?.() || null;
-    attendanceCoreReadCache = { data, updatedAt, nextFineVisibilityAt };
+    const revision = `${updatedAt || ""}|${patchRecord.updatedAt || ""}`;
+    attendanceCoreReadCache = { data, updatedAt, revision, nextFineVisibilityAt };
     return { data, updatedAt, cached: false };
   })();
   attendanceCoreReadInFlight = request;
@@ -30061,31 +30512,43 @@ async function getAttendanceDataSnapshot() {
 
   const request = (async () => {
     if (attendanceReadCache) {
-      const revision = await prisma.appConfig.findUnique({
-        where: { key: "attendanceData" },
-        select: { updatedAt: true },
-      });
-      const revisionKey = revision?.updatedAt?.toISOString() || null;
-      if (attendanceReadCache && revisionKey === attendanceReadCache.updatedAt) {
-        return { data: attendanceReadCache.data, updatedAt: revisionKey, cached: true };
+      const [revision, patchRevision] = await Promise.all([
+        prisma.appConfig.findUnique({
+          where: { key: "attendanceData" },
+          select: { updatedAt: true },
+        }),
+        prisma.appConfig.findUnique({
+          where: { key: ATTENDANCE_FINE_PATCH_KEY },
+          select: { updatedAt: true },
+        }),
+      ]);
+      const revisionKey = `${revision?.updatedAt?.toISOString() || ""}|${patchRevision?.updatedAt?.toISOString() || ""}`;
+      if (attendanceReadCache && revisionKey === attendanceReadCache.revision) {
+        return { data: attendanceReadCache.data, updatedAt: attendanceReadCache.updatedAt, cached: true };
       }
     }
 
-    const record = await prisma.appConfig.findUnique({
-      where: { key: "attendanceData" },
-      select: { value: true, updatedAt: true },
-    });
+    const [record, patchRecord] = await Promise.all([
+      prisma.appConfig.findUnique({
+        where: { key: "attendanceData" },
+        select: { value: true, updatedAt: true },
+      }),
+      readAttendanceFinePatchRecord(),
+    ]);
     let data = {};
     try {
       data = record?.value ? JSON.parse(record.value) : {};
     } catch {
       throw new Error("Cấu hình chính sách hiện hành không hợp lệ.");
     }
+    data = applyAttendanceFinePatches(data, patchRecord.value);
     const updatedAt = record?.updatedAt?.toISOString() || null;
-    attendanceReadCache = { success: true, data, updatedAt };
+    const revision = `${updatedAt || ""}|${patchRecord.updatedAt || ""}`;
+    attendanceReadCache = { success: true, data, updatedAt, revision };
     attendanceCoreReadCache = {
       data: stripAttendancePayrollSnapshots(data),
       updatedAt,
+      revision,
       nextFineVisibilityAt: nextPrematureFineVisibilityAt(data.extraFines),
     };
     return { data, updatedAt, cached: false };
@@ -30298,9 +30761,18 @@ ipcMain.handle("attendance:getInitialData", async () => {
     requireRole("admin", "manager", "staff");
     if (!prisma) throw new Error("Prisma not available");
     const snapshot = await getAttendanceCoreSnapshot();
-    // Historical reconciliation is maintenance work. It runs single-flight
-    // after the core snapshot is available and never blocks first paint.
-    void startAttendanceMaintenance();
+    // Historical reconciliation is maintenance work. Delay the heavy ledger
+    // writers until the first payroll paint has had a chance to complete;
+    // otherwise they contend with the renderer's late-fine probe on the same
+    // attendanceData advisory lock and make the "background sync" banner stay
+    // visible for several seconds.
+    if (!attendanceMaintenanceInFlight && !attendanceMaintenanceTimer) {
+      attendanceMaintenanceTimer = setTimeout(() => {
+        attendanceMaintenanceTimer = null;
+        void startAttendanceMaintenance();
+      }, 2500);
+      attendanceMaintenanceTimer.unref?.();
+    }
     console.log(`[Perf] attendance:getInitialData ms=${Date.now() - startedAt} cached=${snapshot.cached}`);
     return {
       success: true,
@@ -30321,8 +30793,26 @@ ipcMain.handle("attendance:getLockedPeriodSnapshot", async (_event, payload = {}
     const start = String(payload.start || "");
     const end = String(payload.end || "");
     if (!start || !end) throw new Error("Kỳ lương đã khóa không hợp lệ.");
+    const cacheKey = `${start}|${end}`;
+    const cached = lockedPeriodSnapshotCache.get(cacheKey);
+    if (cached) {
+      const revision = await prisma.appConfig.findUnique({
+        where: { key: "attendanceData" },
+        select: { updatedAt: true },
+      });
+      const revisionKey = revision?.updatedAt?.toISOString?.() || null;
+      if (revisionKey && revisionKey === cached.updatedAt) {
+        return {
+          success: true,
+          data: cached.period,
+          updatedAt: revisionKey,
+          cached: true,
+        };
+      }
+      lockedPeriodSnapshotCache.delete(cacheKey);
+    }
     const rows = await prisma.$queryRaw(Prisma.sql`
-      SELECT period_row AS "period"
+      SELECT period_row AS "period", "updatedAt"
       FROM "AppConfig",
         jsonb_array_elements(
           COALESCE(("value"::jsonb)->'lockedPeriods', '[]'::jsonb)
@@ -30332,9 +30822,12 @@ ipcMain.handle("attendance:getLockedPeriodSnapshot", async (_event, payload = {}
         AND period_row->>'end' = ${end}
       LIMIT 1
     `);
-    const period = rows?.[0]?.period || null;
+    const row = rows?.[0] || null;
+    const period = row?.period || null;
     if (!period) throw new Error("Không tìm thấy kỳ lương đã khóa trong dữ liệu hiện hành.");
-    return { success: true, data: period };
+    const updatedAt = row?.updatedAt?.toISOString?.() || null;
+    if (updatedAt) lockedPeriodSnapshotCache.set(cacheKey, { period, updatedAt });
+    return { success: true, data: period, updatedAt, cached: false };
   } catch (error) {
     console.error("❌ attendance:getLockedPeriodSnapshot error:", error);
     return { success: false, error: error.message };
@@ -30519,7 +31012,7 @@ function mergeAttendanceFineLedger(currentData, incomingData) {
   };
 }
 
-function enqueueAttendanceDataWrite(write, { maxQueueWaitMs } = {}) {
+function enqueueAttendanceDataWrite(write, { maxQueueWaitMs, priority = false } = {}) {
   let expired = false;
   let timer;
   const run = () => {
@@ -30528,9 +31021,19 @@ function enqueueAttendanceDataWrite(write, { maxQueueWaitMs } = {}) {
     if (expired) return;
     return write();
   };
-  const task = attendanceDataWriteTail.then(run, run);
-  // Keep the queue alive even when a caller receives a rejected write.
-  attendanceDataWriteTail = task.catch(() => undefined);
+  // Interactive corrections may start alongside a long maintenance task. The
+  // database advisory lock still serializes the actual read/patch/write, while
+  // the queue tail waits for both operations before accepting the next normal
+  // autosave. This keeps a delete/edit button from waiting behind a scan.
+  const previousTail = attendanceDataWriteTail;
+  const task = priority
+    ? Promise.resolve().then(run)
+    : previousTail.then(run, run);
+  // Keep the queue alive even when a caller receives a rejected write. A
+  // priority task is also joined to the tail so later writes cannot overtake it.
+  attendanceDataWriteTail = priority
+    ? Promise.all([previousTail.catch(() => undefined), task.catch(() => undefined)]).then(() => undefined)
+    : task.catch(() => undefined);
   if (!Number.isFinite(maxQueueWaitMs)) return task;
   const queueTimeout = new Promise((_, reject) => {
     timer = setTimeout(() => {
@@ -30571,6 +31074,18 @@ function isTransactionWriteConflict(error) {
     error?.code === "P2034" ||
     /write conflict|deadlock|could not serialize/i.test(String(error?.message || ""))
   );
+}
+
+function isAttendanceFineDeleteRetryableError(error) {
+  // Retry only known rolled-back lock/conflict/expiry errors, not a lost
+  // connection with an uncertain commit result. Raw-query SQLSTATE is often
+  // nested in Prisma's meta rather than error.code.
+  const detail = `${String(error?.message || "")} ${String(error?.meta?.error || "")}`;
+  return isTransactionWriteConflict(error)
+    || ["55P03", "40001", "40P01"].includes(String(error?.code || ""))
+    || ["55P03", "40001", "40P01"].includes(String(error?.meta?.code || ""))
+    || /lock timeout/i.test(detail)
+    || (error?.code === "P2028" && /expired|timeout|timed out/i.test(detail));
 }
 
 function isAttendanceAutosaveRetryableError(error) {
@@ -30620,7 +31135,13 @@ ipcMain.handle("appConfig:set", async (event, key, value, expectedUpdatedAt) => 
                 let currentValueForFineMerge = null;
                 if (current?.value) {
                   try {
-                    const currentValue = JSON.parse(current.value);
+                    const patchRow = await tx.appConfig.findUnique({
+                      where: { key: ATTENDANCE_FINE_PATCH_KEY },
+                      select: { value: true },
+                    });
+                    let finePatches = {};
+                    try { finePatches = patchRow?.value ? JSON.parse(patchRow.value) : {}; } catch {}
+                    const currentValue = applyAttendanceFinePatches(JSON.parse(current.value), finePatches);
                     currentValueForFineMerge = currentValue;
                     valueToSave = {
                       ...(value || {}),
@@ -31034,6 +31555,19 @@ ipcMain.handle("attendance:createFine", async (event, payload = {}) => {
       const row = await tx.appConfig.findUnique({ where: { key: "attendanceData" } });
       let attendanceData = {};
       try { attendanceData = JSON.parse(row?.value || "{}"); } catch {}
+      const targetEmployee = (Array.isArray(attendanceData.employees) ? attendanceData.employees : [])
+        .find((employee) => Number(employee?.id) === empId);
+      const targetUser = targetEmployee?.username
+        ? await tx.user.findUnique({ where: { username: String(targetEmployee.username) }, select: { id: true, status: true } })
+        : null;
+      if (targetUser?.status === USER_STATUS_RESIGNED) {
+        const employmentRow = await tx.appConfig.findUnique({ where: { key: USER_EMPLOYMENT_CONFIG_KEY } });
+        const employmentConfig = parseEmploymentStatusConfig(employmentRow?.value);
+        const resignationDate = String(employmentConfig[String(targetUser.id)]?.effectiveDate || '').slice(0, 10);
+        if (resignationDate && getBangkokDateKey(date) >= resignationDate) {
+          throw new Error('Nhân viên đã nghỉ việc: không thể ghi nhận phạt từ ngày nghỉ trở đi.');
+        }
+      }
       const extraFines = Array.isArray(attendanceData.extraFines) ? [...attendanceData.extraFines] : [];
       const fineOverrides = attendanceData.fineOverrides && typeof attendanceData.fineOverrides === "object"
         ? { ...attendanceData.fineOverrides }
@@ -31109,45 +31643,37 @@ ipcMain.handle("attendance:deleteFine", async (event, payload = {}) => {
     const actor = { username: currentSession.username, fullName: currentSession.fullName };
     const startedAt = Date.now();
     let transactionStartedAt;
-    const result = await enqueueAttendanceDataWrite(async () => {
+    // Deleting a fine is an interactive correction. Start it immediately even
+    // when a background reconciliation is still queued. The row lock and
+    // Serializable transaction protect the JSON document; waiting on the
+    // global attendance advisory lock here was the source of the 15–20s UI
+    // spinner while maintenance scanned historical data.
+    const patchResult = await enqueueAttendanceDataWrite(async () => {
       transactionStartedAt = Date.now();
       let lastConflict = null;
-      for (let attempt = 0; attempt < 2; attempt++) {
+      // A failed NOWAIT row lock is retried in a fresh short transaction.
+      for (let attempt = 0; attempt < 3; attempt++) {
         try {
           return await getPrismaDirectTx().$transaction(async (tx) => {
-            await tx.$executeRaw`SET LOCAL lock_timeout = '3000ms'`;
-            await tx.$executeRaw`SET LOCAL statement_timeout = '8000ms'`;
-            await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('attendanceData'))`;
-            // Leave payroll snapshots in PostgreSQL; only transfer the fine ledger.
-            const rows = await tx.$queryRaw`
-              SELECT jsonb_build_object(
-                'extraFines', "value"::jsonb->'extraFines',
-                'fineOverrides', "value"::jsonb->'fineOverrides',
-                'fineAuditLog', "value"::jsonb->'fineAuditLog'
-              )::text AS "value"
-              FROM "AppConfig" WHERE "key" = 'attendanceData' FOR UPDATE
-            `;
-            if (!rows.length) throw new Error("Không tìm thấy dữ liệu Bảng công. Vui lòng tải lại.");
-            const attendanceData = JSON.parse(rows[0].value);
-
-            let extraFines = Array.isArray(attendanceData.extraFines) ? attendanceData.extraFines : [];
-            const fineOverrides = attendanceData.fineOverrides && typeof attendanceData.fineOverrides === "object"
-              ? { ...attendanceData.fineOverrides }
-              : {};
-            const fineAuditLog = Array.isArray(attendanceData.fineAuditLog) ? [...attendanceData.fineAuditLog] : [];
-
+            await tx.$executeRaw`SET LOCAL lock_timeout = '500ms'`;
+            await tx.$executeRaw`SET LOCAL statement_timeout = '2500ms'`;
+            // The attendanceData JSON is ~12 MB in production. Read and write
+            // only the fine branches in one SQL statement; a Node-side
+            // parse/stringify round-trip made this action spend 3–6 seconds
+            // before the actual delete even began.
             let deletedFine = fine;
             if (kind === 'manual') {
-              if (!extraFines.some((item) => String(item?.id || '') === fineId)) {
-                throw new Error("Khoản phạt đã bị xóa hoặc không còn tồn tại.");
-              }
+              const rows = await tx.$queryRaw`
+                SELECT "value"::jsonb->'extraFines' AS "extraFines"
+                FROM "AppConfig"
+                WHERE "key" = 'attendanceData'
+                FOR UPDATE NOWAIT
+              `;
+              const extraFines = Array.isArray(rows?.[0]?.extraFines) ? rows[0].extraFines : [];
               deletedFine = extraFines.find((item) => String(item?.id || '') === fineId);
-              extraFines = extraFines.filter((item) => String(item?.id || '') !== fineId);
-            } else {
-              fineOverrides[overrideKey] = { ...fine, disabled: true };
+              if (!deletedFine) throw new Error("Khoản phạt đã bị xóa hoặc không còn tồn tại.");
             }
-
-            fineAuditLog.push({
+            const auditObject = {
               id: `flog-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
               action: 'delete',
               timestamp: new Date().toLocaleString('vi-VN', { timeZone: 'Asia/Bangkok' }),
@@ -31155,26 +31681,47 @@ ipcMain.handle("attendance:deleteFine", async (event, payload = {}) => {
               changedByName: actor.fullName || actor.username,
               before: deletedFine,
               note: String(payload?.audit?.note || `Xóa khoản phạt: ${fine.type} — ${fine.amount}`).slice(0, 2000),
+            };
+            const patchRow = await tx.appConfig.findUnique({
+              where: { key: ATTENDANCE_FINE_PATCH_KEY },
+              select: { value: true },
             });
-
-            const patch = JSON.stringify({ extraFines, fineOverrides, fineAuditLog });
-            await tx.$executeRaw`
-              UPDATE "AppConfig"
-              SET "value" = ("value"::jsonb || ${patch}::jsonb)::text,
-                  "updatedAt" = CURRENT_TIMESTAMP
-              WHERE "key" = 'attendanceData'
-            `;
-            return { extraFines, fineOverrides, fineAuditLog };
-          }, { isolationLevel: "Serializable", timeout: 12000, maxWait: 3000 });
+            let currentPatches = {};
+            try { currentPatches = patchRow?.value ? JSON.parse(patchRow.value) : {}; } catch {}
+            const nextPatches = normalizeAttendanceFinePatches(currentPatches);
+            if (kind === 'manual') {
+              if (nextPatches.manual[fineId]) throw new Error("Khoản phạt đã được xóa trước đó.");
+              nextPatches.manual[fineId] = { fine: deletedFine, audit: auditObject };
+            } else {
+              if (nextPatches.system[overrideKey]) throw new Error("Khoản phạt đã được xóa trước đó.");
+              nextPatches.system[overrideKey] = { fine: { ...fine, disabled: true }, audit: auditObject };
+            }
+            await tx.appConfig.upsert({
+              where: { key: ATTENDANCE_FINE_PATCH_KEY },
+              update: { value: JSON.stringify(nextPatches) },
+              create: { key: ATTENDANCE_FINE_PATCH_KEY, value: JSON.stringify(nextPatches) },
+            });
+            return { deletedFine, audit: auditObject };
+          }, { isolationLevel: "Serializable", timeout: 4000, maxWait: 1000 });
         } catch (error) {
-          if (!isTransactionWriteConflict(error)) throw error;
+          if (!isAttendanceFineDeleteRetryableError(error)
+            || attempt === 2 || Date.now() - transactionStartedAt >= 2200) throw error;
           lastConflict = error;
+          console.warn(`[Attendance deleteFine] retry=${attempt + 1} code=${error?.meta?.code || error?.code || "lock_busy"} elapsed=${Date.now() - transactionStartedAt}ms`);
           await waitForRetry(attempt);
         }
       }
       throw lastConflict || new Error("Khoản phạt đang được cập nhật ở máy khác. Hãy thử lại.");
-    }, { maxQueueWaitMs: 15000 });
+    }, { maxQueueWaitMs: 3000, priority: true });
     invalidateAttendanceSnapshotCaches();
+    const result = {
+      deletedFine: patchResult?.deletedFine || null,
+      audit: patchResult?.audit || null,
+      kind,
+      fineId,
+      overrideKey,
+      disabledFine: kind === 'system' ? { ...fine, disabled: true } : null,
+    };
     console.info(`[Attendance deleteFine] queue=${transactionStartedAt - startedAt}ms transaction=${Date.now() - transactionStartedAt}ms`);
 
     void logActivity({
@@ -31188,7 +31735,7 @@ ipcMain.handle("attendance:deleteFine", async (event, payload = {}) => {
     return { success: true, data: result };
   } catch (error) {
     console.error("❌ attendance:deleteFine error:", error);
-    if (/lock timeout|statement timeout|could not serialize|deadlock/i.test(String(error?.message || "")) || error?.code === "P2034" || error?.code === "P2028") {
+    if (isAttendanceFineDeleteRetryableError(error) || /statement timeout/i.test(String(error?.message || "")) || error?.code === "P2028") {
       return { success: false, error: "Database Bảng công đang bận. Không thể hoàn tất xóa phạt; vui lòng tải lại bảng và thử lại." };
     }
     return { success: false, error: error.message };
@@ -31338,14 +31885,28 @@ ipcMain.handle("attendance:updatePayrollLock", async (event, payload = {}) => {
         try {
           return await getPrismaDirectTx().$transaction(
             async (tx) => {
+              // attendanceData contains frozen payroll snapshots and can be
+              // several megabytes.  Do not pull/parse/stringify the whole
+              // document in Node just to change lockedPeriods.  PostgreSQL
+              // updates that JSON path while the advisory lock protects the
+              // shared document from concurrent attendance writers.
+              await tx.$executeRaw`SET LOCAL lock_timeout = '3000ms'`;
+              await tx.$executeRaw`SET LOCAL statement_timeout = '10000ms'`;
               await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('attendanceData'))`;
-              const config = await tx.appConfig.findUnique({ where: { key: "attendanceData" } });
-              let attendanceData = {};
-              try {
-                attendanceData = JSON.parse(config?.value || "{}");
-              } catch {}
-
-              const lockedPeriods = getAttendanceLockedPeriods(attendanceData);
+              const configRows = await tx.$queryRaw(Prisma.sql`
+                SELECT "id", "value"::jsonb->'lockedPeriods' AS "lockedPeriods"
+                FROM "AppConfig"
+                WHERE "key" = 'attendanceData'
+                FOR UPDATE
+              `);
+              const configRow = configRows?.[0] || null;
+              let lockedPeriods = configRow?.lockedPeriods;
+              if (typeof lockedPeriods === "string") {
+                try { lockedPeriods = JSON.parse(lockedPeriods); } catch { lockedPeriods = []; }
+              }
+              lockedPeriods = Array.isArray(lockedPeriods)
+                ? lockedPeriods.filter((lock) => lock && lock.start && lock.end)
+                : [];
               const matchesPeriod = (lock) => (
                 getBangkokDateKey(lock.start) === startKey &&
                 getBangkokDateKey(lock.end) === endKey
@@ -31363,15 +31924,34 @@ ipcMain.handle("attendance:updatePayrollLock", async (event, payload = {}) => {
                 nextLockedPeriods = lockedPeriods.filter((lock) => !matchesPeriod(lock));
               }
 
-              attendanceData = { ...attendanceData, lockedPeriods: nextLockedPeriods };
-              await tx.appConfig.upsert({
-                where: { key: "attendanceData" },
-                update: { value: JSON.stringify(attendanceData) },
-                create: { key: "attendanceData", value: JSON.stringify(attendanceData) },
-              });
-              return { lockedPeriods: nextLockedPeriods };
+              let updatedAt = null;
+              if (!configRow) {
+                const created = await tx.appConfig.create({
+                  data: { key: "attendanceData", value: JSON.stringify({ lockedPeriods: nextLockedPeriods }) },
+                  select: { updatedAt: true },
+                });
+                updatedAt = created?.updatedAt?.toISOString?.() || null;
+              } else {
+                const nextLockedPeriodsJson = JSON.stringify(nextLockedPeriods);
+                await tx.$executeRaw(Prisma.sql`
+                  UPDATE "AppConfig"
+                  SET "value" = jsonb_set(
+                    COALESCE("value"::jsonb, '{}'::jsonb),
+                    '{lockedPeriods}',
+                    ${nextLockedPeriodsJson}::jsonb,
+                    true
+                  )::text,
+                  "updatedAt" = CURRENT_TIMESTAMP
+                  WHERE "id" = ${configRow.id}
+                `);
+                const revisionRows = await tx.$queryRaw(Prisma.sql`
+                  SELECT "updatedAt" FROM "AppConfig" WHERE "id" = ${configRow.id} LIMIT 1
+                `);
+                updatedAt = revisionRows?.[0]?.updatedAt?.toISOString?.() || null;
+              }
+              return { lockedPeriods: nextLockedPeriods, updatedAt };
             },
-            { isolationLevel: "Serializable", timeout: 15000, maxWait: 10000 },
+            { isolationLevel: "Serializable", timeout: 12000, maxWait: 5000 },
           );
         } catch (error) {
           if (!isTransactionWriteConflict(error)) throw error;
@@ -31380,7 +31960,12 @@ ipcMain.handle("attendance:updatePayrollLock", async (event, payload = {}) => {
         }
       }
       throw lastConflict || new Error("Trạng thái khóa đang được cập nhật ở máy khác. Hãy thử lại.");
-    });
+    }, { maxQueueWaitMs: 15000 });
+
+    // The write changed the AppConfig revision.  Drop any period entries
+    // before the next targeted read; the renderer receives the fresh snapshot
+    // in the lock response and can seed its own in-session cache.
+    invalidateAttendanceSnapshotCaches();
 
     void logActivity({
       module: "attendance",
@@ -34484,7 +35069,7 @@ async function removeFutureTasksForResignedUser(user, effectiveDate) {
   return updated;
 }
 
-ipcMain.handle("users:getAll", async () => {
+ipcMain.handle("users:getAll", async (_event, includeArchived = false) => {
   try {
     requireRole();
     if (!prisma) throw new Error("Prisma not available");
@@ -34510,6 +35095,7 @@ ipcMain.handle("users:getAll", async () => {
         isAdmin && u.status === USER_STATUS_RESIGNED
           ? employmentStatus[String(u.id)]?.reason || ""
           : "",
+      archived: Boolean(employmentStatus[String(u.id)]?.archived),
       operationalAssignee: isOperationalAssignee(u),
       ...(isAdmin
         ? {
@@ -34521,9 +35107,45 @@ ipcMain.handle("users:getAll", async () => {
           }
         : {}),
     }));
-    return { success: true, data: formatted };
+    return {
+      success: true,
+      data: includeArchived ? formatted : formatted.filter((user) => !user.archived),
+    };
   } catch (error) {
     console.error("❌ Get users error:", error);
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle("users:setArchived", async (_event, id, archived = true) => {
+  try {
+    requireRole("admin");
+    if (!prisma) throw new Error("Prisma not available");
+    const userId = Number(id);
+    const user = await prisma.user.findUnique({ where: { id: userId } });
+    if (!user) throw new Error("Người dùng không tồn tại.");
+    if (user.status !== USER_STATUS_RESIGNED) {
+      throw new Error("Chỉ nhân viên đã nghỉ việc mới được lưu trữ.");
+    }
+    const employmentConfig = await getEmploymentStatusConfig();
+    const current = employmentConfig[String(user.id)] || {};
+    employmentConfig[String(user.id)] = {
+      ...current,
+      archived: Boolean(archived),
+      updatedAt: new Date().toISOString(),
+      updatedBy: currentSession?.username || "admin",
+    };
+    await saveEmploymentStatusConfig(employmentConfig);
+    void logActivity({
+      module: "users",
+      action: archived ? "ARCHIVE" : "UNARCHIVE",
+      description: `${archived ? "Lưu trữ" : "Bỏ lưu trữ"} tài khoản "${user.username}"`,
+      recordId: user.id,
+      recordName: user.username,
+    });
+    return { success: true, archived: Boolean(archived) };
+  } catch (error) {
+    console.error("❌ Archive user error:", error);
     return { success: false, error: error.message };
   }
 });
@@ -34899,9 +35521,10 @@ ipcMain.handle(
     const deadline = createLoginDeadline();
     try {
       if (!prisma) throw new Error("Prisma not available");
+      const authPrisma = typeof getPrismaAuth === "function" ? getPrismaAuth() : prisma;
       const normalizedUsername =
         typeof username === "string" ? username.trim() : "";
-      const user = await deadline.wait(() => prisma.user.findUnique({
+      const user = await deadline.wait(() => authPrisma.user.findUnique({
         where: { username: normalizedUsername },
       }));
       if (!user || user.status !== "active") {
@@ -34933,7 +35556,7 @@ ipcMain.handle(
         passwordValid = user.password === password;
         if (passwordValid) {
           const hashed = await deadline.wait(() => bcrypt.hash(password, 10));
-          await deadline.wait(() => prisma.user.update({
+          await deadline.wait(() => authPrisma.user.update({
             where: { id: user.id },
             data: {
               password: hashed,
@@ -34945,7 +35568,7 @@ ipcMain.handle(
         }
       }
       if (!passwordValid) {
-        await deadline.wait(() => recordFailedLogin(user));
+        await deadline.wait(() => recordFailedLogin(user, authPrisma));
         return {
           success: false,
           error: "Tên đăng nhập hoặc mật khẩu không đúng.",
@@ -34999,7 +35622,7 @@ ipcMain.handle(
           previousPasswordHash: consumedTemporaryPasswordHash,
         };
       } else {
-        authenticatedUser = await deadline.wait(() => prisma.user.update({
+        authenticatedUser = await deadline.wait(() => authPrisma.user.update({
           where: { id: user.id },
           data: { loginFailedAttempts: 0, loginLockedUntil: null },
         }));
@@ -35027,7 +35650,7 @@ ipcMain.handle(
         requesterName: authenticatedUser.username,
         eventType: "login",
       }).catch((error) => console.warn("[Attendance Device] Auto-register failed:", error.message));
-      prisma.$executeRaw`UPDATE "User" SET "lastActiveAt" = NOW() WHERE id = ${authenticatedUser.id}`.catch(
+      authPrisma.$executeRaw`UPDATE "User" SET "lastActiveAt" = NOW() WHERE id = ${authenticatedUser.id}`.catch(
         () => {},
       );
       void logActivity({
@@ -35068,9 +35691,9 @@ ipcMain.handle("users:getCurrentSession", async () => {
   try {
     if (!prisma) return { success: false };
     if (!currentSession?.id) return { success: false };
-    const user = await prisma.user.findUnique({
+    const user = await readWithConnectionRetry(() => prisma.user.findUnique({
       where: { id: currentSession.id },
-    });
+    }));
     if (!user || user.status !== "active") {
       currentSession = null;
       return { success: false };
@@ -35137,7 +35760,10 @@ ipcMain.handle("users:restoreSession", async (event, rememberToken) => {
             token?.expiresAt && new Date(token.expiresAt).getTime() > now,
         ),
       );
-    const user = await prisma.user.findUnique({ where: { id: record.userId } });
+    const user = await readWithConnectionRetry(
+      () => prisma.user.findUnique({ where: { id: record.userId } }),
+      { timeoutMs: 12_000 },
+    );
     if (!user || user.status !== "active") return { success: false };
     const tokenCreatedAt = new Date(record.createdAt).getTime();
     const passwordChangedAt = new Date(user.passwordChangedAt).getTime();
@@ -36248,8 +36874,14 @@ async function createAttendanceUserNotification({ userId, eventKey, title, summa
 async function reconcileAttendanceRewardNotifications(options = {}) {
   const context = options.context || await loadAttendanceRewardContext(options.periodKey);
   if (context.config.enabled === false) return { created: 0 };
+  // Resigned employees keep historical payroll rows, but must not receive a
+  // new attendance reward/waiver after their account is disabled.
+  const eligibleEmployees = context.employees.filter((employee) => {
+    const user = findAttendanceEmployeeUser(employee, context.users);
+    return user?.status === "active";
+  });
   const summaries = calculateAllAttendanceRewardSummaries({
-    employees: context.employees,
+    employees: eligibleEmployees,
     logs: context.logs,
     faceProfiles: context.faceProfiles,
     workSchedules: context.attendanceData.workSchedules || [],
@@ -37004,20 +37636,7 @@ ipcMain.handle("refunds:importFromFolder", async () => {
 // MISA meINVOICE API INTEGRATION
 // ========================================
 
-const { v4: uuidv4 } = (() => {
-  try {
-    return require("uuid");
-  } catch {
-    // Fallback UUID generator nếu chưa install uuid
-    return {
-      v4: () =>
-        "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
-          const r = (Math.random() * 16) | 0;
-          return (c === "x" ? r : (r & 0x3) | 0x8).toString(16);
-        }),
-    };
-  }
-})();
+const uuidv4 = () => crypto.randomUUID();
 
 // Cache token MISA
 let misaTokenCache = { token: null, expiresAt: 0, environment: null };
@@ -39927,8 +40546,12 @@ ipcMain.handle("attendance:getRewardSummary", async (_event, periodKey) => {
   try {
     const actor = await getCurrentActor();
     const context = await loadAttendanceRewardContext(periodKey);
+    const eligibleEmployees = context.employees.filter((employee) => {
+      const user = findAttendanceEmployeeUser(employee, context.users);
+      return user?.status === "active";
+    });
     const summaries = calculateAllAttendanceRewardSummaries({
-      employees: context.employees,
+      employees: eligibleEmployees,
       logs: context.logs,
       faceProfiles: context.faceProfiles,
       workSchedules: context.attendanceData.workSchedules || [],
@@ -39988,11 +40611,11 @@ function isPrismaPoolTimeout(error) {
     || String(error?.message || "").toLowerCase().includes("connection pool");
 }
 
-async function querySalesBonusAggregate(calculationFrom, to) {
+async function querySalesBonusAggregate(calculationFrom, to, client = prisma) {
   let lastError;
   for (let attempt = 0; attempt < 3; attempt += 1) {
     try {
-      const rows = await prisma.$queryRaw`
+      const rows = await client.$queryRaw`
         SELECT
           COALESCE((
             SELECT SUM("total")
@@ -40074,8 +40697,11 @@ ipcMain.handle("attendance:getSalesBonusSummary", async (_event, filters = {}) =
 
     const calculationFrom = new Date(Math.max(from.getTime(), SALES_BONUS_EFFECTIVE_AT.getTime()));
     const request = (async () => {
+      // Reuse the existing direct client for this aggregate, avoiding the
+      // main pool's contention with startup/background reads.
       const row = to >= calculationFrom
-        ? await querySalesBonusAggregate(calculationFrom, to)
+        ? await querySalesBonusAggregate(calculationFrom, to,
+          typeof getPrismaDirectTx === "function" ? getPrismaDirectTx() : prisma)
         : {};
       const completedRevenue = Number(row.completedRevenue || 0);
       const returnRevenue = Math.max(0, Number(row.returnRevenue || 0));

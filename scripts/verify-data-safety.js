@@ -1,5 +1,6 @@
 const fs = require('fs');
 const path = require('path');
+const { execFileSync } = require('child_process');
 
 const root = path.resolve(__dirname, '..');
 const read = (relativePath) => fs.readFileSync(path.join(root, relativePath), 'utf8');
@@ -413,7 +414,20 @@ requireText(ipc, 'line.location = normalizeHandlingLocation(label.location || {}
 requireText(ipc, 'buildRendererHandlingOperationKey(', 'Handling-unit renderer idempotency keys are missing');
 requireText(ipc, 'posOrderOperation:', 'POS durable idempotency claim is missing');
 requireText(posPage, 'idempotencyKey: paymentOperationKeyRef.current', 'POS renderer must send a stable idempotency key');
-requireText(handlingUnitsPage, 'if (!isPendingCheck && !obligation && (trackedCodes.has(code) || withdrawals.length === 0)) return null;', 'End-of-shift count must retain pending packages and durable carried-over obligations');
+// Verify the renderer behavior instead of requiring an obsolete source line.
+// Old opened-package duties stay in the durable ledger, while the current badge
+// shows pending packages, today's duties/movements and outstanding packed lots.
+try {
+  execFileSync(process.execPath, [
+    '--test',
+    path.join(root, 'tests/handling-unit-shift-checklist.test.cjs'),
+    path.join(root, 'tests/handling-unit-shift-policy.test.cjs'),
+  ], {
+    cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 30000,
+  });
+} catch (error) {
+  failures.push(`End-of-shift checklist behavior verification failed:\n${error.stdout || error.stderr || error.message}`);
+}
 requireText(ipc, 'await recordShiftEvents(tx, nextItems);', 'End-of-shift evidence must persist atomically with package history');
 requireText(ipc, '!outstandingCodes.has(item.code)', 'End-of-shift submission must accept durable obligations beyond the rolling history');
 requireText(ipc, 'DATA_SAFETY_MUTABLE_CONFIG_KEYS', 'Narrow mutable AppConfig allowlist is missing');
@@ -444,7 +458,8 @@ requireText(purchasePage, 'purchaseRevisions: Object.fromEntries(', 'VAT group c
 requireText(purchasePage, 'expectedGroupUpdatedAt: effectiveGroupUpdatedAt', 'VAT group upload must send the current group revision');
 requireText(purchasePage, 'purchase.updatedAt,', 'THHT and VAT group actions must send the current purchase revision');
 rejectText(refundsPage, 'refunds.adjustStock(', 'Refund UI must not use the legacy split stock/status workflow');
-requireText(handlingUnitsPage, 'note: "Rút hàng từ cửa sổ Telegram trong ứng dụng"', 'Telegram command simulation must persist picks through the guarded backend');
+rejectText(handlingUnitsPage, 'handlingUnits.pickUnit(', 'Handling-unit UI and Telegram simulation must not invoke the retired manual picking flow');
+requireText(handlingUnitsPage, 'Rút hàng thủ công đã ngừng sử dụng.', 'Legacy Telegram picking commands must explain that manual picking is retired');
 requireText(handlingUnitsPage, 'message: "Chọn nhà cung cấp trước khi tạo mã QR"', 'QR creation must require a supplier in the form');
 requireText(ipc, 'SELECT id FROM "EcommerceExport" WHERE id = ${exportId} FOR UPDATE', 'Ecommerce updates must lock the row before applying stock changes');
 requireText(ipc, 'Phiếu xuất TMĐT vừa được thay đổi ở máy khác.', 'Ecommerce updates must reject stale queued or renderer writes');

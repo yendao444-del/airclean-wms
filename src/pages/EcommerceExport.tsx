@@ -307,8 +307,11 @@ function inferTikTokDateOrder(rows: any[]): MarketplaceDateOrder {
         if (first > 12 && second <= 12) return 'DMY';
         if (second > 12 && first <= 12) return 'MDY';
     }
-    // Keep the previous default for files whose dates are all ambiguous (01-12).
-    return 'MDY';
+    // TikTok's Vietnamese seller export uses day/month/year. During the first
+    // 12 days of a month every component is <= 12, so the date cannot be
+    // inferred from the values alone. Defaulting to MDY turns 01/10 into
+    // January 10 and produces false SLA violations such as "trễ 263 ngày".
+    return 'DMY';
 }
 
 const SHOPEE_ORDER_TIME_HEADERS = [
@@ -3238,61 +3241,62 @@ Thời gian: ${currentTime}`;
                 </div>
             </div>
 
-            {/* 👤 Quick-Tap Avatar: Chọn người đóng gói */}
-            {packerEmployees.length > 0 && (
+            <div className="ecommerce-sticky-workbar">
+                {/* 👤 Quick-Tap Avatar: Chọn người đóng gói */}
+                {packerEmployees.length > 0 && (
+                    <div
+                        className="ecommerce-packer-bar"
+                        style={{
+                            display: 'flex', gap: 8, alignItems: 'center', marginBottom: 8,
+                            padding: '8px 14px', background: '#fafafa', borderRadius: 10,
+                            border: '1px solid #f0f0f0',
+                        }}
+                    >
+                        <UserOutlined style={{ fontSize: 16, color: '#8c8c8c', flexShrink: 0 }} />
+                        <Text type="secondary" style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.5, flexShrink: 0 }}>Người đóng gói:</Text>
+                        <div className="ecommerce-packer-list">
+                            {packerEmployees.map(emp => {
+                                const isActive = activePacker === emp.username;
+                                const rawName = (emp.name || '').trim();
+                                const normalizedName = rawName
+                                    .toLowerCase()
+                                    .normalize('NFD')
+                                    .replace(/[\u0300-\u036f]/g, '');
+                                const isGenericName = ['quan ly', 'nhan vien', 'quan tri vien', 'admin', 'administrator', 'user'].includes(normalizedName);
+                                const displayName = isGenericName || !rawName ? emp.username : rawName;
+                                const shortName = displayName;
+
+                                return (
+                                    <div
+                                        className={`ecommerce-packer-chip ${isActive ? 'ecommerce-packer-chip--active' : ''}`}
+                                        key={emp.id}
+                                        onClick={() => handleSelectPacker(emp.username)}
+                                    >
+                                        <div className="ecommerce-packer-avatar">
+                                            {shortName?.charAt(0).toUpperCase()}
+                                        </div>
+                                        <span className="ecommerce-packer-name">
+                                            {shortName}
+                                        </span>
+                                    </div>
+                                );
+                            })}
+                        </div>
+                    </div>
+                )}
+
+                {/* Dòng 2: Quét mã vận đơn */}
                 <div
-                    className="ecommerce-packer-bar"
+                    className="scan-input-wrap ecommerce-scan-bar"
                     style={{
-                        display: 'flex', gap: 8, alignItems: 'center', marginBottom: 8,
-                        padding: '8px 14px', background: '#fafafa', borderRadius: 10,
-                        border: '1px solid #f0f0f0',
+                        display: 'flex', gap: 10, alignItems: 'center', marginBottom: 8, padding: '8px 14px',
+                        border: '2px solid #1fc51c',
+                        background: activePacker ? '#f3fff7' : '#fff',
+                        borderRadius: 12,
+                        transition: 'all 0.3s ease',
+                        boxShadow: activePacker ? '0 0 15px rgba(0, 200, 104, 0.15)' : 'none'
                     }}
                 >
-                    <UserOutlined style={{ fontSize: 16, color: '#8c8c8c', flexShrink: 0 }} />
-                    <Text type="secondary" style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.5, flexShrink: 0 }}>Người đóng gói:</Text>
-                    <div className="ecommerce-packer-list">
-                        {packerEmployees.map(emp => {
-                            const isActive = activePacker === emp.username;
-                            const rawName = (emp.name || '').trim();
-                            const normalizedName = rawName
-                                .toLowerCase()
-                                .normalize('NFD')
-                                .replace(/[\u0300-\u036f]/g, '');
-                            const isGenericName = ['quan ly', 'nhan vien', 'quan tri vien', 'admin', 'administrator', 'user'].includes(normalizedName);
-                            const displayName = isGenericName || !rawName ? emp.username : rawName;
-                            const shortName = displayName;
-
-                            return (
-                                <div
-                                    className={`ecommerce-packer-chip ${isActive ? 'ecommerce-packer-chip--active' : ''}`}
-                                    key={emp.id}
-                                    onClick={() => handleSelectPacker(emp.username)}
-                                >
-                                    <div className="ecommerce-packer-avatar">
-                                        {shortName?.charAt(0).toUpperCase()}
-                                    </div>
-                                    <span className="ecommerce-packer-name">
-                                        {shortName}
-                                    </span>
-                                </div>
-                            );
-                        })}
-                    </div>
-                </div>
-            )}
-
-            {/* Dòng 2: Quét mã vận đơn */}
-            <div
-                className="scan-input-wrap ecommerce-scan-bar"
-                style={{
-                    display: 'flex', gap: 10, alignItems: 'center', marginBottom: 8, padding: '8px 14px',
-                    border: '2px solid #1fc51c',
-                    background: activePacker ? '#f3fff7' : '#fff',
-                    borderRadius: 12,
-                    transition: 'all 0.3s ease',
-                    boxShadow: activePacker ? '0 0 15px rgba(0, 200, 104, 0.15)' : 'none'
-                }}
-            >
                 <BarcodeOutlined className="ecommerce-scan-icon" style={{ fontSize: 32, color: activePacker ? '#00C868' : '#8c8c8c', flexShrink: 0, transition: 'color 0.3s ease' }} />
                 <div className="ecommerce-scan-input-wrap" style={{ flex: 1, position: 'relative' }}>
                     <Input
@@ -3328,6 +3332,7 @@ Thời gian: ${currentTime}`;
                 >
                     Quét
                 </Button>
+                </div>
             </div>
 
             {/* Scan status indicator */}

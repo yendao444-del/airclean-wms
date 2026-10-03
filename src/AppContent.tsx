@@ -84,7 +84,6 @@ const prefetchAttendancePage = () => {
 const StockCheckPage = lazy(() => import('./pages/StockCheck'));
 const MyProfilePage = lazy(() => import('./pages/MyProfile'));
 const HandlingUnitsPage = lazy(() => import('./pages/HandlingUnits'));
-const PrepackedGoodsPage = lazy(() => import('./pages/PrepackedGoods'));
 
 const { Header, Sider, Content } = Layout;
 const { Title, Text } = Typography;
@@ -347,9 +346,9 @@ function AppContent() {
     const exitHandlingUnits = () => {
         const previousKey = previousAccessiblePageRef.current;
         const destination =
-            previousKey !== 'handling-units' && canAccessKey(previousKey)
+            !['handling-units', 'prepack'].includes(previousKey) && canAccessKey(previousKey)
                 ? previousKey
-                : accessibleKeys.find(key => key !== 'handling-units') || 'my-profile';
+                : accessibleKeys.find(key => !['handling-units', 'prepack'].includes(key)) || 'my-profile';
         navigateTo(destination);
     };
 
@@ -651,7 +650,7 @@ function AppContent() {
             case 'stock-balance':
                 return withAppData(<StockBalancePage />, { products: true, ecomExports: true });
             case 'prepack':
-                return <PrepackedGoodsPage />;
+                return <HandlingUnitsPage key="prepack-workspace" initialTab="prepack" onExit={exitHandlingUnits} />;
             case 'stock-check':
                 return withAppData(<StockCheckPage onExit={exitStockCheck} />, { products: true });
             case 'handling-units':
@@ -693,7 +692,7 @@ function AppContent() {
     const pageHeaderHeight = hidePageHeader ? 0 : 72;
     // Handling units is a warehouse workspace, not another cramped POS page.
     // It keeps the Electron title bar/session but owns the complete app area.
-    const isHandlingUnitsWorkspace = selectedKey === 'handling-units' && !notificationCenterOpen;
+    const isHandlingUnitsWorkspace = ['handling-units', 'prepack'].includes(selectedKey) && !notificationCenterOpen;
     const shellTop = isRolePreview ? 82 : 40;
     return (
         <ConfigProvider

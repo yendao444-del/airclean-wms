@@ -93,14 +93,6 @@ mkdir "!PATCH_TEMP!\resources\app\node_modules\tslib"
 mkdir "!PATCH_TEMP!\resources\app\node_modules\ws"
 
 
-call node scripts\embed-wms-token.js
-if errorlevel 1 (
-    echo    [ERROR] Khong dong goi duoc Telegram WMS bot token.
-    echo            Kiem tra TELEGRAM_WMS_BOT_TOKEN trong .env roi chay lai.
-    pause
-    exit /b 1
-)
-
 :: Google authorization is held by the shared Cloudflare backend.
 call node --check electron\drive-backend.js
 if errorlevel 1 (

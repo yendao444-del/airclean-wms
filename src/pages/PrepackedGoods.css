@@ -9,6 +9,69 @@
     color: #10244a;
 }
 
+.prepack-page--embedded {
+    padding: 22px 16px 24px;
+    overflow: auto;
+}
+.prepack-embedded-heading {
+    display: flex;
+    align-items: flex-end;
+    justify-content: space-between;
+    gap: 16px;
+    margin: 0 0 14px;
+}
+.prepack-embedded-heading span { color: #7d8ba1; font-size: 13px; }
+.prepack-embedded-heading h1 { margin: 3px 0 0; color: #10244a; font-size: 25px; line-height: 1.2; }
+.prepack-page--embedded .prepack-toolbar {
+    justify-content: flex-start;
+    gap: 18px;
+    margin: 0 0 16px;
+    padding: 0;
+}
+.prepack-inline-filter { display: flex; flex-direction: column; gap: 5px; color: #6b7c95; font-size: 12px; font-weight: 600; }
+.prepack-inline-filter .ant-select { min-width: 300px; }
+.prepack-inline-filter .ant-btn { min-width: 190px; text-align: left; }
+.prepack-page--embedded .prepack-inline-filter { color: #10244a; font-size: 14px; font-weight: 400; gap: 6px; }
+.prepack-page--embedded .prepack-inline-filter:first-child { width: 30%; min-width: 240px; max-width: 420px; }
+.prepack-page--embedded .prepack-inline-filter .ant-select { min-width: 0; width: 100%; height: 40px; }
+.prepack-page--embedded .prepack-inline-filter .ant-btn { height: 40px; min-width: 210px; display: flex; justify-content: flex-start; }
+.prepack-page--embedded .prepack-toolbar { gap: 24px; margin: 0 10px 26px; flex-wrap: wrap; }
+.prepack-worksheet-shell { background: #fff; }
+.prepack-worksheet-scroll { border: 1px solid #e2e8f0; border-radius: 8px; overflow: auto; }
+.prepack-worksheet { border-collapse: collapse; width: 100%; min-width: 890px; table-layout: fixed; color: #10244a; font-size: 14px; }
+.prepack-worksheet col:nth-child(1) { width: 19%; }
+.prepack-worksheet col:nth-child(2) { width: 29%; }
+.prepack-worksheet col:nth-child(3) { width: 11%; }
+.prepack-worksheet col:nth-child(4) { width: 13%; }
+.prepack-worksheet col:nth-child(5) { width: 14%; }
+.prepack-worksheet col:nth-child(6) { width: 14%; }
+.prepack-worksheet th { background: #f2f6fa; color: #334e72; padding: 15px 20px; text-align: left; font-weight: 600; }
+.prepack-worksheet td { padding: 18px 20px; border-top: 1px solid #e8edf4; border-right: 1px solid #eef2f6; vertical-align: middle; line-height: 1.5; overflow-wrap: anywhere; }
+.prepack-worksheet td:last-child, .prepack-worksheet th:last-child { border-right: 0; }
+.prepack-worksheet td > strong { display: block; font-size: 15px; font-weight: 650; }
+.prepack-worksheet td small { display: block; margin-top: 3px; color: #7b8fae; font-size: 12px; }
+.prepack-worksheet .ant-input-number { width: 100%; min-width: 70px; }
+.prepack-worksheet .ant-btn { width: 100%; height: 38px; padding: 0 8px; font-size: 13px; }
+.prepack-worksheet .ant-input-number-disabled { color: #10244a; background: #fafbfc; }
+.prepack-worksheet-status { display: inline-flex; align-items: center; gap: 7px; border-radius: 6px; padding: 5px 8px; font-size: 12px; font-weight: 600; white-space: nowrap; }
+.prepack-worksheet-status::before { content: ''; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+.prepack-worksheet-status.draft { color: #e97700; background: #fff4e3; }
+.prepack-worksheet-status.submitted { color: #087bde; background: #e6f4ff; }
+.prepack-worksheet-status.ready { color: #25a545; background: #ecfae8; }
+.prepack-worksheet-status.missing, .prepack-worksheet-status.depleted { color: #64748b; background: #f1f5f9; }
+.prepack-worksheet-status.rejected { color: #b42318; background: #fef3f2; }
+.prepack-worksheet-note { margin-top: 18px; display: flex; align-items: center; gap: 12px; padding: 16px; border-radius: 8px; background: #f3f7fa; font-size: 14px; }
+.prepack-worksheet-note .anticon { font-size: 18px; }
+@media (max-width: 1300px) { .prepack-worksheet th, .prepack-worksheet td { padding: 12px; } }
+.prepack-report-head--embedded,
+.prepack-report-row--embedded { grid-template-columns: 1.15fr 2.25fr .75fr .9fr 1fr 1.15fr !important; }
+.prepack-report-head--embedded { min-height: 48px; }
+.prepack-report-row--embedded { min-height: 70px; align-items: center; }
+.prepack-report-components { color: #18345f; font-size: 13px; font-weight: 600; line-height: 1.35; }
+.prepack-report-components small { display: block; margin-top: 4px; color: #7d8ba1; font-size: 11px; font-weight: 400; }
+.prepack-report-row--embedded .prepack-report-status { justify-self: start; }
+.prepack-report-row--embedded > .ant-btn { justify-self: start; white-space: nowrap; }
+
 .prepack-breadcrumb {
     display: flex;
     align-items: center;
@@ -433,6 +496,7 @@
 
 /* Employee report workflow: employees upload proof and report actual quantity. */
 .prepack-report-page { background: #f6f9fb; }
+.prepack-report-page.prepack-page--embedded { background: #fff; }
 .prepack-employee-tabs { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); margin: 4px 0 16px; border: 1px solid #dce5ec; border-radius: 8px; overflow: hidden; background: #fff; }
 .prepack-employee-tabs button { min-height: 48px; border: 0; border-right: 1px solid #e3eaf0; color: #53647b; background: #fff; font: inherit; font-size: 13px; font-weight: 700; cursor: pointer; }
 .prepack-employee-tabs button:last-child { border-right: 0; }

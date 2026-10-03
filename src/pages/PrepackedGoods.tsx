@@ -27,6 +27,7 @@ import {
 } from '@ant-design/icons';
 import dayjs, { Dayjs } from 'dayjs';
 import { useAuth } from '../contexts/AuthContext';
+import PrepackWorksheet from '../components/PrepackWorksheet';
 import plainCartonImage from '../assets/plain-kraft-carton.webp';
 import maskBoxBlue from '../assets/pos-catalog/mask-box-blue.webp';
 import maskBoxPink from '../assets/pos-catalog/mask-box-pink.webp';
@@ -201,7 +202,7 @@ const flattenCatalog = (products: any[]): CatalogItem[] => products.flatMap(prod
     return variantRows.length ? variantRows : base;
 });
 
-export default function PrepackedGoods() {
+export default function PrepackedGoods({ embedded = false, view = 'report', productSkus, createRequest = 0, onCreateHandled }: { embedded?: boolean; view?: 'report' | 'history'; productSkus?: string[]; createRequest?: number; onCreateHandled?: () => void } = {}) {
     const { user, actualUser, isRolePreview } = useAuth();
     const isUiTest = import.meta.env.DEV && new URLSearchParams(window.location.search).has('prepackedUiTest');
     // Admins can inspect and test any employee tab.
@@ -244,9 +245,14 @@ export default function PrepackedGoods() {
     const [workDatePickerOpen, setWorkDatePickerOpen] = useState(false);
     const [selectedPackerUsername, setSelectedPackerUsername] = useState<string>('');
     const [historyVisible, setHistoryVisible] = useState(false);
+    const [detailBatch, setDetailBatch] = useState<PrepackBatch | null>(null);
+    const lastCreateRequest = useRef(0);
     const historyPanelRef = useRef<HTMLElement | null>(null);
     const rowsRequestRef = useRef(0);
     const historyRequestRef = useRef(0);
+    const pendingDraftsRef = useRef(new Map<string, { batchId: number; workDateKey: string; quantity: number | null }>());
+    const draftFlushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const draftSaveChainRef = useRef<Promise<void>>(Promise.resolve());
     const selectedDateKeyRef = useRef('');
     const [reportedQuantities, setReportedQuantities] = useState<Record<number, number | null>>({});
     const [collapsedPackerGroups, setCollapsedPackerGroups] = useState<Set<string>>(() => new Set());
@@ -337,6 +343,16 @@ export default function PrepackedGoods() {
         });
     };
 
+    useEffect(() => {
+        if (!createRequest) { lastCreateRequest.current = 0; return; }
+        if (!embedded || createRequest === lastCreateRequest.current || !isManager || !allCatalogGroups.length) return;
+        lastCreateRequest.current = createRequest;
+        openCreate();
+        const group = allCatalogGroups.find(item => item.options.some(option => productSkus?.includes(option.sku)));
+        if (group) selectCreateProduct(group);
+        onCreateHandled?.();
+    }, [createRequest, embedded, isManager, allCatalogGroups, productSkus, onCreateHandled]);
+
     const loadRows = async () => {
         const requestId = ++rowsRequestRef.current;
         const requestDateKey = selectedDateKey;
@@ -399,7 +415,21 @@ export default function PrepackedGoods() {
         }
     };
 
-    const saveDraftQuantity = async (row: PrepackBatch, quantity: number | null) => {
+    const flushDrafts = () => {
+        if (draftFlushTimerRef.current) clearTimeout(draftFlushTimerRef.current);
+        draftFlushTimerRef.current = null;
+        const pending = [...pendingDraftsRef.current.values()];
+        pendingDraftsRef.current.clear();
+        for (const draft of pending) {
+            draftSaveChainRef.current = draftSaveChainRef.current.then(async () => {
+                const result = await window.electronAPI.prepack.saveDraft(draft);
+                if (!result.success) message.warning(result.error || 'Không thể lưu số lượng nháp.');
+            }).catch(error => { void message.warning(error?.message || 'Không thể lưu số lượng nháp.'); });
+        }
+        return draftSaveChainRef.current;
+    };
+
+    const saveDraftQuantity = (row: PrepackBatch, quantity: number | null) => {
         if (isUiTest) {
             const drafts = readUiTestJson<Record<string, number | null>>(PREPACK_UI_DRAFT_STORAGE_KEY, {});
             if (quantity === null) delete drafts[String(row.id)];
@@ -407,13 +437,17 @@ export default function PrepackedGoods() {
             window.localStorage.setItem(PREPACK_UI_DRAFT_STORAGE_KEY, JSON.stringify(drafts));
             return;
         }
-        const result = await window.electronAPI.prepack.saveDraft({
+        const draft = {
             batchId: row.id,
-            workDateKey: selectedWorkDate.format('YYYY-MM-DD'),
+            workDateKey: selectedDateKey,
             quantity,
-        });
-        if (!result.success) message.warning(result.error || 'Không thể lưu số lượng nháp.');
+        };
+        pendingDraftsRef.current.set(`${draft.workDateKey}:${draft.batchId}`, draft);
+        if (draftFlushTimerRef.current) clearTimeout(draftFlushTimerRef.current);
+        draftFlushTimerRef.current = setTimeout(() => { void flushDrafts(); }, 350);
     };
+
+    useEffect(() => () => { void flushDrafts(); }, [selectedDateKey]);
 
     useEffect(() => {
         void Promise.all([loadRows(), loadHistory()]);
@@ -457,8 +491,9 @@ export default function PrepackedGoods() {
 
     const targetRows = useMemo(() => rows
         .filter(row => row.status !== 'cancelled')
-        .filter(row => !isSelectedToday || row.status === 'active' || row.status === 'pending' || row.status === 'waiting_acceptance')
-        .filter(row => isAdmin || !isRolePreview || !user?.username || row.packerUsername === user.username), [isAdmin, isRolePreview, isSelectedToday, rows, user?.username]);
+        .filter(row => embedded || !isSelectedToday || row.status === 'active' || row.status === 'pending' || row.status === 'waiting_acceptance')
+        .filter(row => !embedded || !productSkus?.length || productSkus.includes(row.productSku) || row.components?.some(component => productSkus.includes(component.sku)))
+        .filter(row => isAdmin || !isRolePreview || !user?.username || row.packerUsername === user.username), [embedded, productSkus, isAdmin, isRolePreview, isSelectedToday, rows, user?.username]);
     const packerTabs = useMemo(() => {
         const byUsername = new Map<string, { username: string; fullName: string }>();
         employees.forEach(employee => byUsername.set(employee.username, { username: employee.username, fullName: employee.fullName || employee.username }));
@@ -567,13 +602,16 @@ export default function PrepackedGoods() {
         , [listFilter, targetGroups, selectedWorkDate.valueOf()]);
 
     const getEmployeeInitial = (name: string) => name.trim().split(/\s+/).pop()?.charAt(0).toUpperCase() || '?';
-    const submitActualReport = async () => {
+    const submitActualReport = async (batchId?: number) => {
+        if (submitting) return;
         if (isRolePreview && !isAdmin) return;
         if (rowsReadyKey !== selectedDateKey || historyReadyKey !== selectedDateKey || loading || historyLoading) {
             return void message.warning('Vui lòng chờ tải đủ chỉ tiêu và lịch sử trước khi gửi báo cáo.');
         }
-        if (!isSelectedToday && !isAdmin) return void message.info('Chỉ có thể gửi báo cáo cho ngày hôm nay.');
-        const unreportedRows = selectedPackerRows.filter(row => !hasSubmittedReportForSelectedDate(row));
+        if (!isSelectedToday && (embedded || !isAdmin)) return void message.info('Chỉ có thể gửi báo cáo cho ngày hôm nay.');
+        if (historyError) return void message.warning('Hãy tải lại lịch sử trước khi gửi báo cáo.');
+        const unreportedRows = selectedPackerRows.filter(row => !hasSubmittedReportForSelectedDate(row) && (batchId === undefined || row.id === batchId));
+        if (embedded && unreportedRows.some(row => ['ready', 'depleted', 'rejected', 'waiting_acceptance'].includes(row.status))) return void message.warning('Lô này đã gửi hoặc được nghiệm thu.');
         const reports = unreportedRows.map(row => ({
             batchId: row.id,
             reportedQty: Object.prototype.hasOwnProperty.call(reportedQuantities, row.id)
@@ -640,10 +678,11 @@ export default function PrepackedGoods() {
         }
         setSubmitting(true);
         try {
+            await flushDrafts();
             const result = await window.electronAPI.prepack.reportActual({ reports });
             if (!result.success) throw new Error(result.error || 'Không thể gửi báo cáo đóng gói.');
             message.success('Đã tạo công việc kiểm tra theo phân công module.');
-            await loadRows();
+            await Promise.all([loadRows(), loadHistory()]);
         } catch (error: any) {
             message.error(error?.message || 'Không thể gửi báo cáo đóng gói.');
         } finally {
@@ -797,9 +836,11 @@ export default function PrepackedGoods() {
     };
 
     return (
-        <div className="prepack-page prepack-report-page">
+        <div className={`prepack-page prepack-report-page ${embedded ? 'prepack-page--embedded' : ''}`}>
             <div className="prepack-toolbar prepack-toolbar-compact">
-                    <div className="prepack-toolbar-actions">
+                {embedded && <label className="prepack-inline-filter"><span>Nhân viên</span><Select value={selectedPackerUsername || undefined} placeholder="Chọn nhân viên" options={packerTabs.map(tab => ({ value: tab.username, label: tab.fullName }))} onChange={setSelectedPackerUsername} /></label>}
+                {embedded && <label className="prepack-inline-filter"><span>Ngày làm việc</span><Button icon={<CalendarOutlined />} onClick={() => setWorkDatePickerOpen(true)}>{selectedWorkDateLabel}</Button></label>}
+                {!embedded && <div className="prepack-toolbar-actions">
                         <div className="prepack-date-nav" aria-label="Chọn ngày đóng gói">
                             <Button type="text" aria-label="Ngày trước" icon={<LeftOutlined />} onClick={() => setSelectedWorkDate(current => current.subtract(1, 'day'))} />
                             <Button type={selectedWorkDate.isSame(dayjs().subtract(1, 'day'), 'day') ? 'primary' : 'text'} onClick={() => setSelectedWorkDate(dayjs().subtract(1, 'day').startOf('day'))}>Hôm qua</Button>
@@ -818,7 +859,7 @@ export default function PrepackedGoods() {
                             Xem lịch sử
                         </Button>
                         {isManager && <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>Thiết lập chỉ tiêu</Button>}
-                </div>
+                </div>}
             </div>
 
             <Modal title="Chọn ngày đóng gói" open={workDatePickerOpen} footer={null} width={380} destroyOnHidden onCancel={() => setWorkDatePickerOpen(false)}>
@@ -832,11 +873,24 @@ export default function PrepackedGoods() {
                 />
             </Modal>
 
-            <div className="prepack-employee-tabs" role="tablist" aria-label="Nhân viên đóng gói">
+            {!embedded && <div className="prepack-employee-tabs" role="tablist" aria-label="Nhân viên đóng gói">
                 {packerTabs.map(tab => <button key={tab.username} type="button" role="tab" aria-selected={selectedPackerUsername === tab.username} className={selectedPackerUsername === tab.username ? 'active' : ''} onClick={() => setSelectedPackerUsername(tab.username)}>{tab.fullName}</button>)}
-            </div>
+            </div>}
 
-            <div className="prepack-report-shell">
+            {embedded && view === 'report' && <div className="prepack-worksheet-shell">
+                {rowsError || historyError ? <div className="prepack-loading"><span>{rowsError || historyError}</span><Button onClick={() => void Promise.all([loadRows(), loadHistory()])}>Thử lại</Button></div> : loading || historyLoading || rowsReadyKey !== selectedDateKey || historyReadyKey !== selectedDateKey ? <div className="prepack-loading"><Spin /></div> : selectedPackerRows.length ? <PrepackWorksheet
+                    rows={selectedPackerRows}
+                    quantities={reportedQuantities}
+                    hasReport={row => hasSubmittedReportForSelectedDate(row as PrepackBatch) || row.status === 'waiting_acceptance'}
+                    reportQuantity={row => Number(selectedHistoryReports.get(row.id)?.reportedQty ?? row.reportedQty ?? 0)}
+                    blocked={(isRolePreview && !isAdmin) || !isSelectedToday}
+                    submitting={submitting}
+                    onChange={(id, quantity) => { const row = selectedPackerRows.find(item => item.id === id); if (!row) return; setReportedQuantities(current => ({ ...current, [id]: quantity })); void saveDraftQuantity(row, quantity); }}
+                    onSubmit={id => void submitActualReport(Number(id))}
+                    onDetails={id => setDetailBatch(selectedPackerRows.find(row => row.id === id) || null)}
+                /> : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="Chưa có chỉ tiêu đóng gói cho sản phẩm và nhân viên này" />}
+            </div>}
+            {!embedded && <div className="prepack-report-shell">
                 {rowsError ? <div className="prepack-loading"><span>{rowsError}</span><Button onClick={() => void loadRows()}>Thử lại</Button></div> : loading || rowsReadyKey !== selectedDateKey ? <div className="prepack-loading"><Spin /></div> : selectedPackerRows.length ? <>
                     <div className="prepack-report-heading">
                     <div><strong>Báo cáo đóng gói của nhân viên</strong><span>Nhập số lượng thực tế theo từng sản phẩm; ảnh kiểm tra thực hiện trong Công việc hàng ngày.</span></div>
@@ -873,7 +927,7 @@ export default function PrepackedGoods() {
                                              setReportedQuantities(current => ({ ...current, [row.id]: nextValue }));
                                              void saveDraftQuantity(row, nextValue);
                                          }} />
-                                         <span className={`prepack-report-status ${status}`}>{status === 'accepted' ? <><CheckCircleFilled /> Đã kiểm</> : status === 'submitted' ? <><ClockCircleOutlined /> Đã báo cáo</> : status === 'draft' ? <><ClockCircleOutlined /> Đang nhập, chưa gửi</> : <>Chưa báo cáo</>}</span>
+                                         <span className={`prepack-report-status ${status}`}>{status === 'accepted' ? <><CheckCircleFilled /> Sẵn sàng</> : status === 'submitted' ? <><ClockCircleOutlined /> Chờ xác nhận</> : status === 'draft' ? <><ClockCircleOutlined /> Đang đóng</> : <>Chưa nhập</>}</span>
                                      </div>;
                                  })}
                              </div>;
@@ -881,9 +935,9 @@ export default function PrepackedGoods() {
                     </div>
                     <div className="prepack-report-footer"><span><ClockCircleOutlined /> {historyError ? <>Không thể đối chiếu lịch sử: {historyError} <Button size="small" onClick={() => void loadHistory()}>Thử lại</Button></> : 'Bắt buộc nhập số lượng thực tế, có thể nhập 0. Báo cáo được lưu theo ngày; ảnh và công việc hàng ngày xem ở tab riêng.'}</span><Button type="primary" loading={submitting} disabled={(isRolePreview && !isAdmin) || historyLoading || historyReadyKey !== selectedDateKey || Boolean(historyError) || selectedPackerRows.every(row => hasSubmittedReportForSelectedDate(row)) || selectedPackerRows.some(row => !hasSubmittedReportForSelectedDate(row) && (!Number.isInteger(Object.prototype.hasOwnProperty.call(reportedQuantities, row.id) ? reportedQuantities[row.id] : null) || Number(reportedQuantities[row.id]) < 0))} onClick={() => void submitActualReport()}>Gửi báo cáo đóng gói</Button></div>
                 </> : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="Nhân viên này chưa có chỉ tiêu đóng gói" />}
-            </div>
+            </div>}
 
-            {shouldRenderHistoryPanel && <section ref={historyPanelRef} className="prepack-history-panel" aria-label={`Lịch sử đóng gói ${selectedWorkDateLabel}`}>
+            {((embedded && view === 'history') || (!embedded && shouldRenderHistoryPanel)) && <section ref={historyPanelRef} className="prepack-history-panel" aria-label={`Lịch sử đóng gói ${selectedWorkDateLabel}`}>
                 <div className="prepack-history-heading">
                     <div>
                         <strong>Lịch sử nhập đóng gói · {selectedWorkDateLabel}</strong>
@@ -911,6 +965,18 @@ export default function PrepackedGoods() {
                     </div>
                 ) : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="Không có chỉ tiêu để đối chiếu trong ngày này" />}
             </section>}
+
+            <Modal title="Chi tiết đóng gói sẵn" open={!!detailBatch} onCancel={() => setDetailBatch(null)} footer={<Button onClick={() => setDetailBatch(null)}>Đóng</Button>}>
+                {detailBatch && <div className="prepack-batch-details">
+                    <p><b>{detailBatch.productName}</b> · {detailBatch.code}</p>
+                    <p>{formatComboComposition(detailBatch)}</p>
+                    <p>Được giao: <b>{detailBatch.requestedQty} {detailBatch.unit}</b></p>
+                    <p>Đã báo cáo: <b>{detailBatch.reportedQty} {detailBatch.unit}</b></p>
+                    <p>Đã nghiệm thu: <b>{detailBatch.acceptedQty} {detailBatch.unit}</b> · Đã xuất: <b>{detailBatch.issuedQty} {detailBatch.unit}</b></p>
+                    <p>Sẵn sàng: <b>{detailBatch.readyQty} {detailBatch.unit}</b></p>
+                    {isAdmin && <Button icon={<EditOutlined />} onClick={() => { openEdit([detailBatch]); setDetailBatch(null); }}>Sửa chỉ tiêu</Button>}
+                </div>}
+            </Modal>
 
             <Modal title="Thiết lập chỉ tiêu đóng gói" open={createOpen} onCancel={() => setCreateOpen(false)} footer={null} width={1040} destroyOnHidden>
                 <div className="prepack-create-flow">

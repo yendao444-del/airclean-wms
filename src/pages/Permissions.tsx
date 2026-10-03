@@ -34,6 +34,7 @@ interface User {
     employmentStatus?: 'active' | 'inactive' | 'resigned';
     resignationDate?: string | null;
     resignationReason?: string;
+    archived?: boolean;
     operationalAssignee?: boolean;
     createdAt: string;
     lastActiveAt?: string | null;
@@ -95,7 +96,7 @@ export default function PermissionsPage() {
 
         // Refresh danh sách mỗi 30 giây để cập nhật trạng thái online của mọi người
         refreshTimerRef.current = setInterval(() => {
-            window.electronAPI.users.getAll().then(r => {
+            window.electronAPI.users.getAll(true).then(r => {
                 if (r.success && r.data) setUsers(r.data);
             });
         }, 30 * 1000);
@@ -109,7 +110,7 @@ export default function PermissionsPage() {
     const loadUsers = async () => {
         setLoading(true);
         try {
-            const result = await window.electronAPI.users.getAll();
+            const result = await window.electronAPI.users.getAll(true);
             if (!result.success || !result.data) {
                 throw new Error(result.error || 'Không thể tải danh sách người dùng.');
             }
@@ -235,6 +236,17 @@ export default function PermissionsPage() {
             message.success(user.isActive ? 'Đã vô hiệu hóa!' : 'Đã kích hoạt!');
         } catch (error) {
             message.error(error instanceof Error ? error.message : 'Không thể cập nhật trạng thái người dùng.');
+        }
+    };
+
+    const handleArchive = async (user: User, archived = true) => {
+        try {
+            const result = await window.electronAPI.users.setArchived(user.id, archived);
+            if (!result?.success) throw new Error(result?.error || 'Không thể cập nhật lưu trữ.');
+            await loadUsers();
+            message.success(archived ? 'Đã lưu trữ nhân viên.' : 'Đã bỏ lưu trữ nhân viên.');
+        } catch (error) {
+            message.error(error instanceof Error ? error.message : 'Không thể cập nhật lưu trữ.');
         }
     };
 
@@ -494,6 +506,7 @@ export default function PermissionsPage() {
                 onDeleteUser={handleDelete}
                 onResetPassword={handleChangePassword}
                 onToggleActive={handleToggleActive}
+                onArchiveUser={handleArchive}
             />
 
             {/* User Form Modal */}

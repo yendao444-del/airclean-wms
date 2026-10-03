@@ -10,8 +10,15 @@ import {
 import {
   EnvironmentOutlined,
   EyeOutlined,
-  ShoppingCartOutlined,
+  ExpandOutlined,
+  MinusOutlined,
+  PlusOutlined,
 } from "@ant-design/icons";
+import shelfAsset from "../assets/warehouse-map/shelf.png";
+import carAsset from "../assets/warehouse-map/car.png";
+import deskAsset from "../assets/warehouse-map/desk.png";
+import packingAsset from "../assets/warehouse-map/packing.png";
+import toiletAsset from "../assets/warehouse-map/toilet.png";
 import "./Warehouse2DMap.css";
 
 export type UnitItem = {
@@ -34,7 +41,6 @@ export type UnitItem = {
 interface Warehouse2DMapProps {
   units: UnitItem[];
   onSelectUnit?: (unit: UnitItem) => void;
-  onPickUnit?: (unit: UnitItem) => void;
   onUnsealUnit?: (unit: UnitItem) => void;
   selectedZoneCode?: string;
   highlightedUnitId?: string;
@@ -64,7 +70,6 @@ const mapLocationCodeToZoneKey = (code?: string) => {
 export const Warehouse2DMap: React.FC<Warehouse2DMapProps> = ({
   units,
   onSelectUnit,
-  onPickUnit,
   onUnsealUnit,
   selectedZoneCode,
   highlightedUnitId,
@@ -76,6 +81,7 @@ export const Warehouse2DMap: React.FC<Warehouse2DMapProps> = ({
   const [activeZone, setActiveZone] = useState<string | null>(() =>
     mapLocationCodeToZoneKey(selectedZoneCode),
   );
+  const [mapZoom, setMapZoom] = useState(1);
   const [zoneModalData, setZoneModalData] = useState<{
     zoneKey: string;
     title: string;
@@ -131,12 +137,21 @@ export const Warehouse2DMap: React.FC<Warehouse2DMapProps> = ({
   const renderLocationMarker = (zoneKey: string, x: number, y: number, width: number) =>
     highlightedZone === zoneKey && highlightedUnit ? (
       <g className="wms-unit-location-marker" transform={`translate(${x - width / 2}, ${y})`}>
+        <circle className="wms-location-pulse" cx={width / 2} cy="-14" r="17" />
+        <circle className="wms-location-dot" cx={width / 2} cy="-14" r="7" />
         <rect width={width} height="22" rx="11" />
         <text x={width / 2} y="15" textAnchor="middle">
           {highlightedUnit.id} đang ở đây
         </text>
       </g>
     ) : null;
+
+  const renderZoneCode = (code: string, x: number, y = 9) => (
+    <g className="wms-zone-code-chip" transform={`translate(${x}, ${y})`} aria-hidden="true">
+      <rect width="34" height="20" rx="6" />
+      <text x="17" y="14" textAnchor="middle">{code}</text>
+    </g>
+  );
 
   const totalAllUnits = units.length;
   const totalAllPcs = units.reduce((s, u) => s + u.currentPcs, 0);
@@ -177,25 +192,72 @@ export const Warehouse2DMap: React.FC<Warehouse2DMapProps> = ({
 
       {/* VIEWPORT BẢN ĐỒ 2D ĐỒNG BỘ MÀU TỐI GIẢN (MONOCHROME / NEUTRAL) */}
       <div className="wms-minimal-viewport">
-        <div className="wms-minimal-svg-box">
+        <div className="wms-map-toolbar" aria-label="Điều khiển sơ đồ kho">
+          <button
+            type="button"
+            className="wms-map-tool"
+            aria-label="Thu nhỏ sơ đồ"
+            title="Thu nhỏ sơ đồ"
+            onClick={() => setMapZoom((zoom) => Math.max(0.88, Number((zoom - 0.08).toFixed(2))))}
+          >
+            <MinusOutlined />
+          </button>
+          <button
+            type="button"
+            className="wms-map-tool"
+            aria-label="Phóng to sơ đồ"
+            title="Phóng to sơ đồ"
+            onClick={() => setMapZoom((zoom) => Math.min(1.2, Number((zoom + 0.08).toFixed(2))))}
+          >
+            <PlusOutlined />
+          </button>
+          <button
+            type="button"
+            className="wms-map-tool"
+            aria-label="Đưa sơ đồ về kích thước vừa khung"
+            title="Vừa khung"
+            onClick={() => setMapZoom(1)}
+          >
+            <ExpandOutlined />
+          </button>
+        </div>
+        <div className="wms-map-legend" aria-label="Chú giải sơ đồ">
+          <span><i className="wms-legend-swatch wms-legend-zone" /> Khu vực</span>
+          <span><i className="wms-legend-swatch wms-legend-wall" /> Lối đi</span>
+          <span><i className="wms-legend-swatch wms-legend-location" /> Vị trí kiện</span>
+        </div>
+        <div className="wms-minimal-svg-box" style={{ transform: `scale(${mapZoom})` }}>
           <svg
             className="wms-minimal-svg"
             viewBox="-15 0 1140 480"
             preserveAspectRatio="xMidYMid meet"
           >
-            {/* NỀN TOÀN BỘ KHO - MÀU TRẮNG XÁM TINH KHÔI ĐỒNG BỘ */}
-            <rect x="35" y="15" width="1050" height="450" rx="8" fill="#ffffff" stroke="#cbd5e1" strokeWidth="2" />
+            <defs>
+              <pattern id="wms-floor-grid" width="24" height="24" patternUnits="userSpaceOnUse">
+                <path d="M 24 0 L 0 0 0 24" fill="none" stroke="#d7e2ec" strokeWidth="1" opacity="0.52" />
+              </pattern>
+              <filter id="wms-location-shadow" x="-50%" y="-50%" width="200%" height="200%">
+                <feDropShadow dx="0" dy="2" stdDeviation="3" floodColor="#059669" floodOpacity="0.24" />
+              </filter>
+            </defs>
+
+            {/* Roborock-inspired spatial surface: quiet grid, crisp outer wall. */}
+            <rect x="35" y="15" width="1050" height="450" rx="10" fill="#f7fafc" stroke="#9aabbd" strokeWidth="2.2" />
+            <rect x="35" y="15" width="1050" height="450" rx="10" fill="url(#wms-floor-grid)" opacity="0.7" />
 
             {/* ============================================================== */}
             {/* DÃY 4 KHU CHỨA HÀNG TRÊN (ĐỒNG NHẤT MÀU SLATE TRANG NHÃ)       */}
             {/* ============================================================== */}
             {/* KHU 1 */}
             <g
+              data-zone="TOP_1"
               className={`wms-room-node ${activeZone === "TOP_1" ? "selected" : ""} ${highlightedZone === "TOP_1" ? "unit-location-focus" : ""}`}
               onClick={() => handleZoneClick("TOP_1", "KHU CHỨA HÀNG 1", "Dãy Kệ A1", zoneTop1)}
               transform="translate(55, 25)"
             >
               <rect x="0" y="0" width="220" height="95" rx="6" className="wms-room-rect" />
+              <image className="wms-map-asset" href={shelfAsset} x="18" y="6" width="184" height="42" opacity="0.52" preserveAspectRatio="none" />
+              {renderZoneCode("A1", 177)}
               {renderLocationMarker("TOP_1", 110, 68, 185)}
               <g transform="translate(110, 45)">
                 <text x="0" y="0" textAnchor="middle" className="wms-room-title">KHU CHỨA HÀNG 1</text>
@@ -207,11 +269,14 @@ export const Warehouse2DMap: React.FC<Warehouse2DMapProps> = ({
 
             {/* KHU 2 */}
             <g
+              data-zone="TOP_2"
               className={`wms-room-node ${activeZone === "TOP_2" ? "selected" : ""} ${highlightedZone === "TOP_2" ? "unit-location-focus" : ""}`}
               onClick={() => handleZoneClick("TOP_2", "KHU CHỨA HÀNG 2", "Dãy Kệ A2", zoneTop2)}
               transform="translate(285, 25)"
             >
               <rect x="0" y="0" width="220" height="95" rx="6" className="wms-room-rect" />
+              <image className="wms-map-asset" href={shelfAsset} x="18" y="6" width="184" height="42" opacity="0.44" preserveAspectRatio="none" />
+              {renderZoneCode("A2", 177)}
               {renderLocationMarker("TOP_2", 110, 68, 185)}
               <g transform="translate(110, 45)">
                 <text x="0" y="0" textAnchor="middle" className="wms-room-title">KHU CHỨA HÀNG 2</text>
@@ -223,11 +288,14 @@ export const Warehouse2DMap: React.FC<Warehouse2DMapProps> = ({
 
             {/* KHU 3 */}
             <g
+              data-zone="TOP_3"
               className={`wms-room-node ${activeZone === "TOP_3" ? "selected" : ""} ${highlightedZone === "TOP_3" ? "unit-location-focus" : ""}`}
               onClick={() => handleZoneClick("TOP_3", "KHU CHỨA HÀNG 3", "Dãy Kệ A3", zoneTop3)}
               transform="translate(515, 25)"
             >
               <rect x="0" y="0" width="220" height="95" rx="6" className="wms-room-rect" />
+              <image className="wms-map-asset" href={shelfAsset} x="18" y="6" width="184" height="42" opacity="0.4" preserveAspectRatio="none" />
+              {renderZoneCode("A3", 177)}
               {renderLocationMarker("TOP_3", 110, 68, 185)}
               <g transform="translate(110, 45)">
                 <text x="0" y="0" textAnchor="middle" className="wms-room-title">KHU CHỨA HÀNG 3</text>
@@ -239,11 +307,14 @@ export const Warehouse2DMap: React.FC<Warehouse2DMapProps> = ({
 
             {/* KHU 4 */}
             <g
+              data-zone="TOP_4"
               className={`wms-room-node ${activeZone === "TOP_4" ? "selected" : ""} ${highlightedZone === "TOP_4" ? "unit-location-focus" : ""}`}
               onClick={() => handleZoneClick("TOP_4", "KHU CHỨA HÀNG 4", "Dãy Kệ A4", zoneTop4)}
               transform="translate(745, 25)"
             >
               <rect x="0" y="0" width="325" height="95" rx="6" className="wms-room-rect" />
+              <image className="wms-map-asset" href={shelfAsset} x="28" y="6" width="265" height="42" opacity="0.4" preserveAspectRatio="none" />
+              {renderZoneCode("A4", 282)}
               {renderLocationMarker("TOP_4", 162, 68, 185)}
               <g transform="translate(162, 45)">
                 <text x="0" y="0" textAnchor="middle" className="wms-room-title">KHU CHỨA HÀNG 4</text>
@@ -258,14 +329,10 @@ export const Warehouse2DMap: React.FC<Warehouse2DMapProps> = ({
             {/* ============================================================== */}
             <g transform="translate(160, 135)">
               <rect x="0" y="0" width="300" height="90" rx="6" fill="#f8fafc" stroke="#94a3b8" strokeWidth="1.5" strokeDasharray="6 4" />
-              <g transform="translate(30, 13)">
-                <rect x="0" y="4" width="240" height="56" rx="28" fill="#e2e8f0" stroke="#64748b" strokeWidth="1.5" />
-                <rect x="40" y="10" width="18" height="44" rx="3" fill="#94a3b8" />
-                <rect x="180" y="10" width="18" height="44" rx="3" fill="#94a3b8" />
-                <text x="120" y="36" textAnchor="middle" fill="#334155" fontSize="12" fontWeight="800" letterSpacing="0.8">
-                  CHỖ ĐỂ Ô TÔ
-                </text>
-              </g>
+              <image className="wms-map-asset" href={carAsset} x="38" y="10" width="224" height="70" opacity="0.82" preserveAspectRatio="xMidYMid meet" />
+              <text x="150" y="52" textAnchor="middle" fill="#263b54" fontSize="12" fontWeight="800" letterSpacing="0.8">
+                CHỖ ĐỂ Ô TÔ
+              </text>
             </g>
 
             {/* ============================================================== */}
@@ -307,15 +374,17 @@ export const Warehouse2DMap: React.FC<Warehouse2DMapProps> = ({
             {/* KHU ĐÓNG GÓI HÀNG (DƯỚI TRÁI)                                  */}
             {/* ============================================================== */}
             <g
+              data-zone="PACKING"
               className={`wms-room-node ${activeZone === "PACKING" ? "selected" : ""} ${highlightedZone === "PACKING" ? "unit-location-focus" : ""}`}
               onClick={() => handleZoneClick("PACKING", "KHU ĐÓNG GÓI HÀNG", "Khu xuất đơn Shopee / TikTok / POS", zonePacking)}
               transform="translate(55, 238)"
             >
               <rect x="0" y="0" width="575" height="217" rx="6" className="wms-room-rect" />
+              <image className="wms-map-asset" href={packingAsset} x="192" y="18" width="190" height="75" opacity="0.62" preserveAspectRatio="xMidYMid meet" />
               {renderLocationMarker("PACKING", 287, 135, 210)}
               <g transform="translate(287, 108)">
                 <text x="0" y="0" textAnchor="middle" className="wms-room-title" fontSize="14">
-                  📦 KHU ĐÓNG GÓI HÀNG
+                  KHU ĐÓNG GÓI HÀNG
                 </text>
                 <text x="0" y="22" textAnchor="middle" className="wms-room-count">
                   {zonePacking.length} kiện · {zonePacking.reduce((s, u) => s + u.currentPcs, 0).toLocaleString("vi-VN")} đơn vị chờ xuất
@@ -327,6 +396,7 @@ export const Warehouse2DMap: React.FC<Warehouse2DMapProps> = ({
             {/* KHU CHỨA HÀNG (GIỮA)                                            */}
             {/* ============================================================== */}
             <g
+              data-zone="CENTER"
               className={`wms-room-node ${activeZone === "CENTER" ? "selected" : ""} ${highlightedZone === "CENTER" ? "unit-location-focus" : ""}`}
               onClick={() => handleZoneClick("CENTER", "KHU CHỨA HÀNG (GIỮA)", "Khu vực lưu trữ trung tâm", zoneCenter)}
               transform="translate(530, 125)"
@@ -345,14 +415,16 @@ export const Warehouse2DMap: React.FC<Warehouse2DMapProps> = ({
             {/* PHÒNG LÀM VIỆC (DƯỚI PHẢI - NẰM DƯỚI NHÀ VỆ SINH VÀ VÁCH DỌC)   */}
             {/* ============================================================== */}
             <g
+              data-zone="OFFICE"
               className={`wms-room-node ${activeZone === "OFFICE" ? "selected" : ""} ${highlightedZone === "OFFICE" ? "unit-location-focus" : ""}`}
               onClick={() => handleZoneClick("OFFICE", "PHÒNG LÀM VIỆC", "Văn phòng điều hành & lưu trữ", zoneOffice)}
               transform="translate(648, 238)"
             >
               <rect x="0" y="0" width="205" height="217" rx="6" className="wms-room-rect" />
+              <image className="wms-map-asset" href={deskAsset} x="22" y="12" width="160" height="110" opacity="0.46" preserveAspectRatio="xMidYMid meet" />
               {renderLocationMarker("OFFICE", 102, 135, 185)}
               <g transform="translate(102, 108)">
-                <text x="0" y="0" textAnchor="middle" className="wms-room-title">🏢 PHÒNG LÀM VIỆC</text>
+                <text x="0" y="0" textAnchor="middle" className="wms-room-title">PHÒNG LÀM VIỆC</text>
                 <text x="0" y="18" textAnchor="middle" className="wms-room-count">
                   {zoneOffice.length} kiện · {zoneOffice.reduce((s, u) => s + u.currentPcs, 0).toLocaleString("vi-VN")} đơn vị
                 </text>
@@ -364,6 +436,7 @@ export const Warehouse2DMap: React.FC<Warehouse2DMapProps> = ({
             {/* ============================================================== */}
             <g transform="translate(860, 135)">
               <rect x="0" y="0" width="225" height="190" rx="6" fill="#f8fafc" stroke="#cbd5e1" strokeWidth="1.5" />
+              <image className="wms-map-asset" href={toiletAsset} x="62" y="16" width="100" height="140" opacity="0.5" preserveAspectRatio="xMidYMid meet" />
               <g transform="translate(112, 95)">
                 <text x="0" y="0" textAnchor="middle" className="wms-room-title" fontSize="13">NHÀ VỆ SINH</text>
               </g>
@@ -458,19 +531,6 @@ export const Warehouse2DMap: React.FC<Warehouse2DMapProps> = ({
                       >
                         Chi tiết
                       </Button>
-                      {unit.status === "Đang sử dụng" && (
-                        <Button
-                          size="small"
-                          type="primary"
-                          icon={<ShoppingCartOutlined />}
-                          onClick={() => {
-                            setZoneModalData(null);
-                            onPickUnit?.(unit);
-                          }}
-                        >
-                          Rút hàng
-                        </Button>
-                      )}
                     </div>
                   </div>
                 ))}

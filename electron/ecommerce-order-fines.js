@@ -5,6 +5,7 @@ const ECOMMERCE_OFFICIAL_RECIPIENTS = 2;
 const ECOMMERCE_FINE_EFFECTIVE_DATE = "2026-09-23";
 // The amount changes from 24/09/2026. Existing ledger rows are never rewritten.
 const ECOMMERCE_FINE_RATE_EFFECTIVE_DATE = "2026-09-24";
+const { loadResignedEmployeeCutoffs, isEmployeeResignedOn } = require('./employment-status');
 
 function bangkokDateKey(value) {
   const date = new Date(value);
@@ -53,6 +54,9 @@ function orderLabel(order) {
 async function reconcileEcommerceOrderFines(prisma, options = {}) {
   const now = options.now || new Date();
   return prisma.$transaction(async (tx) => {
+    // Fail fast when another attendance ledger writer owns the advisory lock;
+    // the maintenance queue retries with a fresh transaction.
+    await tx.$executeRaw`SET LOCAL lock_timeout = '7000ms'`;
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('attendanceData'))`;
     const configRow = await tx.appConfig.findUnique({ where: { key: "attendanceData" } });
     if (!configRow) return { created: [], checked: 0, skipped: "attendanceData_missing" };
@@ -71,6 +75,7 @@ async function reconcileEcommerceOrderFines(prisma, options = {}) {
     if (officialEmployees.length !== ECOMMERCE_OFFICIAL_RECIPIENTS) {
       return { created: [], checked: 0, skipped: "two_official_employees_required" };
     }
+    const resignedCutoffs = await loadResignedEmployeeCutoffs(tx);
 
     const orders = await tx.ecommerceExport.findMany({
       where: {
@@ -100,9 +105,7 @@ async function reconcileEcommerceOrderFines(prisma, options = {}) {
     const fineTotal = bangkokDateKey(now) >= ECOMMERCE_FINE_RATE_EFFECTIVE_DATE
       ? ECOMMERCE_ORDER_FINE_TOTAL
       : ECOMMERCE_ORDER_FINE_TOTAL / 2;
-    const split = splitFine(fineTotal, officialEmployees);
-
-    const addViolation = (order, kind, date, detail) => {
+    const addViolation = (order, kind, date, detail, eligibilityDate = date) => {
       const id = `fine-ecommerce-${kind}-${order.id}-${ECOMMERCE_FINE_EFFECTIVE_DATE}`;
       const hasFine = (fineId) => existingIds.has(fineId)
         || deletedIds.has(fineId)
@@ -110,7 +113,10 @@ async function reconcileEcommerceOrderFines(prisma, options = {}) {
         || existingFines.some((fine) => String(fine?.id || "").startsWith(`${fineId}-`))
         || created.some((fine) => String(fine?.id || "").startsWith(`${fineId}-`));
       if (!date || hasFine(id)) return;
-      split.forEach(({ employee, amount }) => {
+      const dateKey = bangkokDateKey(eligibilityDate);
+      const eligibleEmployees = officialEmployees.filter((employee) => !isEmployeeResignedOn(employee, dateKey, resignedCutoffs));
+      if (!eligibleEmployees.length) return;
+      splitFine(fineTotal, eligibleEmployees).forEach(({ employee, amount }) => {
         const fine = {
           id: `${id}-${employee.id}`,
           empId: Number(employee.id),
@@ -160,6 +166,7 @@ async function reconcileEcommerceOrderFines(prisma, options = {}) {
           "overdue",
           order.status === "completed" && completedAt > deadline ? completedAt : bangkokStartOfDay(ECOMMERCE_FINE_EFFECTIVE_DATE),
           `Đơn ${label}${order.customerName ? ` (${order.customerName})` : ""} trễ SLA từ ngày ${ECOMMERCE_FINE_EFFECTIVE_DATE.split("-").reverse().join("/")}`,
+          order.status === "completed" && completedAt > deadline ? completedAt : now,
         );
       }
 

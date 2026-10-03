@@ -3,6 +3,8 @@ const fs = require('fs');
 
 const tier = String(process.argv[2] || '').trim().toLowerCase();
 const validTiers = new Set(['renderer', 'quick', 'prisma', 'prisma-python', 'full']);
+const stagedOnly = /^(1|true|yes)$/i.test(String(process.env.RELEASE_STAGED_ONLY || '').trim()) ||
+  process.argv.includes('--staged');
 
 if (!validTiers.has(tier)) {
   console.error('RELEASE_PREFLIGHT_FAILED Unknown release tier.');
@@ -40,12 +42,21 @@ try {
   }
 }
 
-const changedFiles = new Set([
-  ...(releaseBaseline ? gitLines(['diff', '--name-only', `${releaseBaseline}..HEAD`]) : []),
-  ...gitLines(['diff', '--name-only', 'HEAD']),
-  ...gitLines(['diff', '--name-only', '--cached']),
-  ...gitLines(['ls-files', '--others', '--exclude-standard']),
-]);
+const changedFiles = new Set(
+  stagedOnly
+    ? gitLines(['diff', '--name-only', '--cached'])
+    : [
+        ...(releaseBaseline ? gitLines(['diff', '--name-only', `${releaseBaseline}..HEAD`]) : []),
+        ...gitLines(['diff', '--name-only', 'HEAD']),
+        ...gitLines(['diff', '--name-only', '--cached']),
+        ...gitLines(['ls-files', '--others', '--exclude-standard']),
+      ],
+);
+
+if (stagedOnly && changedFiles.size === 0) {
+  console.error('RELEASE_PREFLIGHT_FAILED Staged scope is empty. Stage the files intended for this release first.');
+  process.exit(1);
+}
 
 const normalized = [...changedFiles].map((file) => file.replace(/\\/g, '/'));
 const ignoredPrefixes = [
@@ -92,7 +103,17 @@ const isPrismaImpact = (file) =>
   file.startsWith('prisma/migrations/') ||
   (file === 'package.json' && packageJsonRuntimeImpact) ||
   (file === 'package-lock.json' && packageLockRuntimeImpact);
-const isPythonImpact = (file) => file.startsWith('python/') && !file.toLowerCase().endsWith('.md');
+const isPythonImpact = (file) => {
+  if (!file.startsWith('python/')) return false;
+
+  const lowerFile = file.toLowerCase();
+  // Face-service diagnostics are generated runtime output. They may be tracked
+  // from an older checkout, but adding/removing them cannot change the Python
+  // service that is shipped in a release.
+  if (lowerFile.endsWith('.log')) return false;
+
+  return !lowerFile.endsWith('.md');
+};
 const isBackendImpact = (file) => file.startsWith('electron/');
 const isReleaseTooling = (file) =>
   /^(?:updates\/)?RELEASE(?:-[^/]+)?\.bat$/i.test(file) ||
@@ -125,6 +146,7 @@ if (tier === 'prisma') {
 }
 
 console.log(`Release tier: ${tier}`);
+if (stagedOnly) console.log('Scope: staged files only (--staged)');
 console.log(`Compared from release baseline: ${releaseBaseline || '(no release baseline found)'}`);
 console.log(`Changed files inspected: ${relevant.length}`);
 if (relevant.length > 0) {

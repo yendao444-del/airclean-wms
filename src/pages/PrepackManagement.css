@@ -1,0 +1,90 @@
+.packing-workspace { color: #10244a; background: #fff; padding: 16px 16px 16px; min-width: 0; overflow: auto; font-family: 'Segoe UI', sans-serif; }
+.packing-filters { display: flex; gap: 24px; padding: 0 10px; margin-bottom: 20px; }
+.packing-filters label { display: flex; flex-direction: column; gap: 5px; font-size: 14px; line-height: 17px; }
+.packing-filters label:first-child { width: 410px; max-width: 42%; }
+.packing-filters .ant-select { width: 100%; height: 40px; font-size: 14px; }
+.packing-filters .ant-select-selector { border-color: #dbe3ee !important; }
+.packing-filters .ant-select .ant-select-selection-item { color: #10244a; font-weight: 600; }
+.packing-filters .ant-select-content-value { color: #10244a; font-weight: 600; }
+.packing-filters .ant-select-suffix { color: #10244a; font-size: 14px; }
+.packing-filters .ant-select .ant-select-arrow { color: #10244a; font-size: 14px; }
+.packing-date { display: flex; align-items: center; width: 267px; height: 40px; padding-left: 14px; border: 1px solid #dbe3ee; border-radius: 7px; }
+.packing-date > .anticon { font-size: 18px; }
+.packing-date .ant-picker { width: 100%; border: 0; box-shadow: none; background: transparent; padding-left: 14px; }
+.packing-date .ant-picker-input > input { color: #10244a; font-size: 14px; }
+.packing-table-scroll { overflow: hidden; border: 1px solid #e3eaf2; border-radius: 8px; }
+.packing-table { width: 100%; min-width: 0; border-collapse: collapse; table-layout: fixed; font-size: 14px; }
+.packing-table col:nth-child(1) { width: 18.7%; }
+.packing-table col:nth-child(2) { width: 28.8%; }
+.packing-table col:nth-child(3) { width: 10.6%; }
+.packing-table col:nth-child(4) { width: 13.7%; }
+.packing-table col:nth-child(5) { width: 14.2%; }
+.packing-table col:nth-child(6) { width: 14%; }
+.packing-table th { height: 47px; padding: 0 22px; background: #f1f6fa; text-align: left; font-size: 15px; font-weight: 600; border-right: 1px solid #e8eef5; }
+.packing-table td { height: 85px; padding: 12px 16px; border-top: 1px solid #e8eef5; border-right: 1px solid #e8eef5; line-height: 1.45; overflow-wrap: anywhere; }
+.packing-table td:last-child, .packing-table th:last-child { border-right: 0; }
+.packing-table strong { display: block; font-size: 16px; font-weight: 700; }
+.packing-table small { display: block; margin-top: 2px; color: #7288aa; font-size: 13px; }
+.packing-code { display: block; border: 0; padding: 0; background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.packing-quantity { position: relative; }
+.packing-table .ant-input-number { width: 100%; height: 40px; border-color: #dbe3ee; border-radius: 6px; font-family: inherit; }
+.packing-table .ant-input-number-input { height: 38px; padding: 0 14px; color: #10244a; font-size: 14px; }
+.packing-table .ant-input-number-handler-wrap { width: 32px; opacity: 1; background: transparent; }
+.packing-table .ant-input-number-handler { border: 0; }
+.packing-table .ant-input-number-handler .anticon { font-size: 10px; color: #617792; }
+.packing-table .ant-input-number-actions { opacity: 1; width: 32px; border-left: 1px solid #edf1f6; }
+.packing-table .ant-input-number-action { width: 32px; border: 0; }
+.packing-table .ant-input-number-action .anticon { font-size: 10px; color: #617792; }
+.packing-readonly-arrows { position: absolute; right: 8px; top: 11px; color: #617792; pointer-events: none; }
+.packing-table .ant-btn { width: 100%; min-width: 0; height: 42px; padding: 0 8px; font-size: 14px; font-weight: 600; border-radius: 8px; box-shadow: none; font-family: inherit; white-space: normal; }
+.packing-table .ant-btn-icon { display: inline-flex; align-items: center; }
+.packing-table td:last-child { padding-left: 20px; padding-right: 18px; }
+.packing-table .ant-btn .anticon { font-size: 20px; }
+.packing-submit.ant-btn { color: #fff; border-color: #00a76d; background: #00a76d; }
+.packing-submit.ant-btn:not(:disabled):hover { color: #fff; background: #009761; border-color: #009761; }
+.packing-submit.ant-btn:disabled { color: #8793a2; background: #eff0f2; border-color: #eff0f2; }
+.packing-sent.ant-btn:disabled { background: #eff0f2; border-color: #eff0f2; color: #929ca9; }
+.packing-detail.ant-btn { color: #006ac6; border-color: #dce5ef; }
+.packing-status { display: inline-flex; align-items: center; gap: 8px; border: 0; border-radius: 6px; padding: 6px 10px; white-space: nowrap; font-family: inherit; font-size: 14px; line-height: 20px; font-weight: 600; cursor: pointer; }
+.packing-status.draft { background: #fff3e0; color: #ee8000; }
+.packing-status.submitted { background: #e2f3ff; color: #007cde; }
+.packing-status.ready { background: #e5f9df; color: #1f9c37; }
+.packing-note { display: flex; align-items: center; gap: 14px; min-height: 56px; margin-top: 18px; padding: 14px; border-radius: 8px; background: #f2f7fa; font-size: 15px; }
+.packing-note svg { flex-shrink: 0; }
+.packing-loading { display: grid; place-items: center; min-height: 260px; }
+.packing-component-form { display: grid; grid-template-columns: 1fr 130px 32px; gap: 10px; align-items: center; }
+.packing-review { display: flex; justify-content: flex-end; gap: 10px; }
+.packing-history article { display: grid; grid-template-columns: 1fr 1fr 1fr 170px; padding: 18px; gap: 16px; border-bottom: 1px solid #e3eaf2; }
+.packing-code:focus-visible, .packing-status:focus-visible, .hu-module-tab:focus-visible { outline: 2px solid #007cde; outline-offset: 3px; }
+@media (max-width: 1300px) { .packing-table td, .packing-table th { padding: 10px 9px; } .packing-table { font-size: 13px; } .packing-table strong { font-size: 15px; } .packing-table small { font-size: 12px; } .packing-table .ant-btn { font-size: 12px; } }
+@media (max-width: 900px) {
+  .packing-table-scroll { overflow: visible; border: 0; }
+  .packing-table, .packing-table thead, .packing-table tbody, .packing-table tr, .packing-table td { display: block; width: auto; }
+  .packing-table thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+  .packing-table tbody { display: grid; gap: 12px; }
+  .packing-table tr { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); border: 1px solid #e3eaf2; border-radius: 10px; overflow: hidden; }
+  .packing-table td { display: grid; grid-template-columns: minmax(90px, .45fr) minmax(0, 1fr); align-items: center; min-height: 48px; height: auto; padding: 9px 12px; border-top: 1px solid #e8eef5; border-right: 0; }
+  .packing-table td::before { color: #74859a; font-size: 11px; font-weight: 800; text-transform: uppercase; }
+  .packing-table td:nth-child(1)::before { content: 'Combo'; }
+  .packing-table td:nth-child(2)::before { content: 'Thành phần'; }
+  .packing-table td:nth-child(3)::before { content: 'Được giao'; }
+  .packing-table td:nth-child(4)::before { content: 'Đã đóng'; }
+  .packing-table td:nth-child(5)::before { content: 'Trạng thái'; }
+  .packing-table td:nth-child(6)::before { content: 'Thao tác'; }
+  .packing-table td:first-child, .packing-table td:nth-child(2) { grid-column: 1 / -1; }
+  .packing-table td:nth-child(3), .packing-table td:nth-child(4), .packing-table td:nth-child(5), .packing-table td:nth-child(6) { grid-column: span 1; }
+  .packing-table td:last-child { padding: 9px 12px; }
+  .packing-table .ant-btn { min-height: 38px; }
+}
+@media (max-width: 650px) {
+  .packing-workspace { padding: 12px 10px; }
+  .packing-filters { flex-direction: column; gap: 12px; padding: 0; }
+  .packing-filters label:first-child, .packing-date { width: 100%; max-width: none; }
+  .packing-table tr { grid-template-columns: 1fr; }
+  .packing-table td:nth-child(3), .packing-table td:nth-child(4), .packing-table td:nth-child(5), .packing-table td:nth-child(6) { grid-column: 1; }
+  .packing-table td { grid-template-columns: minmax(82px, .4fr) minmax(0, 1fr); }
+  .packing-table strong { font-size: 13px; }
+  .packing-table small { font-size: 11px; }
+  .packing-table .ant-btn { font-size: 12px; padding: 0 6px; }
+  .packing-history article { grid-template-columns: 1fr; }
+}

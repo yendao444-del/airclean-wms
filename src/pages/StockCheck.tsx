@@ -22,9 +22,13 @@ import {
 } from 'antd';
 import {
     ArrowLeftOutlined,
+    CalendarOutlined,
     CheckOutlined,
     CloseOutlined,
+    DownOutlined,
     EditOutlined,
+    FileTextOutlined,
+    LeftOutlined,
     MinusOutlined,
     PlusOutlined,
     RightOutlined,
@@ -445,9 +449,14 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
     const GROUPS_PER_PAGE = 8;
     const [activeSku, setActiveSku] = useState('');
     const [stockCheckSearch, setStockCheckSearch] = useState('');
+    const [dailyWorksheetSearch, setDailyWorksheetSearch] = useState('');
+    const [dailyWorksheetGroup, setDailyWorksheetGroup] = useState('all');
+    const [dailyWorksheetPage, setDailyWorksheetPage] = useState(1);
+    const DAILY_WORKSHEET_PAGE_SIZE = 8;
     const [handlingCatalog, setHandlingCatalog] = useState<HandlingCatalogItem[]>([]);
     const [handlingUnits, setHandlingUnits] = useState<HandlingUnitRow[]>([]);
     const [handlingTransactions, setHandlingTransactions] = useState<HandlingUnitTransaction[]>([]);
+    const [packedInventory, setPackedInventory] = useState<Array<{ components?: Array<{ sku: string; quantity: number }>; packedQty?: number; issuedQty?: number }>>([]);
     const [handlingHistoryLoading, setHandlingHistoryLoading] = useState(false);
     const [handlingWorkspaceLoading, setHandlingWorkspaceLoading] = useState(true);
     const [handlingWorkspaceError, setHandlingWorkspaceError] = useState('');
@@ -520,6 +529,7 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
                 setHandlingCatalog(Array.isArray(result.data.catalog) ? result.data.catalog : []);
                 setHandlingUnits(Array.isArray(result.data.register) ? result.data.register : []);
                 setHandlingTransactions(Array.isArray(result.data.recentTransactions) ? result.data.recentTransactions : []);
+                setPackedInventory(Array.isArray(result.data.packedInventory) ? result.data.packedInventory : []);
             })
             .catch(() => {
                 if (!cancelled) setHandlingWorkspaceError('Không tải được dữ liệu quản lý kiện hàng.');
@@ -540,6 +550,7 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
             setHandlingCatalog(Array.isArray(result.data.catalog) ? result.data.catalog : []);
             setHandlingUnits(Array.isArray(result.data.register) ? result.data.register : []);
             setHandlingTransactions(Array.isArray(result.data.recentTransactions) ? result.data.recentTransactions : []);
+            setPackedInventory(Array.isArray(result.data.packedInventory) ? result.data.packedInventory : []);
         } catch (error: any) {
             message.error(error?.message || 'Không tải được lịch sử kiện hàng.');
         } finally {
@@ -2215,6 +2226,10 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
         if (groupListPage > groupListPageCount) setGroupListPage(groupListPageCount);
     }, [groupListPage, groupListPageCount]);
 
+    useEffect(() => {
+        setDailyWorksheetPage(1);
+    }, [dailyWorksheetSearch, dailyWorksheetGroup, todaySessionId]);
+
     const selectedProductGroup = paginatedGroupList.some(group => group.productName === activeProductGroup)
         ? activeProductGroup
         : paginatedGroupList[0]?.productName || '';
@@ -2320,6 +2335,10 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
         actualUnitCounts[unit.id] !== null && actualUnitCounts[unit.id] !== undefined
     );
     const selectedCatalogItem = handlingCatalog.find(item => normalizeSku(item.sku) === normalizeSku(selectedSku));
+    const packedQuantityForSku = useCallback((sku: string) => packedInventory.reduce((total, lot) => {
+        const availableCombos = Math.max(0, Number(lot.packedQty || 0) - Number(lot.issuedQty || 0));
+        return total + availableCombos * (lot.components || []).filter(component => normalizeSku(component.sku) === normalizeSku(sku)).reduce((sum, component) => sum + Number(component.quantity || 0), 0);
+    }, 0), [packedInventory]);
     useEffect(() => {
         if (!todaySession?.items.length) {
             setActiveSku('');
@@ -2344,7 +2363,7 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
             ? skuUnits.reduce(
                 (sum, unit) => sum + Number(nextUnitCounts[unit.id] || 0),
                 0,
-            )
+            ) + packedQuantityForSku(item.sku)
             : null;
 
         // Package counts are committed by balanceItem together with unit and
@@ -2361,7 +2380,7 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
                 balanced: false,
             }),
         }));
-    }, [handlingUnits, todaySession, isAdmin]);
+    }, [handlingUnits, todaySession, isAdmin, packedQuantityForSku]);
 
     const handleUnitActualCount = (item: CheckItem, unitId: string, value: number | null) => {
         if (!canEditCounts || item.balanced) return;
@@ -2396,7 +2415,7 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
         const actualTotal = skuUnits.reduce(
             (sum, unit) => sum + Number(actualUnitCounts[unit.id] || 0),
             0,
-        );
+        ) + packedQuantityForSku(item.sku);
         const note = confirmationNote.trim();
 
         setBalancing(previous => ({ ...previous, [item.sku]: true }));
@@ -2587,9 +2606,9 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
         // The comparison remains blind while typing and is revealed only after
         // the user explicitly tries to balance this SKU.
         if (item.requiresNote && item.countLocked) {
-            return comparison
+                return comparison
                 ? renderComparison(comparison, false)
-                : <span style={{ color: '#b45309', fontWeight: 700 }}>Cần nhập lý do</span>;
+                : <span style={{ color: '#b45309', fontWeight: 700 }}>Cần lý do</span>;
         }
         return <span style={{ color: '#64748b', fontWeight: 600 }}>Đã nhập</span>;
     };
@@ -2637,6 +2656,117 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
                     <span style={{ color: '#e6891a', fontWeight: 700, fontSize: 13 }}>={item.actualStock}</span>
                 )}
             </span>
+        );
+    };
+
+    // Phương án 2: một worksheet duy nhất cho tab Kiểm hàng ngày. Các handler
+    // vẫn dùng chung với bảng cũ để không thay đổi luồng lưu dữ liệu.
+    const renderDailyWorksheet = () => {
+        if (!todaySession) return null;
+        const query = normalizeUserText(dailyWorksheetSearch);
+        const filteredItems = todaySession.items.filter(item =>
+            (dailyWorksheetGroup === 'all' || item.productName === dailyWorksheetGroup)
+            && (!query || [item.productName, item.sku, item.color || '']
+                .some(value => normalizeUserText(value).includes(query)))
+        );
+        const pageCount = Math.max(1, Math.ceil(filteredItems.length / DAILY_WORKSHEET_PAGE_SIZE));
+        const page = Math.min(dailyWorksheetPage, pageCount);
+        const pageItems = filteredItems.slice((page - 1) * DAILY_WORKSHEET_PAGE_SIZE, page * DAILY_WORKSHEET_PAGE_SIZE);
+        const worksheetUnitCount = 3;
+        const defaultUnitLabels = ['Hộp', 'Thùng', 'Tải'];
+        const tableColumnCount = 2 + (isAdmin ? 1 : 0) + worksheetUnitCount + 5;
+        const worksheetConversionGroup = dailyWorksheetGroup !== 'all'
+            ? dailyWorksheetGroup
+            : pageItems[0]?.productName || productGroups[0]?.productName || '';
+        let previousProduct = '';
+
+        return (
+            <div className="daily-worksheet" style={{ marginTop: 8, background: '#fff', border: '1px solid #dbe5ef', borderRadius: 12, overflow: 'hidden', boxShadow: '0 2px 8px rgba(15,23,42,.04)' }}>
+                <div className="daily-worksheet-toolbar" style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', padding: '10px 18px', borderBottom: '1px solid #e7eef5', background: '#fff' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 205 }}>
+                        <CalendarOutlined style={{ color: '#4e91d9', fontSize: 14 }} />
+                        <strong style={{ color: '#1e3557', fontSize: 13, fontFamily: 'inherit' }}>{currentDate.format('ddd, DD/MM/YYYY')}</strong>
+                    </div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 170 }}>
+                        <span style={{ color: '#64748b', fontSize: 12, whiteSpace: 'nowrap' }}>{balancedCount}/{totalCount} SKU hoàn tất</span>
+                        <span style={{ width: 82, height: 8, borderRadius: 99, background: '#e4edf3', overflow: 'hidden' }}><span style={{ display: 'block', width: `${progressPct}%`, height: '100%', background: '#10b981', borderRadius: 99 }} /></span>
+                        <b style={{ color: '#008f68', fontSize: 12 }}>{progressPct}%</b>
+                    </div>
+                    <Button size="small" icon={<SettingOutlined />} disabled={!worksheetConversionGroup} onClick={() => worksheetConversionGroup && setConversionModalGroup(worksheetConversionGroup)} style={{ height: 32, borderRadius: 7, fontWeight: 700, color: '#334155' }}>Quy đổi</Button>
+                    <Input
+                        allowClear
+                        prefix={<SearchOutlined style={{ color: '#94a3b8' }} />}
+                        placeholder="Tìm SKU, màu..."
+                        value={dailyWorksheetSearch}
+                        onChange={event => setDailyWorksheetSearch(event.target.value)}
+                        style={{ width: 180, maxWidth: '100%', borderRadius: 8, fontFamily: 'inherit' }}
+                    />
+                    <Select size="small" value={dailyWorksheetGroup} onChange={setDailyWorksheetGroup} style={{ width: 150 }} options={[{ value: 'all', label: 'Tất cả nhóm' }, ...productGroups.map(group => ({ value: group.productName, label: group.productName }))]} />
+                    <Button type="primary" size="small" icon={<CheckOutlined />} disabled={!isSessionReadyToSubmit || submittingSession || !isAssignedChecker} loading={submittingSession} onClick={handleSubmitSession} style={{ marginLeft: 'auto', height: 32, borderRadius: 7, background: '#dbe4ed', borderColor: '#dbe4ed', color: '#7890aa', fontWeight: 800 }}>Hoàn tất phiên</Button>
+                </div>
+                <div style={{ overflowX: 'auto' }}>
+                    <table className="daily-worksheet-table" style={{ width: '100%', minWidth: 1140, borderCollapse: 'collapse', tableLayout: 'fixed', fontFamily: 'inherit' }}>
+                        <thead>
+                            <tr>
+                                <th style={{ ...S.th, width: 160, textAlign: 'left' }}>SKU</th>
+                                <th style={{ ...S.th, width: 76, textAlign: 'center' }}>Màu</th>
+                                {isAdmin && <th style={{ ...S.th, width: 74, textAlign: 'right' }}>Tồn HT</th>}
+                                {Array.from({ length: worksheetUnitCount }).map((_, index) => (
+                                    <th key={index} style={{ ...S.th, width: 68, textAlign: 'center' }}>{defaultUnitLabels[index]}</th>
+                                ))}
+                                <th style={{ ...S.th, width: 68, textAlign: 'center' }}>Lẻ</th>
+                                <th style={{ ...S.th, width: 84, textAlign: 'center' }}>Tổng TT</th>
+                                <th style={{ ...S.th, width: 138, textAlign: 'center' }}>Trạng thái</th>
+                                <th style={{ ...S.th, width: 94, textAlign: 'center' }}>Ghi chú</th>
+                                <th style={{ ...S.th, width: 128, textAlign: 'center' }}>Cân bằng kho</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {pageItems.map((item, index) => {
+                                const units = conversionRates[item.productName]?.noConversion ? [] : conversionRates[item.productName]?.units || [];
+                                const ci = countingInputs[item.sku] || { unitCounts: [], le: 0 };
+                                const disabled = item.balanced || item.countLocked || !canEditCounts;
+                                const needNote = !!item.requiresNote && !!item.countLocked && !item.note.trim() && item.actualStock !== null;
+                                const balanceBlockedByNote = needNote;
+                                const hasInput = (ci.unitTouched || []).some(Boolean) || !!ci.leTouched;
+                                let displayedTotal: number | null = null;
+                                if (hasInput && units.length > 0) displayedTotal = (ci.le || 0) + units.reduce((sum, unit, unitIndex) => sum + Number(ci.unitCounts?.[unitIndex] || 0) * Number(unit.rate || 0), 0);
+                                const rows: React.ReactNode[] = [];
+                                if (item.productName !== previousProduct) {
+                                    previousProduct = item.productName;
+                                    const group = productGroups.find(candidate => candidate.productName === item.productName);
+                                    const done = group?.items.filter(candidate => candidate.balanced).length || 0;
+                                    const groupTotal = group?.items.length || 0;
+                                    const groupPercent = groupTotal ? Math.round((done / groupTotal) * 100) : 0;
+                                    rows.push(<tr key={`group-${item.productName}`} className="daily-worksheet-group-row"><td colSpan={tableColumnCount} style={{ padding: '9px 14px', background: '#edf8f5', borderTop: '1px solid #d7eee7', borderBottom: '1px solid #d7eee7', color: '#087f68', fontWeight: 800, fontSize: 12 }}><div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}><span><DownOutlined style={{ fontSize: 10, marginRight: 9 }} />{item.productName}<span style={{ marginLeft: 10, color: '#64748b', fontWeight: 600 }}>({groupTotal} SKU)</span></span><span style={{ display: 'inline-flex', alignItems: 'center', gap: 7, color: '#008f68', fontWeight: 800, fontSize: 11 }}><span>{done}/{groupTotal} đã đối chiếu</span><span style={{ width: 80, height: 8, borderRadius: 99, background: '#dcefeb', overflow: 'hidden' }}><span style={{ display: 'block', width: `${groupPercent}%`, height: '100%', background: '#10b981', borderRadius: 99 }} /></span><span>{groupPercent}%</span></span></div></td></tr>);
+                                }
+                                rows.push(
+                                    <tr key={item.sku} style={{ background: item.balanced ? '#f6ffed' : (index % 2 === 0 ? '#fff' : '#fbfdff') }}>
+                                        <td style={{ ...S.td, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}><span style={{ display: 'inline-block', maxWidth: '100%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontFamily: 'inherit', fontSize: 12, fontWeight: 600, color: '#263b59' }}>{item.sku}</span></td>
+                                        <td style={{ ...S.td, textAlign: 'left' }}>{item.color ? <span className="daily-color-label"><span className="daily-color-dot" style={{ background: ({ Đen: '#263238', Trắng: '#cbd5e1', Hồng: '#fb7185', Xanh: '#60a5fa', Be: '#f4d9a6', Kem: '#f8e7b4' } as Record<string, string>)[item.color] || '#94a3b8' }} />{item.color}</span> : <span style={{ color: '#b8c2cc' }}>—</span>}</td>
+                                        {isAdmin && <td style={{ ...S.td, textAlign: 'right', fontWeight: 700 }}>{Number(item.systemStock || 0).toLocaleString('vi-VN')}</td>}
+                                        {Array.from({ length: worksheetUnitCount }, (_, index) => index + 1).map(unitIndex => <td key={unitIndex} style={{ ...S.td, textAlign: 'center' }}>{unitIndex < units.length ? <InputNumber min={0} size="small" value={ci.unitTouched?.[unitIndex] ? ci.unitCounts?.[unitIndex] : undefined} placeholder="—" style={{ width: 60, fontWeight: 700 }} disabled={disabled} onChange={value => updateCountingInput(item.sku, item.productName, unitIndex, value)} onBlur={event => commitCountInputOnBlur(item.sku, item.productName, unitIndex, event.currentTarget.value)} /> : <span className="daily-empty-input">—</span>}</td>)}
+                                        <td style={{ ...S.td, textAlign: 'center' }}>{units.length > 0 ? <InputNumber min={0} size="small" value={ci.leTouched ? ci.le : undefined} placeholder="—" style={{ width: 60, fontWeight: 700 }} disabled={disabled} onChange={value => updateCountingInput(item.sku, item.productName, 'le', value)} onBlur={event => commitCountInputOnBlur(item.sku, item.productName, 'le', event.currentTarget.value)} /> : <span className="daily-empty-input">—</span>}</td>
+                                        <td style={{ ...S.td, textAlign: 'center', fontWeight: 800, color: '#096dd9' }}>{units.length > 0 ? (displayedTotal ?? (item.actualStock !== null ? item.actualStock : <span style={{ color: '#b8c2cc', fontWeight: 400 }}>—</span>)) : <InputNumber min={0} size="small" value={item.actualStock ?? undefined} disabled={disabled} onChange={value => handleDirectActualStock(item.sku, value)} style={{ width: 72, fontWeight: 700 }} placeholder="Nhập" />}</td>
+                                        <td style={{ ...S.td, textAlign: 'center' }}>{item.actualStock === null ? <span className="daily-status-pill daily-status-pill--pending"><span className="daily-status-dot" />Chưa nhập</span> : renderDiff(item)}</td>
+                                        <td style={{ ...S.td, textAlign: 'center' }}><Button size="small" icon={<FileTextOutlined />} disabled={isAdmin ? item.balanced || isLockedDate : item.balanced || !canEditCounts} onClick={() => openNoteModal(item)} style={{ minWidth: needNote ? 76 : 72, padding: needNote ? '0 7px' : '0 9px', borderColor: needNote ? '#ff7875' : item.note.trim() ? '#91d5ff' : '#d9d9d9', color: needNote ? '#cf1322' : item.note.trim() ? '#096dd9' : '#64748b', background: needNote ? '#fff2f0' : '#fff', fontWeight: needNote ? 700 : 500 }}>{needNote ? 'Cần lý do' : item.note.trim() ? 'Xem' : 'Ghi chú'}</Button></td>
+                                        <td style={{ ...S.td, textAlign: 'center' }}>{item.balanced ? <span style={{ color: '#15803d', fontWeight: 700 }}>✓ Đã cân</span> : <Button size="small" loading={balancing[item.sku]} disabled={item.actualStock === null || isLockedDate || (!isAdmin && !isAssignedChecker)} onClick={() => balanceBlockedByNote ? openNoteModal(item) : handleSingleBalance(item)} style={{ minWidth: 112, height: 24, padding: '0 9px', borderRadius: 6, borderColor: item.actualStock === null ? '#dce4ed' : (balanceBlockedByNote ? '#faad14' : '#10b981'), color: item.actualStock === null ? '#8ba0b3' : (balanceBlockedByNote ? '#ad6800' : '#008f68'), fontSize: 12, lineHeight: '22px', fontWeight: 700, background: item.actualStock === null ? '#f1f5f9' : '#fff' }}>{balanceBlockedByNote ? 'Nhập lý do' : 'Cân bằng kho'}</Button>}</td>
+                                    </tr>,
+                                );
+                                return rows;
+                            })}
+                            {pageItems.length === 0 && <tr><td colSpan={tableColumnCount} style={{ padding: 38, textAlign: 'center', color: '#64748b' }}>Không tìm thấy SKU phù hợp.</td></tr>}
+                        </tbody>
+                    </table>
+                </div>
+                <div className="daily-worksheet-footer" style={{ display: 'flex', alignItems: 'center', gap: 14, padding: '11px 18px', borderTop: '1px solid #e7eef5', color: '#64748b', fontSize: 12 }}>
+                    <span style={{ minWidth: 100 }}>SKU {(filteredItems.length ? (page - 1) * DAILY_WORKSHEET_PAGE_SIZE + 1 : 0)}–{Math.min(page * DAILY_WORKSHEET_PAGE_SIZE, filteredItems.length)} / {filteredItems.length}</span>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}><Button size="small" aria-label="Trang trước" icon={<LeftOutlined />} disabled={page <= 1} onClick={() => setDailyWorksheetPage(current => Math.max(1, current - 1))} />{Array.from({ length: pageCount }, (_, index) => index + 1).slice(Math.max(0, page - 3), Math.max(0, page - 3) + 5).map(number => <Button key={number} size="small" type={number === page ? 'primary' : 'default'} onClick={() => setDailyWorksheetPage(number)}>{number}</Button>)}<Button size="small" aria-label="Trang sau" icon={<RightOutlined />} disabled={page >= pageCount} onClick={() => setDailyWorksheetPage(current => Math.min(pageCount, current + 1))} /></div>
+                    <span style={{ marginLeft: 'auto', color: '#64748b', fontSize: 11 }}><span style={{ display: 'inline-block', width: 8, height: 8, borderRadius: '50%', background: '#64748b', marginRight: 6 }} />Nhập số lượng thực tế rồi bấm Đối chiếu</span>
+                    <Button onClick={handleCancelSession} style={{ minWidth: 128, height: 34, borderRadius: 7, fontWeight: 700 }}>Hủy phiên</Button>
+                    <Button type="primary" icon={<CheckOutlined />} onClick={handleSubmitSession} disabled={!isSessionReadyToSubmit || submittingSession || !isAssignedChecker} loading={submittingSession} style={{ minWidth: 146, height: 34, borderRadius: 7, background: isSessionReadyToSubmit ? '#00ab74' : '#dce5ed', borderColor: isSessionReadyToSubmit ? '#00ab74' : '#dce5ed', color: isSessionReadyToSubmit ? '#fff' : '#8ba0b3', fontWeight: 800 }}>Đối chiếu</Button>
+                </div>
+            </div>
         );
     };
 
@@ -3253,20 +3383,19 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
                 ))}
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginBottom: 12, flexWrap: 'wrap' }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-                        <div style={{
-                            display: 'flex', alignItems: 'center', gap: 6, background: '#fff',
-                            border: '1px solid #e2e8f0', borderRadius: 8, padding: '5px 12px', fontSize: 13,
+                        <div className="daily-date-control" style={{
+                            display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, background: '#fff',
+                            border: '1px solid #d9e3ef', borderRadius: 8, padding: '4px 8px', minWidth: 202, height: 36, fontSize: 13,
                         }}>
-                            {canBrowseHistory && <Button type="text" size="small" onClick={() => setCurrentDate(d => d.subtract(1, 'day'))}>‹</Button>}
-                            <span style={{ color: '#10b981', fontWeight: 800 }}>📅</span>
-                            <span style={{ fontWeight: 600 }}>{currentDate.format('ddd DD/MM/YYYY')}</span>
-                            {canBrowseHistory && <Button type="text" size="small" disabled={isToday} onClick={() => setCurrentDate(d => d.add(1, 'day'))}>›</Button>}
+                            {canBrowseHistory && <Button type="text" size="small" aria-label="Ngày trước" icon={<LeftOutlined style={{ fontSize: 11 }} />} onClick={() => setCurrentDate(d => d.subtract(1, 'day'))} style={{ width: 22, height: 24, padding: 0, color: '#58708e' }} />}
+                            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 7, fontWeight: 600, whiteSpace: 'nowrap' }}><CalendarOutlined style={{ color: '#4e91d9', fontSize: 14 }} />{currentDate.format('ddd DD/MM/YYYY')}</span>
+                            {canBrowseHistory && <Button type="text" size="small" aria-label="Ngày sau" icon={<RightOutlined style={{ fontSize: 11 }} />} disabled={isToday} onClick={() => setCurrentDate(d => d.add(1, 'day'))} style={{ width: 22, height: 24, padding: 0, color: '#58708e' }} />}
                             {canBrowseHistory && !isToday && (
                                 <Button type="link" size="small" onClick={() => setCurrentDate(dayjs())}>Hôm nay</Button>
                             )}
                         </div>
 
-                        {weekend && <Tag color="orange">📅 Thứ 7 — kiểm toàn bộ tất cả kho</Tag>}
+                        {weekend && <Tag color="orange" icon={<CalendarOutlined />}>Thứ 7 — kiểm toàn bộ tất cả kho</Tag>}
                         {activeTab === 'daily' && (
                             <Tooltip trigger={['hover', 'focus', 'click']} title="Tối đa 15 SKU/ngày. 5D UNICARE, UPF UNICARE, AMI ECO: khoảng 40% SKU mỗi dòng. Ưu tiên màu chưa kiểm trong tuần và kiểm lại SKU bán nhiều hoặc có bất thường. Nhập số kiện thực đếm và hàng lẻ.">
                                 <Button type="text" size="small" style={{ color: '#64748b', fontSize: 12 }}>Quy tắc kiểm</Button>
@@ -3346,6 +3475,8 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
                 {todaySession && todaySession.items.length > 0 && (
                     <>
                         {/* ── Product groups ── */}
+                        {activeTab === 'daily' && renderDailyWorksheet()}
+                        {activeTab !== 'daily' && <>
                         <div className="stock-check-legacy-grid" style={{
                             display: 'grid', gridTemplateColumns: '328px minmax(0, 1fr)', gap: 16,
                             alignItems: 'stretch', marginTop: 8,
@@ -3836,6 +3967,7 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
                         })}
                             </section>
                         </div>
+                        </>}
 
 
                         {isToday && todaySession && totalCount > 0 && !isSessionSubmitted && (
@@ -4063,7 +4195,7 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
                                     description="Các kiện đã kiểm xong, nhưng tổng thực tế khác tồn kho trên phần mềm."
                                 />
                                 <div className="stock-check-stock-comparison">
-                                    <span>Thực tế từ các kiện</span>
+                                    <span>Thực tế từ kiện + đóng gói sẵn</span>
                                     <b>{packageConfirmation.actualTotal.toLocaleString('vi-VN')} {packageConfirmation.item.unit}</b>
                                     <span>Tồn kho trên phần mềm</span>
                                     <b>{packageConfirmation.systemStock.toLocaleString('vi-VN')} {packageConfirmation.item.unit}</b>

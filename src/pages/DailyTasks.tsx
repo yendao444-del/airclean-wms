@@ -53,7 +53,8 @@ import {
     LeftOutlined,
     RightOutlined,
     QrcodeOutlined,
-    MobileOutlined
+    MobileOutlined,
+    FolderOpenOutlined,
 } from '@ant-design/icons';
 import dayjs from 'dayjs';
 import { QRCodeSVG } from 'qrcode.react';
@@ -65,6 +66,7 @@ import {
 } from '../lib/workCalendar';
 import './DailyTasks.css';
 import AlertPopup, { AlertPopupItem } from '../components/AlertPopup';
+import DailyTaskEvidenceGallery from '../components/DailyTaskEvidenceGallery';
 
 const AssignmentDeadlinePicker = ({
     value,
@@ -292,7 +294,9 @@ const formatPenaltyAmount = (value: string | number | undefined): string => {
 
 const getDailyRotationAnchor = () => dayjs().format('YYYY-MM-DD');
 
-const MAX_EVIDENCE_IMAGES = 5;
+// Keep the editor and submission flow aligned: supervisors may require up to
+// eight landscape photos for one task.
+const MAX_EVIDENCE_IMAGES = 8;
 
 const getRequiredEvidenceImageCount = (evidence?: EvidenceMeta): number => {
     const configured = Math.floor(Number(evidence?.minImages) || 1);
@@ -2474,28 +2478,12 @@ const DailyTasks = () => {
         ) => (
             <div>
                 <p style={{ marginBottom: 8 }}><strong>{task.title}</strong></p>
-                {images.length > 0 && (
-                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 12 }}>
-                        {images.map((image, index) => (
-                            <a key={imageKey(image) || String(index)} href={image.url} target="_blank" rel="noreferrer" title={image.name}>
-                                <img
-                                    src={image.url}
-                                    alt={`Bằng chứng ${index + 1}`}
-                                    loading="eager"
-                                    fetchPriority="high"
-                                    decoding="async"
-                                    onError={() => message.warning(`Không thể hiển thị ảnh: ${image.name || `Bằng chứng ${index + 1}`}`)}
-                                    style={{ display: 'block', width: '100%', height: 520, objectFit: 'contain', borderRadius: 8, background: '#f8fafc' }}
-                                />
-                            </a>
-                        ))}
-                    </div>
-                )}
-                {loading && (
-                    <div style={{ minHeight: images.length ? 44 : 260, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#64748b' }}>
-                        Đang tải ảnh bằng chứng…
-                    </div>
-                )}
+                <DailyTaskEvidenceGallery entries={submittedImages.map((image, index) => ({
+                    key: imageKey(image) || String(index),
+                    name: image.name,
+                    url: images.find(loaded => imageKey(loaded) === imageKey(image))?.url,
+                    error: failedByKey.get(imageKey(image)) || (!loading && !images.some(loaded => imageKey(loaded) === imageKey(image)) ? 'Không thể tải ảnh bằng chứng.' : undefined),
+                }))} />
                 {!loading && errors.length > 0 && (
                     <div style={{ minHeight: 180, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#dc2626' }}>
                         {errors.length === submittedImages.length
@@ -2605,18 +2593,20 @@ const DailyTasks = () => {
                 task.id,
                 driveImages.map(image => ({ driveUrl: image.driveUrl!, mimeType: image.mimeType })),
                 requestId,
-            )
+            ).catch(error => ({ success: false as const, error: error?.message || 'Không thể tải ảnh bằng chứng.' }))
             : Promise.resolve(null);
         const r2Request = r2Images.length > 0
             ? window.electronAPI.dailyTasks.getR2EvidenceImageUrls(
                 task.id,
                 r2Images.map(image => ({ r2Key: image.r2Key!, mimeType: image.mimeType })),
                 requestId,
-            )
+            ).catch(error => ({ success: false as const, error: error?.message || 'Không thể tải ảnh bằng chứng từ R2.' }))
             : Promise.resolve(null);
         const legacyRequests = legacyImages.map(async image => {
             const key = imageKey(image);
-            const result = await window.electronAPI.dailyTasks.getEvidenceImageUrl(task.id, image.storagePath);
+            const result = await window.electronAPI.dailyTasks.getEvidenceImageUrl(task.id, image.storagePath)
+                .catch(error => ({ success: false as const, error: error?.message || 'Không thể tải ảnh bằng chứng.' }));
+            if (!modalActive) return;
             if (result.success && result.data?.url) {
                 cacheImageUrl(key, result.data.url);
                 loadedByKey.set(key, { ...image, url: result.data.url });
@@ -2630,6 +2620,7 @@ const DailyTasks = () => {
             r2Request,
             Promise.allSettled(legacyRequests),
         ]);
+        if (!modalActive) return;
         if (r2Result?.success && r2Result.data?.results) {
             r2Result.data.results.forEach(result => {
                 const image = r2Images.find(item => item.r2Key === result.r2Key);
@@ -4417,7 +4408,17 @@ const DailyTasks = () => {
             {/* Task Modal - SIMPLIFIED */}
             <Modal
                 className="daily-task-create-modal"
-                title={editingTask ? 'Sửa công việc' : '✨ Thêm công việc mới'}
+                classNames={{ wrapper: 'daily-task-editor-wrap' }}
+                title={(
+                    <div className="daily-task-modal-title">
+                        <span className="daily-task-modal-title__icon" aria-hidden="true"><FileTextOutlined /></span>
+                        <span className="daily-task-modal-title__copy">
+                            <span className="daily-task-modal-title__eyebrow">Công việc hàng ngày</span>
+                            <span className="daily-task-modal-title__heading">{editingTask ? 'Sửa công việc' : 'Thêm công việc mới'}</span>
+                            <span className="daily-task-modal-title__subtitle">Cập nhật nội dung, cách xác nhận và người phụ trách công việc.</span>
+                        </span>
+                    </div>
+                )}
                 open={taskModalVisible}
                 onOk={handleSaveTask}
                 onCancel={() => {
@@ -4429,17 +4430,20 @@ const DailyTasks = () => {
                 confirmLoading={isSavingTask}
                 maskClosable={!isSavingTask}
                 closable={!isSavingTask}
-                width={550}
-                okText="💾 Lưu"
+                width={1000}
+                okText="Lưu thay đổi"
                 cancelText="Hủy"
                 okButtonProps={{ size: 'large', style: { minWidth: 100 }, disabled: isSavingTask }}
                 cancelButtonProps={{ size: 'large', disabled: isSavingTask }}
             >
                 <Form form={taskForm} layout="vertical">
+                    <div className="daily-task-editor-grid">
+                    <section className="daily-task-editor-section" aria-label="Nội dung và bằng chứng">
+                    <div className="daily-task-editor-heading">Nội dung công việc</div>
                     {/* Tên công việc - BẮT BUỘC */}
                     <Form.Item
                         name="title"
-                        label={<span style={{ fontSize: 15, fontWeight: 600 }}>📝 Tên công việc</span>}
+                        label={<span className="daily-task-field-label"><FileTextOutlined /> Tên công việc</span>}
                         rules={[{ required: true, message: 'Vui lòng nhập tên công việc!' }]}
                     >
                         <Input
@@ -4452,7 +4456,7 @@ const DailyTasks = () => {
                     {/* Mô tả */}
                     <Form.Item
                         name="description"
-                        label={<span style={{ fontSize: 14, fontWeight: 500 }}>💬 Mô tả</span>}
+                        label={<span className="daily-task-field-label daily-task-field-label--muted"><MessageOutlined /> Mô tả</span>}
                     >
                         <TextArea
                             rows={3}
@@ -4464,7 +4468,7 @@ const DailyTasks = () => {
                     {taskCreateMode === 'regular' && <>
                         <Form.Item
                             name="evidenceRequired"
-                            label={<span style={{ fontSize: 14, fontWeight: 700 }}>Cách xác nhận hoàn thành</span>}
+                            label={<span className="daily-task-field-label"><UploadOutlined /> Cách xác nhận hoàn thành</span>}
                             rules={[{ required: true }]}
                         >
                             <Select
@@ -4479,7 +4483,8 @@ const DailyTasks = () => {
                         {!isAdmin && <div style={{ marginTop: -12, marginBottom: 16, fontSize: 12, color: '#64748b' }}>Chỉ admin được đổi loại hoàn thành.</div>}
                         <Form.Item noStyle shouldUpdate={(prev, current) => prev.evidenceRequired !== current.evidenceRequired}>
                             {({ getFieldValue }) => getFieldValue('evidenceRequired') ? (
-                                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(130px, 1fr))', gap: 10, padding: 12, marginBottom: 16, border: '1px solid #fed7aa', borderRadius: 8, background: '#fffaf5' }}>
+                                <div className="daily-task-evidence-config">
+                                    <div className="daily-task-evidence-config__heading"><UploadOutlined /> Bằng chứng</div>
                                     <Form.Item name="evidenceDeadlineTime" label="Hạn chót" rules={[{ required: true }]} style={{ marginBottom: 0 }}>
                                         <Select size="middle" disabled options={[{ value: DAILY_EVIDENCE_DEADLINE, label: '23:59 cuối ngày' }]} />
                                     </Form.Item>
@@ -4489,35 +4494,38 @@ const DailyTasks = () => {
                                     <Form.Item name="penaltyAmount" label="Phạt (đ)" style={{ marginBottom: 0 }}>
                                         <InputNumber min={0} precision={0} controls={false} suffix="đ" disabled={!isAdmin} style={{ width: '100%' }} formatter={formatPenaltyAmount} parser={(value) => String(value || '').replace(/[^\d]/g, '')} />
                                     </Form.Item>
-                                    <div style={{ gridColumn: '1 / -1', fontSize: 12, color: '#c2410c' }}>Mỗi công việc có thể yêu cầu từ 1 đến {MAX_EVIDENCE_IMAGES} ảnh. Hệ thống chỉ ghi nhận phạt từ 00:00 ngày kế tiếp.</div>
+                                    <div className="daily-task-evidence-config__note"><InfoCircleOutlined /> Tối đa {MAX_EVIDENCE_IMAGES} ảnh. Phạt được ghi nhận từ 00:00 ngày kế tiếp.</div>
                                 </div>
                             ) : null}
                         </Form.Item>
                     </>}
 
-                    <div style={{ marginBottom: 10, fontSize: 12, color: '#64748b' }}>
+                    </section>
+                    <section className="daily-task-editor-section daily-task-editor-section--assignment" aria-label="Phân công và thông tin tự động">
+                    <div className="daily-task-editor-heading">Phân công thực hiện</div>
+                    <div className="daily-task-assignment-hint">
                         {assignmentMode === 'fixed'
                             ? 'Chỉ người được chọn có thể thực hiện công việc này.'
                             : 'Hệ thống tự đổi người thực hiện theo danh sách luân phiên mỗi ngày.'}
                     </div>
-                    <Form.Item name="assignmentMode" style={{ marginBottom: 10 }}>
+                    <Form.Item name="assignmentMode" className="daily-task-assignment-mode" style={{ marginBottom: 10 }}>
                         <Radio.Group
                             onChange={(event) => {
                                 const mode = event.target.value as 'fixed' | 'daily';
                                 setAssignmentMode(mode);
                                 if (mode !== 'fixed') taskForm.setFieldsValue({ assignee: '' });
                             }}
-                            style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}
+                            className="daily-task-mode-group"
                         >
                             <Radio value="fixed">Cố định một người</Radio>
                             <Radio value="daily">Luân phiên theo ngày</Radio>
                         </Radio.Group>
                     </Form.Item>
                     {assignmentMode === 'daily' && (
-                        <div style={{ marginBottom: 16, padding: 12, border: '1px solid #bfdbfe', borderRadius: 8, background: '#f0f9ff' }}>
+                        <div className="daily-task-rotation-config">
                             <Form.Item
                                 name="rotationAssignees"
-                                label={<span style={{ fontSize: 14, fontWeight: 600 }}>Người luân phiên <span style={{ color: '#ff4d4f' }}>*</span></span>}
+                                label={<span className="daily-task-field-label"><UserOutlined /> Người luân phiên</span>}
                                 rules={[{ required: true, type: 'array', min: 2, message: 'Chọn ít nhất 2 nhân viên chính thức.' }]}
                                 style={{ marginBottom: 8 }}
                             >
@@ -4527,7 +4535,7 @@ const DailyTasks = () => {
                                     options={rotationAssigneeList.map(username => ({ value: username, label: username }))}
                                 />
                             </Form.Item>
-                            <div style={{ fontSize: 12, color: '#1d4ed8', lineHeight: 1.55 }}>
+                            <div className="daily-task-assignment-hint">
                                 Người đầu tiên làm hôm nay; hệ thống tự đổi người vào mỗi ngày mới. Danh sách chỉ gồm nhân viên chính thức.
                             </div>
                         </div>
@@ -4535,7 +4543,7 @@ const DailyTasks = () => {
                     {assignmentMode === 'fixed' && <>
                     <Form.Item
                         name="assignee"
-                        label={<span style={{ fontSize: 14, fontWeight: 600 }}>👤 Người thực hiện</span>}
+                                label={<span className="daily-task-field-label"><UserOutlined /> Người thực hiện</span>}
                         rules={[{ required: true, message: 'Chọn người thực hiện.' }]}
                         style={{ marginBottom: 16 }}
                     >
@@ -4606,24 +4614,17 @@ const DailyTasks = () => {
                     {/* Thêm người mới - Toggle inline Input */}
                     {taskCreateMode === 'regular' && (!showAddAssignee ? (
                         <Button
-                            type="dashed"
+                            type="text"
+                            className="daily-task-add-assignee"
                             icon={<PlusOutlined />}
                             onClick={() => setShowAddAssignee(true)}
-                            block
-                            size="small"
-                            style={{
-                                marginBottom: 16,
-                                borderRadius: 8,
-                                borderColor: '#52c41a',
-                                color: '#52c41a'
-                            }}
                         >
                             Thêm người thực hiện mới
                         </Button>
                     ) : (
                         <div style={{ marginBottom: 16 }}>
                             <Form.Item
-                                label={<span style={{ fontSize: 13, fontWeight: 500 }}>✏️ Nhập tên người mới</span>}
+                                label={<span className="daily-task-field-label"><UserOutlined /> Nhập tên người mới</span>}
                                 style={{ marginBottom: 8 }}
                             >
                                 <Input
@@ -4705,22 +4706,16 @@ const DailyTasks = () => {
                     </Form.Item>
 
                     {/* Info box */}
-                    {taskCreateMode === 'regular' && <div style={{
-                        background: 'linear-gradient(135deg, #e6f7ff 0%, #bae7ff 50%, #e6f7ff 100%)',
-                        border: '1px solid #91d5ff',
-                        borderRadius: 8,
-                        padding: 12,
-                        marginTop: 16
-                    }}>
-                        <div style={{ fontSize: 13, color: '#666', lineHeight: 1.6 }}>
-                            <div><strong>ℹ️ Thông tin tự động:</strong></div>
-                            <div style={{ marginTop: 4 }}>
-                                • 📋 Mức ưu tiên: <strong>Bình thường</strong><br />
-                                • ⏰ Thời hạn: <strong>{taskForm.getFieldValue('evidenceRequired') ? 'Theo hạn chót bằng chứng' : '20:00 hôm nay'}</strong><br />
-                                • 📂 Danh mục: <strong>{taskForm.getFieldValue('category') || 'Tự động'}</strong>
-                            </div>
-                        </div>
+                    {taskCreateMode === 'regular' && <Form.Item noStyle shouldUpdate={(prev, current) => prev.evidenceRequired !== current.evidenceRequired || prev.category !== current.category}>
+                    {({ getFieldValue }) => <div className="daily-task-auto-info">
+                        <div className="daily-task-auto-info__heading"><InfoCircleOutlined /> Thông tin tự động</div>
+                        <div className="daily-task-auto-info__row"><span><FlagOutlined /> Mức ưu tiên</span><strong>Bình thường</strong></div>
+                        <div className="daily-task-auto-info__row"><span><ClockCircleOutlined /> Thời hạn</span><strong>{getFieldValue('evidenceRequired') ? 'Theo hạn chót bằng chứng' : '20:00 hôm nay'}</strong></div>
+                        <div className="daily-task-auto-info__row"><span><FolderOpenOutlined /> Danh mục</span><strong>{getFieldValue('category') || 'Tự động'}</strong></div>
                     </div>}
+                    </Form.Item>}
+                    </section>
+                    </div>
                 </Form>
             </Modal>
 

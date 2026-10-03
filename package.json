@@ -1,20 +1,16 @@
 {
   "name": "quan-ly-ban-hang-desktop",
-  "version": "1.0.470",
+  "version": "1.0.475",
   "description": "Hệ thống quản lý bán hàng - Desktop App",
   "main": "electron/main.js",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "embed:wms-token": "node scripts/embed-wms-token.js",
-    "embed:google-oauth": "node scripts/prepare-google-oauth-config.js",
-    "prepare:runtime-db": "node scripts/prepare-runtime-db-config.cjs",
-    "prepare:r2-daily-evidence": "node scripts/prepare-r2-daily-evidence-config.js",
     "verify:packaged-footprint": "node scripts/verify-packaged-footprint.cjs",
     "db:migrate:deploy": "prisma migrate deploy",
     "electron:dev": "node scripts/start-electron-dev.js",
-    "electron:build": "npm run embed:wms-token && npm run embed:google-oauth && npm run prepare:r2-daily-evidence && npm run prepare:runtime-db && npx prisma generate && npm run build && electron-builder && node scripts/verify-packaged-footprint.cjs release4/win-unpacked/resources/app",
-    "electron:installer": "npm run embed:wms-token && npm run embed:google-oauth && npm run prepare:r2-daily-evidence && npm run prepare:runtime-db && npx prisma generate && npm run build && electron-builder --win nsis --config.directories.output=release-installer && node scripts/verify-packaged-footprint.cjs release-installer/win-unpacked/resources/app && node scripts/installer-runtime-smoke.cjs"
+    "electron:build": "npx prisma generate && npm run build && electron-builder && node scripts/verify-packaged-footprint.cjs release4/win-unpacked/resources/app",
+    "electron:installer": "npx prisma generate && npm run build && electron-builder --win nsis --config.directories.output=release-installer && node scripts/verify-packaged-footprint.cjs release-installer/win-unpacked/resources/app && node scripts/installer-runtime-smoke.cjs"
   },
   "keywords": [
     "pos",
@@ -71,6 +67,8 @@
       "!electron/gdrive-token.json",
       "!electron/gdrive-credentials.json",
       "!electron/r2-daily-evidence-bootstrap.json",
+      "!electron/google-oauth-config.json",
+      "!electron/wms-bot-runtime.js",
       "node_modules/@prisma/**/*",
       "node_modules/.prisma/**/*",
       "!node_modules/.prisma/**/*.tmp*",
@@ -109,10 +107,6 @@
           "**/*",
           "!**/*.tmp*"
         ]
-      },
-      {
-        "from": ".runtime-build/runtime.env",
-        "to": "app/.env"
       }
     ],
     "win": {
@@ -140,17 +134,19 @@
     "@prisma/client": "5.22.0",
     "@supabase/supabase-js": "^2.110.8",
     "@zxing/browser": "^0.2.1",
-    "adm-zip": "^0.6.0",
+    "adm-zip": "^0.6.1",
     "archiver": "^7.0.1",
     "bcryptjs": "^3.0.3",
     "cloudflared": "^0.7.3",
     "dotenv": "^17.2.3",
     "glob": "^13.0.1",
     "googleapis": "^171.4.0",
-    "nodemailer": "^7.0.6",
-    "uuid": "^11.1.0",
+    "nodemailer": "^10.0.13",
     "winax": "^3.6.8",
     "ws": "^8.21.3",
     "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz"
+  },
+  "overrides": {
+    "qs": "^6.16.0"
   }
 }

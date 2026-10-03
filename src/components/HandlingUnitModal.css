@@ -1,0 +1,179 @@
+/* Shared responsive shell for every warehouse dialog. Ant Design 6 renders
+   the visible frame as .ant-modal-container. */
+.hu-responsive-modal.ant-modal {
+  top: 0;
+  max-width: calc(100vw - 24px) !important;
+  margin: 12px auto;
+  padding-bottom: 0;
+}
+.hu-responsive-modal.ant-modal .ant-modal-container,
+.hu-responsive-modal.ant-modal .ant-modal-content {
+  display: flex;
+  flex-direction: column;
+  max-height: calc(100dvh - 24px);
+  overflow: hidden;
+}
+.hu-responsive-modal.ant-modal .ant-modal-header {
+  flex-shrink: 0;
+  margin: 0;
+  padding: 16px 56px 14px 20px;
+}
+.hu-responsive-modal.ant-modal .ant-modal-body {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  scrollbar-gutter: stable;
+}
+.hu-responsive-modal.ant-modal .ant-modal-footer {
+  flex-shrink: 0;
+  margin: 0;
+  padding: 12px 20px;
+  border-top: 1px solid #e8efeb;
+}
+.hu-responsive-modal .ant-modal-title,
+.hu-responsive-modal .ant-btn,
+.hu-responsive-modal .ant-tag {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+.hu-responsive-modal .ant-btn { min-width: 0; white-space: normal; }
+.hu-responsive-modal .ant-form-item,
+.hu-responsive-modal .ant-flex > * { min-width: 0; }
+.hu-responsive-modal .ant-flex { flex-wrap: wrap; }
+.hu-responsive-modal.ant-modal :is(.ant-modal-container, .ant-modal-content) { padding: 0; }
+.hu-responsive-modal.ant-modal .ant-modal-body { padding: 0 20px 16px; }
+.hu-responsive-modal .ant-tag { white-space: normal; }
+.hu-responsive-modal .ant-btn { height: auto; min-height: 32px; }
+.hu-responsive-modal .ant-modal-body > form.ant-form {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0 18px;
+}
+.hu-responsive-modal .ant-modal-body > form.ant-form > * { grid-column: 1 / -1; }
+.hu-responsive-modal .ant-modal-body > form.ant-form > .ant-form-item { grid-column: auto; margin-bottom: 14px; }
+.hu-responsive-modal .ant-modal-body > form.ant-form > .ant-form-item:has(textarea),
+.hu-responsive-modal .ant-modal-body > form.ant-form > .hu-final-check-result { grid-column: 1 / -1; }
+.hu-responsive-modal .ant-input-number { max-width: 100%; }
+.hu-responsive-modal .packing-component-form { grid-column: 1 / -1; grid-template-columns: minmax(0, 1fr) minmax(100px, .3fr) 32px; }
+.hu-responsive-modal .packing-component-form .ant-input-number { width: 100%; }
+.hu-responsive-modal .packing-review { flex-wrap: wrap; }
+.hu-responsive-modal .hu-split-modal-body { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr); gap: 12px 18px; }
+.hu-responsive-modal .hu-split-modal-body > .hu-split-preview { grid-column: 2; grid-row: 1 / 4; }
+.hu-responsive-modal .hu-split-modal-body > :is(.ant-alert, .ant-flex) { grid-column: 1 / -1; }
+.hu-responsive-modal .hu-split-source b, .hu-responsive-modal .hu-split-equation { overflow-wrap: anywhere; }
+.hu-responsive-modal .hu-move-preview { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 14px; }
+.hu-responsive-modal .hu-move-preview > div { min-width: 0; overflow-wrap: anywhere; }
+.hu-responsive-modal .hu-create-package-modal .ant-form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+.hu-responsive-modal.hu-create-package-modal .ant-modal-body > form.ant-form > .hu-alloc-section { grid-column: auto; margin-top: 0 !important; }
+.hu-responsive-modal.hu-create-package-modal .ant-modal-body > form.ant-form > .hu-alloc-section:last-child { grid-column: 1 / -1; }
+.hu-responsive-modal .hu-quick-manual-fields { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.hu-responsive-modal .hu-quick-modal-title, .hu-responsive-modal .hu-quick-total { flex-wrap: wrap; }
+.hu-responsive-modal .hu-quick-create { grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr); }
+.hu-responsive-modal .hu-quick-lines { min-height: 120px; }
+.hu-responsive-modal .hu-edit-unit-identity b { overflow-wrap: anywhere; }
+
+/* Detail modal: use the available width before growing vertically. */
+.hu-unit-detail-modal .ant-modal-container,
+.hu-unit-detail-modal .ant-modal-content { max-height: calc(100dvh - 24px); }
+.hu-unit-detail-modal.ant-modal {
+  top: 0;
+  margin: 48px auto 12px;
+}
+.hu-unit-detail-modal .ant-modal-container,
+.hu-unit-detail-modal .ant-modal-content {
+  max-height: calc(100dvh - 60px);
+}
+.hu-unit-detail-modal .ant-modal-body { min-height: 0; overflow: auto; }
+.hu-unit-detail-modal .hu-detail-top {
+  grid-template-columns: 104px minmax(0, 1fr) 328px;
+  gap: 16px;
+  padding: 4px 0 12px;
+}
+.hu-unit-detail-modal .hu-detail-top > img { width: 104px; height: 104px; }
+.hu-unit-detail-modal .hu-detail-main-info h3 { overflow-wrap: anywhere; }
+.hu-unit-detail-modal .hu-detail-qr-box {
+  display: grid;
+  grid-template-columns: 128px minmax(0, 1fr);
+  gap: 6px 10px;
+  width: 100%;
+  min-width: 0;
+  padding: 10px;
+  box-sizing: border-box;
+}
+.hu-unit-detail-modal .hu-qr-canvas-wrap { grid-column: 1; grid-row: 1; }
+.hu-unit-detail-modal .hu-qr-code-text { grid-column: 1 / -1; text-align: center; overflow-wrap: anywhere; }
+.hu-unit-detail-modal .hu-label-direct-actions { grid-column: 2; grid-row: 1; align-self: center; min-width: 0; }
+.hu-unit-detail-modal .hu-split-old-qr-note { grid-column: 1 / -1; max-width: none; }
+.hu-unit-detail-modal .hu-detail-stats { grid-template-columns: repeat(4, minmax(0, 1fr)); padding: 12px 0; }
+.hu-unit-detail-modal .hu-detail-stats > div { min-width: 0; overflow-wrap: anywhere; }
+.hu-unit-detail-modal .hu-detail-actions-row { margin: 4px 0 12px; gap: 8px; }
+.hu-unit-detail-modal .hu-detail-actions-row > :is(.ant-btn, span) { flex: 1 1 180px; }
+
+/* Wide data entry surfaces. */
+.hu-quick-create-modal .ant-modal-container,
+.hu-quick-create-modal .ant-modal-content { padding: 0; }
+.hu-quick-create-modal .ant-modal-body { padding: 0; }
+.hu-quick-create-modal .hu-quick-create { min-height: 0; }
+.hu-quick-create-modal .hu-quick-receipt { max-height: none; }
+.hu-locations-manager-modal .hu-locations-manager { min-height: 0; max-height: none; }
+.hu-locations-manager-modal .hu-locations-content { max-height: none; }
+
+@media (max-width: 1000px) {
+  .hu-unit-detail-modal .hu-detail-top { grid-template-columns: 96px minmax(0, 1fr); }
+  .hu-unit-detail-modal .hu-detail-top > img { width: 96px; height: 96px; }
+  .hu-unit-detail-modal .hu-detail-qr-box { grid-column: 1 / -1; }
+  .hu-unit-detail-modal .hu-detail-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .hu-quick-create-modal .hu-quick-create,
+  .hu-locations-manager-modal .hu-locations-manager { grid-template-columns: minmax(0, 1fr); }
+  .hu-quick-create-modal .hu-quick-receipt { border-top: 1px solid #e5ece8; border-left: 0; }
+  .hu-locations-manager-modal .hu-locations-sidebar { border-right: 0; padding-right: 0; }
+  .hu-locations-manager-modal .hu-locations-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); max-height: 220px; }
+}
+@media (max-width: 680px) {
+  .hu-responsive-modal.ant-modal { max-width: calc(100vw - 16px) !important; margin: 8px auto; }
+  .hu-responsive-modal.ant-modal .ant-modal-container,
+  .hu-responsive-modal.ant-modal .ant-modal-content { max-height: calc(100dvh - 16px); }
+  .hu-responsive-modal.ant-modal .ant-modal-header { padding: 12px 46px 12px 12px; }
+  .hu-responsive-modal.ant-modal .ant-modal-body { padding: 0 12px 12px; }
+  .hu-responsive-modal.ant-modal .ant-modal-footer { padding: 10px 12px; }
+  .hu-responsive-modal .ant-modal-body > form.ant-form { grid-template-columns: minmax(0, 1fr); }
+  .hu-responsive-modal .hu-split-modal-body { grid-template-columns: minmax(0, 1fr); }
+  .hu-responsive-modal .hu-split-modal-body > .hu-split-preview { grid-column: 1; grid-row: auto; }
+  .hu-responsive-modal .packing-component-form { grid-template-columns: minmax(0, 1fr) 90px 28px; gap: 6px; }
+  .hu-responsive-modal .hu-edit-unit-identity { grid-template-columns: 1fr; }
+  .hu-responsive-modal .hu-final-check-summary,
+  .hu-responsive-modal .hu-final-check-options { grid-template-columns: 1fr; }
+  .hu-responsive-modal .hu-qr-setup-grid { grid-template-columns: 1fr; }
+  .hu-responsive-modal .hu-qr-field-full { grid-column: 1; }
+  .hu-responsive-modal.hu-create-package-modal .ant-modal-body > form.ant-form > .hu-alloc-section { grid-column: 1; }
+  .hu-responsive-modal .hu-ledger-head { display: none; }
+  .hu-responsive-modal .hu-ledger-row { grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr) repeat(3, minmax(0, .7fr)); gap: 8px; }
+  .hu-responsive-modal .hu-ledger-row > span:nth-child(6) { grid-column: 1 / -1; white-space: normal; }
+  .hu-unit-detail-modal .hu-detail-top { grid-template-columns: 88px minmax(0, 1fr); gap: 10px; }
+  .hu-unit-detail-modal.ant-modal { top: 0; margin: 44px auto 8px; }
+  .hu-unit-detail-modal .ant-modal-container,
+  .hu-unit-detail-modal .ant-modal-content { max-height: calc(100dvh - 56px); }
+  .hu-unit-detail-modal .hu-detail-top > img { width: 88px; height: 88px; }
+  .hu-unit-detail-modal .hu-detail-qr-box { grid-template-columns: 112px minmax(0, 1fr); }
+  .hu-unit-detail-modal .hu-detail-main-info h3 { font-size: 17px !important; }
+  .hu-unit-detail-modal .hu-detail-actions-row { flex-direction: column; align-items: stretch; }
+  .hu-unit-detail-modal .hu-detail-actions-row > :is(.ant-btn, span) { width: 100%; flex-basis: auto; }
+  .hu-unit-stock-history-header { flex-direction: column; }
+  .hu-unit-stock-history-header .ant-btn { align-self: flex-start; }
+  .hu-unit-stock-history-table .ant-table-cell { white-space: normal; }
+  .hu-locations-manager-modal .hu-loc-summary-grid { grid-template-columns: 1fr; }
+  .hu-quick-create-modal .hu-quick-footer { align-items: stretch; flex-direction: column; }
+  .hu-quick-create-modal .hu-quick-footer > div { flex-wrap: wrap; }
+  .hu-quick-create-modal .hu-quick-footer .ant-btn-primary { min-width: 0; }
+  .hu-responsive-modal .hu-quick-create { grid-template-columns: minmax(0, 1fr); }
+}
+@media (max-width: 480px) {
+  .hu-unit-detail-modal .hu-detail-stats { grid-template-columns: 1fr; }
+  .hu-unit-detail-modal .hu-detail-qr-box { grid-template-columns: 1fr; }
+  .hu-unit-detail-modal .hu-qr-canvas-wrap,
+  .hu-unit-detail-modal .hu-label-direct-actions,
+  .hu-unit-detail-modal .hu-qr-code-text { grid-column: 1; grid-row: auto; }
+  .hu-unit-detail-modal .hu-label-direct-actions { width: 100%; }
+  .hu-responsive-modal .hu-move-preview { grid-template-columns: 1fr; }
+}

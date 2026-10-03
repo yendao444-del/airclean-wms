@@ -33,6 +33,7 @@ set PATCH_ZIP_PATH=%CD%\!PATCH_ZIP!
 set CHECKSUM_FILE=!PATCH_ZIP_PATH!.sha256
 set PATCH_TEMP=%CD%\_patch_prisma_temp
 set VERSION_CHANGED=0
+set REPOSITORY_PUBLISHED=0
 
 echo Version: v!CURRENT_VERSION! -^> v!NEW_VERSION!
 echo.
@@ -59,11 +60,6 @@ call node scripts\verify-data-safety.js
 if errorlevel 1 goto release_failed
 
 echo [4/8] Prepare production configuration...
-call node scripts\prepare-google-oauth-config.js
-if errorlevel 1 goto release_failed
-call node scripts\embed-wms-token.js
-if errorlevel 1 goto release_failed
-
 echo [5/8] Stage patch contents...
 if exist "!PATCH_TEMP!" rmdir /S /Q "!PATCH_TEMP!"
 if exist "!PATCH_ZIP_PATH!" del /Q "!PATCH_ZIP_PATH!"
@@ -137,6 +133,7 @@ git commit -m "v!NEW_VERSION! - !NOTES!"
 if errorlevel 1 goto release_failed
 git push origin master
 if errorlevel 1 goto release_failed
+set REPOSITORY_PUBLISHED=1
 gh release create v!NEW_VERSION! "!PATCH_ZIP_PATH!" "!CHECKSUM_FILE!" --title "DBY POS v!NEW_VERSION! (PRISMA PATCH)" --notes "!NOTES!"
 if errorlevel 1 goto release_failed
 
@@ -152,7 +149,14 @@ exit /b 0
 echo.
 echo [ERROR] Prisma patch release failed. Nothing else will be published.
 rmdir /S /Q "!PATCH_TEMP!" 2>nul
-if "!VERSION_CHANGED!"=="1" call node scripts\release-version.cjs set !CURRENT_VERSION! >nul
+if "!VERSION_CHANGED!"=="1" if "!REPOSITORY_PUBLISHED!"=="0" (
+    call node scripts\release-version.cjs set !CURRENT_VERSION! >nul
+    echo [ROLLBACK] Restored package.json to v!CURRENT_VERSION! before repository publication.
+)
+if "!REPOSITORY_PUBLISHED!"=="1" (
+    echo [ACTION] Repository already published at v!NEW_VERSION!.
+    echo [ACTION] Kept package.json version and release assets for upload retry.
+)
 pause
 exit /b 1
 

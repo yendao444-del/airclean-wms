@@ -5,7 +5,6 @@ const { createRequire } = require('module');
 const appRoot = path.resolve(process.argv[2] || 'release-installer/win-unpacked/resources/app');
 const requireFromApp = createRequire(path.join(appRoot, 'package.json'));
 const requiredModules = [
-  'dotenv',
   '@prisma/client',
   'bcryptjs',
   'xlsx',
@@ -14,27 +13,25 @@ const requiredModules = [
   'glob',
   'googleapis',
   'nodemailer',
-  'uuid',
 ];
 
 async function main() {
   for (const moduleName of requiredModules) requireFromApp.resolve(moduleName);
 
-  const runtimeEnvPath = path.join(appRoot, '.env');
-  const runtimeEnv = requireFromApp('dotenv').parse(fs.readFileSync(runtimeEnvPath));
-  if (!/^postgres(?:ql)?:\/\//i.test(runtimeEnv.DATABASE_URL || '')) {
-    throw new Error('Packaged DATABASE_URL is missing or invalid.');
+  if (fs.existsSync(path.join(appRoot, '.env'))) {
+    throw new Error('Packaged runtime contains database credentials in app/.env.');
   }
-  if (!/^postgres(?:ql)?:\/\//i.test(runtimeEnv.DIRECT_URL || '')) {
-    throw new Error('Packaged DIRECT_URL is missing or invalid.');
+  // The installer is self-contained, but credentials are supplied at launch.
+  // An optional smoke URL is used only in controlled deployment environments.
+  const smokeUrl = String(process.env.DBYPOS_RUNTIME_SMOKE_DATABASE_URL || '').trim();
+  if (smokeUrl && !/^postgres(?:ql)?:\/\//i.test(smokeUrl)) {
+    throw new Error('DBYPOS_RUNTIME_SMOKE_DATABASE_URL must be a PostgreSQL URL.');
   }
-
-  process.env.DATABASE_URL = runtimeEnv.DATABASE_URL;
-  process.env.DIRECT_URL = runtimeEnv.DIRECT_URL;
+  process.env.DATABASE_URL = smokeUrl || 'postgresql://smoke:smoke@127.0.0.1:5432/smoke';
 
   const { PrismaClient } = requireFromApp('@prisma/client');
   const prisma = new PrismaClient({
-    datasources: { db: { url: runtimeEnv.DATABASE_URL } },
+    datasources: { db: { url: process.env.DATABASE_URL } },
   });
   try {
     const requiredDelegates = [
@@ -51,13 +48,13 @@ async function main() {
         );
       }
     }
-    await prisma.$connect();
+    if (smokeUrl) await prisma.$connect();
   } finally {
     await prisma.$disconnect().catch(() => {});
   }
 
   console.log(
-    `PACKAGED_LOGIN_RUNTIME_OK modules=${requiredModules.length} prismaEngine=true database=true`,
+    `PACKAGED_LOGIN_RUNTIME_OK modules=${requiredModules.length} prismaEngine=true database=${smokeUrl ? 'connected' : 'not-requested'}`,
   );
 }
 

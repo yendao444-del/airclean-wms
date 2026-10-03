@@ -11,6 +11,26 @@
     container-type: inline-size;
 }
 
+/* Keep the operator controls available while the order table is scrolled. */
+.ecommerce-sticky-workbar {
+    position: sticky;
+    top: 0;
+    z-index: 30;
+    min-width: 0;
+    padding-bottom: 2px;
+    background: var(--ecommerce-canvas);
+}
+
+.ecommerce-sticky-workbar .ecommerce-packer-bar,
+.ecommerce-sticky-workbar .ecommerce-scan-bar {
+    position: relative;
+    z-index: 1;
+}
+
+.ecommerce-sticky-workbar .ecommerce-scan-bar {
+    margin-bottom: 8px !important;
+}
+
 .ecommerce-page .ant-select-dropdown,
 .ecommerce-page .ant-picker-dropdown,
 .ecommerce-page .ant-dropdown {

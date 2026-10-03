@@ -42,6 +42,7 @@ interface SystemUser {
     isActive?: boolean;
     employmentStatus?: string;
     resignationDate?: string | null;
+    archived?: boolean;
     email?: string;
     createdAt?: string;
     lastActiveAt?: string | null;
@@ -55,6 +56,7 @@ interface PayrollEmployeesManagerProps {
     onDeleteUser: (user: any) => void | Promise<void>;
     onResetPassword: (user: any) => void;
     onToggleActive: (user: any) => void | Promise<void>;
+    onArchiveUser: (user: any, archived?: boolean) => void | Promise<void>;
 }
 
 const VIET_QR_BANKS = [
@@ -88,10 +90,12 @@ export default function PayrollEmployeesManager({
     onDeleteUser,
     onResetPassword,
     onToggleActive,
+    onArchiveUser,
 }: PayrollEmployeesManagerProps) {
     const [employees, setEmployees] = useState<PayrollEmployee[]>([]);
     const [loading, setLoading] = useState(false);
     const [saving, setSaving] = useState(false);
+    const [employeeView, setEmployeeView] = useState<'active' | 'archived' | 'all'>('active');
     const [modalOpen, setModalOpen] = useState(false);
     const [editingEmployee, setEditingEmployee] = useState<PayrollEmployee | null>(null);
     const [form] = Form.useForm();
@@ -130,6 +134,12 @@ export default function PayrollEmployeesManager({
             && !used.has(normalizeUsername(user.username))
         );
     }, [employees, users]);
+
+    const visibleUsers = useMemo(() => users.filter(user => {
+        if (employeeView === 'archived') return Boolean(user.archived);
+        if (employeeView === 'all') return true;
+        return !user.archived;
+    }), [employeeView, users]);
 
     const openAdd = (user?: SystemUser) => {
         setEditingEmployee(null);
@@ -191,6 +201,16 @@ export default function PayrollEmployeesManager({
                     <Text type="secondary">Một dòng duy nhất cho tài khoản, phân quyền, hợp đồng và thông tin tính lương.</Text>
                 </div>
                 <Space>
+                    <Select
+                        value={employeeView}
+                        onChange={setEmployeeView}
+                        options={[
+                            { value: 'active', label: 'Đang hiển thị' },
+                            { value: 'archived', label: 'Đã lưu trữ' },
+                            { value: 'all', label: 'Tất cả' },
+                        ]}
+                        style={{ width: 145 }}
+                    />
                     <Button icon={<ReloadOutlined />} onClick={loadData} loading={loading}>Tải lại</Button>
                     <Button type="primary" icon={<PlusOutlined />} onClick={() => openAdd()} disabled={availableUsers.length === 0}>
                         Thêm hồ sơ lương
@@ -204,12 +224,12 @@ export default function PayrollEmployeesManager({
                 icon={<SafetyCertificateOutlined />}
                 style={{ marginBottom: 16 }}
                 message="Bảo toàn dữ liệu lương"
-                description="Các cột tài khoản và lương được ghép để dễ quản lý, nhưng mã bảng công cũ vẫn được giữ nguyên phía sau. Nhân viên nghỉ việc phải đổi trạng thái, không xóa cứng."
+                description="Các cột tài khoản và lương được ghép để dễ quản lý. Nhân viên nghỉ việc sẽ bị khóa đăng nhập; bạn có thể lưu trữ để ẩn khỏi danh sách mà vẫn giữ nguyên lịch sử công/lương."
             />
 
             <Table
                 loading={loading || usersLoading}
-                dataSource={users}
+                dataSource={visibleUsers}
                 rowKey="id"
                 size="middle"
                 tableLayout="fixed"
@@ -236,7 +256,7 @@ export default function PayrollEmployeesManager({
                         render: (_, user) => <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 8 }}>
                             <Tag color={ROLE_META[user.role]?.color}>{ROLE_META[user.role]?.label || user.role}</Tag>
                             {user.employmentStatus === 'resigned'
-                                ? <Tag>ĐÃ NGHỈ</Tag>
+                                ? <Space size={4}><Tag>ĐÃ NGHỈ</Tag>{user.archived && <Tag color="orange">ĐÃ LƯU TRỮ</Tag>}</Space>
                                 : <Space size={6}>
                                     <Switch size="small" checked={user.isActive} onChange={() => onToggleActive(user)} checkedChildren={<UnlockOutlined />} unCheckedChildren={<LockOutlined />} />
                                     <Text type="secondary" style={{ fontSize: 12 }}>{user.isActive ? 'Hoạt động' : 'Đã khóa'}</Text>
@@ -276,7 +296,26 @@ export default function PayrollEmployeesManager({
                                     </Button>
                                 )}
                                 {currentUserRole === 'admin' && <Button type="text" size="small" icon={<KeyOutlined />} title="Đặt lại mật khẩu" onClick={() => onResetPassword(user)} style={{ color: '#52c41a' }} />}
-                                <Button type="text" size="small" danger icon={<DeleteOutlined />} title="Xóa tài khoản" disabled={onlyAdmin} onClick={() => onDeleteUser(user)} />
+                                {user.employmentStatus === 'resigned' ? (
+                                    <Button
+                                        type="text"
+                                        size="small"
+                                        icon={user.archived ? <UnlockOutlined /> : <LockOutlined />}
+                                        title={user.archived ? 'Bỏ lưu trữ' : 'Lưu trữ nhân viên'}
+                                        onClick={() => Modal.confirm({
+                                            title: user.archived ? 'Bỏ lưu trữ nhân viên?' : 'Lưu trữ nhân viên?',
+                                            content: user.archived
+                                                ? `Tài khoản ${user.fullName} sẽ xuất hiện lại trong danh sách mặc định.`
+                                                : `Tài khoản ${user.fullName} sẽ được ẩn khỏi danh sách mặc định. Lịch sử công/lương vẫn được giữ nguyên.`,
+                                            okText: user.archived ? 'Bỏ lưu trữ' : 'Lưu trữ',
+                                            cancelText: 'Hủy',
+                                            onOk: () => onArchiveUser(user, !user.archived),
+                                        })}
+                                        style={{ color: user.archived ? '#1890ff' : '#fa8c16' }}
+                                    >{user.archived ? 'Bỏ lưu trữ' : 'Lưu trữ'}</Button>
+                                ) : (
+                                    <Button type="text" size="small" danger icon={<DeleteOutlined />} title="Xóa tài khoản" disabled={onlyAdmin} onClick={() => onDeleteUser(user)} />
+                                )}
                             </Space>;
                         },
                     },

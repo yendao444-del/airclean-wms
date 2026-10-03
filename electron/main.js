@@ -28,6 +28,19 @@ function getDevelopmentServerUrl() {
 
 const DEVELOPMENT_SERVER_URL = getDevelopmentServerUrl();
 const USE_BUILT_RENDERER = process.env.DBYPOS_USE_DIST === '1';
+const { createAppOriginPolicy } = require('./app-origin-policy.cjs');
+const { isTrustedAppUrl, isTrustedAppSender } = createAppOriginPolicy({
+    appRoot: path.resolve(__dirname, '..'),
+    developmentOrigin: DEVELOPMENT_SERVER_URL,
+    isPackaged: app.isPackaged,
+});
+
+function handleEarlyIpc(channel, listener) {
+    ipcMain.handle(channel, (event, ...args) => {
+        if (!isTrustedAppSender(event)) throw new Error(`IPC sender không hợp lệ cho channel ${channel}`);
+        return listener(event, ...args);
+    });
+}
 
 // The packaged app can be started by an updater/launcher whose stdout and
 // stderr pipes are closed immediately afterwards. Any later console.* call
@@ -50,7 +63,10 @@ installBrokenPipeGuard(process.stderr);
 // Monkey-patch Module._resolveFilename để fallback về project root thật
 const Module = require('module');
 const originalResolve = Module._resolveFilename;
-const realNodeModules = path.join(process.cwd(), 'node_modules');
+// Resolve fallback dependencies only from the application runtime. Using
+// process.cwd() made module loading depend on the shortcut's working folder
+// and could load a same-named package from an unrelated directory.
+const realNodeModules = path.join(app.getAppPath(), 'node_modules');
 Module._resolveFilename = function (request, parent, isMain, options) {
     try {
         return originalResolve.call(this, request, parent, isMain, options);
@@ -225,18 +241,68 @@ function startMobileScanServer() {
         }
         response.writeHead(404, headers); response.end('Not found');
     });
-    const socketServer = new WebSocketServer({ server: mobileScanServer, path: '/socket' });
+    // The mobile test server is intentionally LAN/tunnel reachable, so bound
+    // resource limits keep idle or abusive clients from pinning the main loop.
+    mobileScanServer.headersTimeout = 10_000;
+    mobileScanServer.requestTimeout = 30_000;
+    mobileScanServer.keepAliveTimeout = 5_000;
+    mobileScanServer.maxConnections = 32;
+    const socketServer = new WebSocketServer({
+        server: mobileScanServer,
+        path: '/socket',
+        // Barcode payloads are tiny. Reject oversized frames before JSON.parse
+        // so a LAN/tunnel client cannot consume unbounded CPU or memory.
+        maxPayload: 64 * 1024,
+    });
     socketServer.on('connection', (socket, request) => {
         const query = new URL(request.url || '/', 'http://localhost');
+        // Oversized frames and malformed clients emit error events in ws.
+        // Handle them instead of letting a LAN client crash the main process.
+        socket.on('error', () => socket.terminate());
         if (!mobileScanSession || query.searchParams.get('session') !== mobileScanSession.token) { socket.close(1008, 'Phiên không hợp lệ'); return; }
+        if (socketServer.clients.size > 16) { socket.close(1008, 'Đã đủ số thiết bị'); return; }
+        const sessionAtStart = mobileScanSession;
         let deviceId;
-        socket.on('message', raw => { try { const payload = JSON.parse(raw.toString()); if (payload.type === 'hello') { deviceId = String(payload.deviceId || crypto.randomBytes(8).toString('hex')); mobileScanSockets.set(deviceId, socket); mainWindow?.webContents.send('mobileScan:device', { deviceId, employee: String(payload.employee || 'Nhân viên'), connected: true }); return; } if (payload.type !== 'scan' || !deviceId) return; const code = String(payload.code || '').trim(); if (!code) return; const duplicate = mobileScanSession.recentCodes.has(code); const status = /^fail/i.test(code) || duplicate ? 'fail' : 'success'; if (!duplicate) mobileScanSession.recentCodes.set(code, Date.now()); const message = duplicate ? 'Mã đã được quét trong phiên này' : status === 'success' ? 'Quét thành công' : 'Mã lỗi mô phỏng'; const result = { type:'result', code, status, message, sentAt: Number(payload.sentAt) || Date.now() }; socket.send(JSON.stringify(result)); mainWindow?.webContents.send('mobileScan:received', { code, employee: String(payload.employee || 'Nhân viên'), deviceId, status, message, at: new Date().toISOString() }); } catch {} });
-        socket.on('close', () => { if (deviceId) { mobileScanSockets.delete(deviceId); mainWindow?.webContents.send('mobileScan:device', { deviceId, connected: false }); } });
+        socket.on('message', raw => {
+            try {
+                if (mobileScanSession !== sessionAtStart) { socket.close(1008, 'Phiên đã thay đổi'); return; }
+                const payload = JSON.parse(raw.toString());
+                if (!payload || typeof payload !== 'object') return;
+                const employee = String(payload.employee || 'Nhân viên').slice(0, 80);
+                if (payload.type === 'hello') {
+                    if (deviceId) return;
+                    const requestedId = String(payload.deviceId || crypto.randomBytes(8).toString('hex')).slice(0, 100);
+                    if (mobileScanSockets.has(requestedId)) { socket.close(1008, 'Thiết bị đã kết nối'); return; }
+                    deviceId = requestedId;
+                    mobileScanSockets.set(deviceId, socket);
+                    mainWindow?.webContents.send('mobileScan:device', { deviceId, employee, connected: true });
+                    return;
+                }
+                if (payload.type !== 'scan' || !deviceId) return;
+                const code = String(payload.code || '').trim();
+                if (!code || code.length > 256) return;
+                const duplicate = sessionAtStart.recentCodes.has(code);
+                const status = /^fail/i.test(code) || duplicate ? 'fail' : 'success';
+                if (!duplicate) {
+                    sessionAtStart.recentCodes.set(code, Date.now());
+                    if (sessionAtStart.recentCodes.size > 5000) sessionAtStart.recentCodes.delete(sessionAtStart.recentCodes.keys().next().value);
+                }
+                const message = duplicate ? 'Mã đã được quét trong phiên này' : status === 'success' ? 'Quét thành công' : 'Mã lỗi mô phỏng';
+                socket.send(JSON.stringify({ type: 'result', code, status, message, sentAt: Number(payload.sentAt) || Date.now() }));
+                mainWindow?.webContents.send('mobileScan:received', { code, employee, deviceId, status, message, at: new Date().toISOString() });
+            } catch {}
+        });
+        socket.on('close', () => {
+            if (deviceId && mobileScanSockets.get(deviceId) === socket) {
+                mobileScanSockets.delete(deviceId);
+                mainWindow?.webContents.send('mobileScan:device', { deviceId, connected: false });
+            }
+        });
     });
     mobileScanServer.listen(47821, '0.0.0.0');
 }
 
-ipcMain.handle('mobileScan:start', async () => {
+handleEarlyIpc('mobileScan:start', async () => {
     startMobileScanServer();
     if (mobileScanTunnel) { mobileScanTunnel.kill(); mobileScanTunnel = null; }
     for (const socket of mobileScanSockets.values()) socket.close(1000, 'Phiên mới');
@@ -265,8 +331,8 @@ ipcMain.handle('mobileScan:start', async () => {
         setTimeout(() => { if (!settled) { mobileScanTunnel?.kill(); mobileScanTunnel = null; finish(localOrigin, false); } }, 20000);
     });
 });
-ipcMain.handle('mobileScan:stop', () => { mobileScanSession = null; for (const socket of mobileScanSockets.values()) socket.close(1000, 'Phiên đã dừng'); mobileScanSockets.clear(); if (mobileScanTunnel) { mobileScanTunnel.kill(); mobileScanTunnel = null; } return { success: true }; });
-ipcMain.handle('mobileEvidence:start', async (_event, sessionPayload = {}) => {
+handleEarlyIpc('mobileScan:stop', () => { mobileScanSession = null; for (const socket of mobileScanSockets.values()) socket.close(1000, 'Phiên đã dừng'); mobileScanSockets.clear(); if (mobileScanTunnel) { mobileScanTunnel.kill(); mobileScanTunnel = null; } return { success: true }; });
+handleEarlyIpc('mobileEvidence:start', async (_event, sessionPayload = {}) => {
     startMobileScanServer();
     if (mobileEvidenceTunnel) { mobileEvidenceTunnel.kill(); mobileEvidenceTunnel = null; }
     const employee = String(sessionPayload.employee || 'Nhân viên kiểm thử').slice(0, 80);
@@ -322,7 +388,7 @@ ipcMain.handle('mobileEvidence:start', async (_event, sessionPayload = {}) => {
         setTimeout(() => { if (!settled) { mobileEvidenceTunnel?.kill(); mobileEvidenceTunnel = null; finish(localOrigin, false); } }, 20000);
     });
 });
-ipcMain.handle('mobileEvidence:stop', () => {
+handleEarlyIpc('mobileEvidence:stop', () => {
     mobileEvidenceSession = null;
     if (mobileEvidenceTunnel) { mobileEvidenceTunnel.kill(); mobileEvidenceTunnel = null; }
     return { success: true };
@@ -342,7 +408,7 @@ const backendReadyPromise = new Promise((resolve, reject) => {
 let backendLoadStarted = false;
 let backendFallbackTimer = null;
 
-ipcMain.handle('app:waitBackendReady', async () => {
+handleEarlyIpc('app:waitBackendReady', async () => {
     try {
         await backendReadyPromise;
         return { success: true };
@@ -513,24 +579,6 @@ const VIEW_MENU_TEMPLATE = [
     { role: 'togglefullscreen' },
 ];
 
-function isTrustedAppUrl(rawUrl) {
-    try {
-        const parsed = new URL(rawUrl);
-        const isTrustedFilePage = parsed.protocol === 'file:' &&
-            decodeURIComponent(parsed.pathname)
-                .replace(/\\/g, '/')
-                .toLowerCase()
-                .endsWith('/dist/index.html');
-        if (!app.isPackaged) {
-            const isTrustedDevServer = parsed.origin === DEVELOPMENT_SERVER_URL;
-            return isTrustedDevServer || isTrustedFilePage;
-        }
-        return isTrustedFilePage;
-    } catch {
-        return false;
-    }
-}
-
 function isSafeExternalUrl(rawUrl) {
     try {
         const parsed = new URL(rawUrl);
@@ -585,7 +633,7 @@ function configureSessionSecurity() {
 
 // Popup native context menu khi click Edit/View từ React
 ipcMain.handle('menu:popup', (event, menuName) => {
-    if (!isTrustedAppUrl(event.senderFrame?.url || event.sender.getURL())) {
+    if (!isTrustedAppSender(event)) {
         throw new Error('IPC sender không hợp lệ');
     }
     const win = BrowserWindow.fromWebContents(event.sender);

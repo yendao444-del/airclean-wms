@@ -47,7 +47,16 @@ function parseLedger(row) {
   return data;
 }
 
-const isRequired = (entry) => /^(chuyển khu đóng gói|chuyển hàng lẻ|chuyển chờ xuất kho|chuyển khu kiểm hàng|lấy hàng|rút hàng|chờ kiểm chốt hết kiện)/i.test(String(entry?.type || ""));
+const isRequired = (entry) => {
+  const type = String(entry?.type || "");
+  // A FIFO TMDT movement that reaches zero is already verified by the
+  // allocation transaction.  Only a package with a remaining balance needs
+  // end-of-shift counting. Packed lots keep their own component duty.
+  if (/^chuyển chờ xuất kho TMDT/i.test(type)
+      && !String(entry?.unitId || "").toUpperCase().startsWith("PACKED:")
+      && Number(entry?.remaining) <= 0) return false;
+  return /^(hoàn xuất TMDT|hoàn từ đóng gói sẵn|chuyển đóng gói sẵn|chuyển khu đóng gói|chuyển hàng lẻ|chuyển chờ xuất kho|chuyển khu kiểm hàng|lấy hàng|rút hàng|chờ kiểm chốt hết kiện)/i.test(type);
+};
 const isCompleted = (entry) => /^(kiểm cuối ca|kiểm khớp - chốt hết kiện|kiểm lệch - cập nhật tồn thực tế)/i.test(String(entry?.type || ""));
 
 // This ledger is separate from the rolling, 500-entry display history and from
@@ -59,7 +68,24 @@ function applyEvents(ledger, entries) {
     if (!code || !date) continue;
     const timestamp = new Date(entry.createdAt).toISOString();
     carryDuties(ledger, timestamp);
-    if (isRequired(entry)) {
+    const isAutoEmptyTmdt = /^chuyển chờ xuất kho TMDT/i.test(String(entry?.type || ""))
+      && !String(entry?.unitId || "").toUpperCase().startsWith("PACKED:")
+      && Number(entry?.remaining) <= 0;
+    const isSoftwareSyncEmpty = /^đồng bộ (kiện|đóng sẵn) theo tồn phần mềm/i.test(String(entry?.type || ""))
+      && Number(entry?.remaining) === 0;
+    if (isAutoEmptyTmdt || isSoftwareSyncEmpty) {
+      // Resolve any duty created by an older build when the later FIFO export
+      // proves that the package reached zero. This is a migration-safe,
+      // append-only resolution and does not alter Product.stock.
+      for (const day of Object.values(ledger.days)) {
+        const unit = day.units[code];
+        if (unit && !unit.checkedAt) {
+          unit.checkedAt = timestamp;
+          unit.checkedBy = String(entry.actor || "System");
+          unit.resolution = isSoftwareSyncEmpty ? "software-sync-empty" : "auto-empty-tmdt";
+        }
+      }
+    } else if (isRequired(entry)) {
       const day = ledger.days[date] ||= { assignedTo: assigneeFor(date), units: {} };
       day.units[code] = { requiredAt: timestamp, checkedAt: null };
     } else if (isCompleted(entry)) {
@@ -93,7 +119,7 @@ function applyEvents(ledger, entries) {
 }
 
 async function recordShiftEvents(tx, entries) {
-  if (!entries.some((entry) => isRequired(entry) || isCompleted(entry) || ["Tách kiện", "Xóa kiện"].includes(entry.type))) return;
+  if (!entries.some((entry) => isRequired(entry) || isCompleted(entry) || /^(chuyển chờ xuất kho TMDT|đồng bộ (kiện|đóng sẵn) theo tồn phần mềm)/i.test(String(entry?.type || "")) || ["Tách kiện", "Xóa kiện"].includes(entry.type))) return;
   await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${LEDGER_KEY}))`;
   const ledger = parseLedger(await tx.appConfig.findUnique({ where: { key: LEDGER_KEY } }));
   applyEvents(ledger, entries);
@@ -183,7 +209,10 @@ async function reconcileShiftFines(prisma, { now = new Date() } = {}) {
       await tx.appConfig.upsert({ where: { key: "attendanceData" }, create: { key: "attendanceData", value }, update: { value } });
     }
     return { created };
-  }, { timeout: 15000, maxWait: 10000 });
+  // Fine deletion intentionally bypasses the long-lived advisory lock. Never
+  // commit a full-document snapshot read before a concurrent deletion: a
+  // serialization conflict rolls this pass back and the next pass re-reads.
+  }, { isolationLevel: 'Serializable', timeout: 15000, maxWait: 10000 });
 }
 
 module.exports = { LEDGER_KEY, EFFECTIVE_DATE, assigneeFor, deadlineFor, dayKey, applyEvents, policySnapshot, recordShiftEvents, readShiftPolicy, buildFines, reconcileShiftFines };

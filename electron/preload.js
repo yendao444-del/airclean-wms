@@ -118,6 +118,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
         },
     },
 
+    packagePacking: {
+        inventory: () => ipcRenderer.invoke('packagePacking:inventory'),
+        list: (payload) => ipcRenderer.invoke('packagePacking:list', payload),
+        create: (payload) => ipcRenderer.invoke('packagePacking:create', payload),
+        update: (payload) => ipcRenderer.invoke('packagePacking:update', payload),
+    },
     prepack: {
         list: (filters) => ipcRenderer.invoke('prepack:list', filters),
         saveDraft: (data) => ipcRenderer.invoke('prepack:saveDraft', data),
@@ -189,6 +195,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     },
     handlingUnits: {
         getWorkspace: (options) => ipcRenderer.invoke('handlingUnits:getWorkspace', options),
+        getReconciliation: (sku) => ipcRenderer.invoke('handlingUnits:getReconciliation', sku),
+        confirmReconciliation: (data) => ipcRenderer.invoke('handlingUnits:confirmReconciliation', data),
         createUnits: (records) => ipcRenderer.invoke('handlingUnits:createUnits', records),
         issueQrLabels: (data) => ipcRenderer.invoke('handlingUnits:issueQrLabels', data),
         resolveQrLabel: (code) => ipcRenderer.invoke('handlingUnits:resolveQrLabel', code),
@@ -494,7 +502,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
     // Users (NGƯỜI DÙNG / PHÂN QUYỀN)
     users: {
-        getAll: () => ipcRenderer.invoke('users:getAll'),
+        getAll: (includeArchived = false) => ipcRenderer.invoke('users:getAll', includeArchived),
+        setArchived: (id, archived = true) => ipcRenderer.invoke('users:setArchived', id, archived),
         create: (data) => ipcRenderer.invoke('users:create', data),
         update: (id, data) => ipcRenderer.invoke('users:update', id, data),
         updateProfile: (data) => ipcRenderer.invoke('users:updateProfile', data),

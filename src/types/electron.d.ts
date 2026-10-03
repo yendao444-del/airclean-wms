@@ -323,6 +323,12 @@ export interface ElectronAPI {
     }>;
     onStockChanged?: (callback: (data: any) => void) => () => void;
   };
+  packagePacking: {
+    inventory: () => Promise<{ success: boolean; data?: import('./packagePacking').PackingLot[]; error?: string }>;
+    list: (payload: { workDate: string }) => Promise<{ success: boolean; data?: import('./packagePacking').PackingAssignment[]; error?: string }>;
+    create: (payload: { workDate: string; requestKey: string; code: string; packerId?: number; packerIds?: number[]; requestedQty: number; components: Array<{ sku: string; quantity: number }> }) => Promise<{ success: boolean; data?: import('./packagePacking').PackingAssignment | import('./packagePacking').PackingAssignment[]; error?: string }>;
+    update: (payload: { workDate: string; id: string; revision: number; action: 'draft' | 'submit' | 'accept' | 'return'; quantity?: number | null }) => Promise<{ success: boolean; data?: import('./packagePacking').PackingAssignment; error?: string }>;
+  };
   prepack: {
     list: (filters?: { status?: string; evidenceStartDate?: string; evidenceEndDate?: string; workDateKey?: string }) => Promise<{ success: boolean; data?: any[]; error?: string }>;
     saveDraft: (data: { batchId: number; workDateKey: string; quantity: number | null }) => Promise<{ success: boolean; data?: any; error?: string }>;
@@ -497,6 +503,8 @@ export interface ElectronAPI {
     }>;
   };
   handlingUnits: {
+    getReconciliation: (sku: string) => Promise<{ success: boolean; data?: import('./handlingUnitReconciliation').ReconciliationPreview; error?: string }>;
+    confirmReconciliation: (data: import('./handlingUnitReconciliation').ReconciliationPayload) => Promise<{ success: boolean; data?: { duplicate?: boolean }; error?: string }>;
     getWorkspace: (options?: { purpose?: 'stock-check' }) => Promise<{
       success: boolean;
       data?: {
@@ -506,6 +514,7 @@ export interface ElectronAPI {
         qrLabels?: any[];
         suppliers?: any[];
         recentTransactions?: any[];
+        packedInventory?: import('./packagePacking').PackingLot[];
       };
       error?: string;
     }>;
@@ -592,6 +601,7 @@ export interface ElectronAPI {
       items: Array<{
         code: string;
         expectedQuantity: number;
+        expectedUpdatedAt?: string;
         actualQuantity: number;
         reason?: string;
         note?: string;
@@ -1765,7 +1775,8 @@ export interface ElectronAPI {
     delete: (id: number) => Promise<{ success: boolean; error?: string }>;
   };
   users: {
-    getAll: () => Promise<{ success: boolean; data?: any[]; error?: string }>;
+    getAll: (includeArchived?: boolean) => Promise<{ success: boolean; data?: any[]; error?: string }>;
+    setArchived: (id: number, archived?: boolean) => Promise<{ success: boolean; archived?: boolean; error?: string }>;
     create: (
       data: any,
     ) => Promise<{ success: boolean; data?: any; error?: string }>;
