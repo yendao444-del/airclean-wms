@@ -19,11 +19,9 @@ async function main() {
   authUrl.searchParams.set('connection_limit', '1');
   authUrl.searchParams.set('pool_timeout', '3');
   authUrl.searchParams.set('connect_timeout', '5');
-  // Diagnostics additionally bound underlying socket work, even if the local
-  // deadline expires. No server or production connection setting is changed.
+  // Use the application's socket policy; a diagnostic-only override would
+  // hide the stalled-connection behavior of the shipped runtime.
   const diagnosticUrl = new URL(mainUrl);
-  diagnosticUrl.searchParams.set('socket_timeout', '30');
-  authUrl.searchParams.set('socket_timeout', '5');
   const prisma = new PrismaClient({ datasources: { db: { url: diagnosticUrl.toString() } } });
   const auth = new PrismaClient({ datasources: { db: { url: authUrl.toString() } } });
   const concurrency = Math.max(1, Number(diagnosticUrl.searchParams.get('connection_limit')) - 1);

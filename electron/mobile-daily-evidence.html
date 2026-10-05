@@ -145,10 +145,33 @@
     }
     function closeTask() { selectedFiles = []; previewUrls.forEach(URL.revokeObjectURL); previewUrls = []; activeTask = null; editorView.classList.remove('active'); listView.style.display = 'block'; renderTaskList(); }
     async function loadSession() {
-      const response = await fetch(`/daily-evidence/session?session=${encodeURIComponent(session)}`);
-      const result = await response.json().catch(() => ({}));
-      if (!response.ok || !result.success) throw new Error(result.error || 'Không thể mở phiên QR.');
-      sessionData = result; renderTaskList();
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 60000);
+      try {
+        const response = await fetch(`/daily-evidence/session?session=${encodeURIComponent(session)}`, { signal: controller.signal });
+        const result = await response.json().catch(() => ({}));
+        if (!response.ok || !result.success) throw new Error(result.error || 'Không thể mở phiên QR.');
+        sessionData = result; renderTaskList();
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+    function showSessionLoadError(error) {
+      document.querySelector('#summaryText').textContent = 'Chưa tải được công việc. Bấm Thử lại để kết nối lại.';
+      taskList.replaceChildren();
+      const box = document.createElement('div');
+      box.className = 'empty';
+      box.textContent = error?.name === 'AbortError' ? 'Kết nối quá lâu. Vui lòng thử lại.' : error?.message || 'Không thể tải công việc.';
+      const retry = document.createElement('button');
+      retry.type = 'button';
+      retry.className = 'capture secondary';
+      retry.textContent = 'Thử lại';
+      retry.onclick = async () => {
+        retry.disabled = true;
+        retry.textContent = 'Đang kết nối…';
+        try { await loadSession(); } catch (nextError) { showSessionLoadError(nextError); }
+      };
+      taskList.append(box, retry);
     }
     document.querySelector('#back').onclick = closeTask;
     captureButton.onclick = () => input.click();
@@ -194,11 +217,29 @@
         const response = await fetch(`/daily-evidence/submit?session=${encodeURIComponent(session)}`, { method:'POST', headers:{ 'content-type':'application/json' }, body:JSON.stringify({ taskId, images }) });
         const result = await response.json().catch(() => ({}));
         if (!response.ok || !result.success) throw new Error(result.error || 'Không thể hoàn tất công việc.');
-        await loadSession(); selectedFiles = []; renderPhotos(); setStatus('success', 'Đã nộp bằng chứng và hoàn tất công việc.'); setTimeout(closeTask, 900);
+        // The submit is already committed at this point. If the follow-up
+        // refresh times out, keep the success state instead of making the
+        // operator think the upload failed and retrying the same tokens.
+        selectedFiles = [];
+        if (sessionData?.tasks) {
+          sessionData = {
+            ...sessionData,
+            tasks: sessionData.tasks.map(task => task.id === taskId ? { ...task, completed: true } : task),
+          };
+        }
+        renderPhotos();
+        setStatus('success', 'Đã nộp bằng chứng và hoàn tất công việc.');
+        try {
+          await loadSession();
+        } catch (refreshError) {
+          console.warn('Không tải lại được danh sách sau khi nộp:', refreshError?.message || refreshError);
+          renderTaskList();
+        }
+        setTimeout(closeTask, 900);
       } catch (error) { setStatus('error', error?.message || 'Không thể gửi ảnh. Vui lòng thử lại.'); renderPhotos(); }
     };
     addEventListener('pagehide', () => previewUrls.forEach(URL.revokeObjectURL));
-    loadSession().catch(error => { taskList.replaceChildren(); const box = document.createElement('div'); box.className = 'empty'; box.textContent = error?.message || 'Phiên QR không hợp lệ hoặc đã hết hạn.'; taskList.append(box); });
+    loadSession().catch(showSessionLoadError);
   </script>
 </body>
 </html>

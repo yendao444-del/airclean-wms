@@ -12,6 +12,9 @@ function desktopPrismaUrl(value, { transactions = false } = {}) {
     connection_limit: transactions ? 2 : 4,
     pool_timeout: 10,
     connect_timeout: 10,
+    // A JS deadline does not cancel Prisma's engine request. Bound the socket
+    // too so stalled reads eventually release their occupied scheduler slots.
+    socket_timeout: transactions ? 120 : 30,
   };
   for (const [key, maximum] of Object.entries(limits)) {
     const configured = Number(url.searchParams.get(key));

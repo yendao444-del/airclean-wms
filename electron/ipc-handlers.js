@@ -19775,26 +19775,21 @@ async function getMobileDailyEvidenceActor(session) {
   ) {
     throw new Error("Phiên điện thoại đã hết hạn hoặc tài khoản đã đăng xuất.");
   }
-  const user = await prisma.user.findUnique({
-    where: { id: session.ownerUserId },
-    select: { id: true, username: true, fullName: true, role: true, status: true },
-  });
-  if (!user || user.status !== "active") {
-    throw new Error("Tài khoản không còn hoạt động.");
-  }
-  return {
-    id: user.id,
-    username: user.username,
-    fullName: user.fullName || user.username,
-    role: user.role,
-  };
+  // Share the isolated, bounded actor read with desktop requests instead of
+  // waiting behind the report queue just to validate a phone session.
+  return getCurrentActor();
 }
 
-async function getMobileDailyEvidenceTargetActor(session) {
-  const user = await prisma.user.findUnique({
+async function getMobileDailyEvidenceTargetActor(session, ownerActor) {
+  if (ownerActor && Number(ownerActor.id) === Number(session.targetUserId)) return ownerActor;
+  const args = {
     where: { id: session.targetUserId },
     select: { id: true, username: true, fullName: true, role: true, status: true },
-  });
+  };
+  const user = await withIsolatedReadFallback(
+    () => getPrismaAuth().user.findUnique(args),
+    () => prisma.user.findUnique(args),
+  );
   if (!user || user.status !== "active") {
     throw new Error("Nhân viên được chọn không còn hoạt động.");
   }
@@ -19810,27 +19805,45 @@ async function listMobileDailyEvidenceTasks(actor, sessionTaskIds = null) {
   const retainedTaskIds = Array.isArray(sessionTaskIds)
     ? sessionTaskIds.map(Number).filter(Number.isInteger)
     : [];
-  const candidates = await prisma.dailyTask.findMany({
-    where: retainedTaskIds.length > 0
-      ? { id: { in: retainedTaskIds } }
-      : { status: { in: ["pending", "in_progress", "overdue"] } },
-    orderBy: [{ dueDate: "asc" }, { id: "asc" }],
-    take: 200,
-  });
-  return candidates
-    .filter((task) => {
-      const attachments = parseTaskAttachments(task.attachments);
-      return (
-        attachments?.evidence?.required &&
-        !attachments?.archive?.archived &&
-        !attachments?.archive?.archivedAt &&
-        task.status !== "cancelled" &&
-        task.assignee &&
-        isFixedAssignee(attachments) &&
-        actorOwnsTask(actor, task)
-      );
-    })
-    .slice(0, MOBILE_DAILY_EVIDENCE_MAX_TASKS)
+  const matched = [];
+  let cursor;
+  // Ownership is stored in attachment JSON. Apply the output limit after
+  // checking ownership, paging so other employees cannot hide later tasks.
+  do {
+    const candidates = await prisma.dailyTask.findMany({
+      where: retainedTaskIds.length > 0
+        ? { id: { in: retainedTaskIds } }
+        : { status: { in: ["pending", "in_progress", "overdue"] } },
+      orderBy: [{ dueDate: "asc" }, { id: "asc" }],
+      select: {
+        id: true,
+        title: true,
+        category: true,
+        dueDate: true,
+        status: true,
+        assignee: true,
+        attachments: true,
+      },
+      take: 200,
+      ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
+    });
+    matched.push(...candidates
+      .filter((task) => {
+        const attachments = parseTaskAttachments(task.attachments);
+        return (
+          attachments?.evidence?.required &&
+          !attachments?.archive?.archived &&
+          !attachments?.archive?.archivedAt &&
+          task.status !== "cancelled" &&
+          task.assignee &&
+          isFixedAssignee(attachments) &&
+          actorOwnsTask(actor, task)
+        );
+      }));
+    if (candidates.length < 200 || matched.length >= MOBILE_DAILY_EVIDENCE_MAX_TASKS) break;
+    cursor = candidates[candidates.length - 1].id;
+  } while (cursor);
+  return matched.slice(0, MOBILE_DAILY_EVIDENCE_MAX_TASKS)
     .map((task) => {
       const attachments = parseTaskAttachments(task.attachments);
       return {
@@ -19875,7 +19888,7 @@ function ensureMobileDailyEvidenceServer() {
 
       const session = getMobileDailyEvidenceSession(requestUrl);
       const actor = await getMobileDailyEvidenceActor(session);
-      const targetActor = await getMobileDailyEvidenceTargetActor(session);
+      const targetActor = await getMobileDailyEvidenceTargetActor(session, actor);
       if (request.method === "GET" && requestUrl.pathname === "/daily-evidence/session") {
         const tasks = await listMobileDailyEvidenceTasks(targetActor, session.taskIds);
         writeMobileDailyEvidenceJson(response, 200, {
@@ -36387,7 +36400,9 @@ async function getFallbackAnnouncements() {
   let attendanceData = {};
   let updatedAt;
   try {
-    const snapshot = await getAttendanceDataSnapshot();
+    // Announcements only need policy/config fields; avoid fetching the large
+    // locked payroll snapshots stored in the full attendance document.
+    const snapshot = await getAttendanceCoreSnapshot();
     attendanceData = snapshot.data || {};
     updatedAt = snapshot.updatedAt;
   } catch (error) {
@@ -36543,7 +36558,9 @@ function isTargetedPackingAnnouncement(announcement) {
 
 async function getAttendanceEmployeeUsernames() {
   try {
-    const snapshot = await getAttendanceDataSnapshot();
+    // Recipient matching only needs employee usernames, so use the compact
+    // snapshot and keep the multi-megabyte payroll payload off this read path.
+    const snapshot = await getAttendanceCoreSnapshot();
     const attendanceData = snapshot.data || {};
     return new Set(
       (Array.isArray(attendanceData?.employees) ? attendanceData.employees : [])
@@ -39391,11 +39408,11 @@ function ensureFaceService() {
       // 2. Kiểm tra port 5001 đã có service sẵn chưa (zombie hoặc process từ lần trước)
       try {
         const data = await faceServiceFetch("/status", { timeoutMs: 750 });
-        if (isValidFaceServiceStatus(data)) {
+        if (isLiveFaceService(data)) {
           console.log(
             "[Face] ✅ Phát hiện service đang chạy sẵn trên port 5001",
           );
-          faceServiceReady = true;
+          faceServiceReady = data.status === "ready";
           resetFaceServiceIdleTimer();
           return true;
         }
