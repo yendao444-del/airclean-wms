@@ -54,6 +54,9 @@
 .packing-loading { display: grid; place-items: center; min-height: 260px; }
 .packing-component-form { display: grid; grid-template-columns: 1fr 130px 32px; gap: 10px; align-items: center; }
 .packing-review { display: flex; justify-content: flex-end; gap: 10px; }
+.packing-row-actions { display: flex; flex-direction: column; gap: 4px; }
+.packing-table .packing-delete.ant-btn { height: 28px; font-size: 12px; }
+.packing-table .packing-delete.ant-btn .anticon { font-size: 14px; }
 .packing-history article { display: grid; grid-template-columns: 1fr 1fr 1fr 170px; padding: 18px; gap: 16px; border-bottom: 1px solid #e3eaf2; }
 .packing-code:focus-visible, .packing-status:focus-visible, .hu-module-tab:focus-visible { outline: 2px solid #007cde; outline-offset: 3px; }
 @media (max-width: 1300px) { .packing-table td, .packing-table th { padding: 10px 9px; } .packing-table { font-size: 13px; } .packing-table strong { font-size: 15px; } .packing-table small { font-size: 12px; } .packing-table .ant-btn { font-size: 12px; } }

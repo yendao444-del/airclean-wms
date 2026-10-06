@@ -327,7 +327,7 @@ export interface ElectronAPI {
     inventory: () => Promise<{ success: boolean; data?: import('./packagePacking').PackingLot[]; error?: string }>;
     list: (payload: { workDate: string }) => Promise<{ success: boolean; data?: import('./packagePacking').PackingAssignment[]; error?: string }>;
     create: (payload: { workDate: string; requestKey: string; code: string; packerId?: number; packerIds?: number[]; requestedQty: number; components: Array<{ sku: string; quantity: number }> }) => Promise<{ success: boolean; data?: import('./packagePacking').PackingAssignment | import('./packagePacking').PackingAssignment[]; error?: string }>;
-    update: (payload: { workDate: string; id: string; revision: number; action: 'draft' | 'submit' | 'accept' | 'return'; quantity?: number | null }) => Promise<{ success: boolean; data?: import('./packagePacking').PackingAssignment; error?: string }>;
+    update: (payload: { workDate: string; id: string; revision: number; action: 'draft' | 'submit' | 'accept' | 'return' | 'delete'; quantity?: number | null }) => Promise<{ success: boolean; data?: import('./packagePacking').PackingAssignment; error?: string }>;
   };
   prepack: {
     list: (filters?: { status?: string; evidenceStartDate?: string; evidenceEndDate?: string; workDateKey?: string }) => Promise<{ success: boolean; data?: any[]; error?: string }>;

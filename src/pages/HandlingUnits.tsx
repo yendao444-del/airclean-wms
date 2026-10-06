@@ -52,8 +52,11 @@ import { Warehouse2DMap } from "../components/Warehouse2DMap";
 import Modal from "../components/HandlingUnitModal";
 import HandlingUnitPrintLabel from "../components/HandlingUnitPrintLabel";
 import { prepareHandlingUnitPrintUnits } from "../lib/handlingUnitPrintNumbers";
+import { packedStockForSku, summarizeHandlingUnitAllocation, summarizePackedInventory, suggestHandlingUnitAllocation } from "../lib/handlingUnitAllocation";
+import HandlingUnitPackedStock from "../components/HandlingUnitPackedStock";
 import HandlingUnitStockHistory from "../components/HandlingUnitStockHistory";
 import { useAuth } from "../contexts/AuthContext";
+import { canCreatePackagePacking } from "../lib/packagePackingPermissions";
 import PrepackManagement from "./PrepackManagement";
 import type { PackingLot } from "../types/packagePacking";
 import { compareHandlingUnitPickOrder } from "../../electron/handling-unit-pick-order.mjs";
@@ -872,7 +875,7 @@ let handlingUnitsWorkspaceCache: Pick<
 > | null = null;
 
 export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit?: () => void; initialTab?: "units" | "prepack" }) {
-  const { user } = useAuth();
+  const { user, isRolePreview } = useAuth();
   const isAdmin = user?.role === "admin";
   const [activeModuleTab, setActiveModuleTab] = useState<"units" | "prepack" | "history">(initialTab);
   const moduleContentRef = useRef<HTMLDivElement>(null);
@@ -1889,24 +1892,18 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
     return index;
   }, [workspace.register]);
 
-  const packedBySku = useMemo(() => {
-    const totals = new Map<string, number>();
-    for (const lot of workspace.packedInventory) for (const component of lot.components) {
-      totals.set(component.sku, (totals.get(component.sku) || 0) + Math.max(0, lot.packedQty - (lot.issuedQty || 0)) * component.quantity);
-    }
-    return totals;
-  }, [workspace.packedInventory]);
+  const packedSummary = useMemo(() => summarizePackedInventory(workspace.packedInventory), [workspace.packedInventory]);
+  const packedBySku = packedSummary.quantityBySku;
+  const packedComboBySku = packedSummary.comboCountBySku;
   const allocationGaps = useMemo(() =>
     workspace.catalog
       .map((item) => {
-        const allocated = (unitsBySku.get(item.sku) || []).reduce(
-          (total, unit) => total + Math.max(0, Number(unit.currentPcs || 0)),
-          0,
+        const allocation = summarizeHandlingUnitAllocation(
+          Number(item.stock || 0), unitsBySku.get(item.sku) || [], packedBySku.get(item.sku) || 0,
         );
         return {
           ...item,
-          allocated,
-          missingQuantity: Math.max(0, Number(item.stock || 0) - allocated - (packedBySku.get(item.sku) || 0)),
+          missingQuantity: allocation.unallocatedQuantity,
         };
       })
       .filter((item) => item.missingQuantity > 0)
@@ -2097,6 +2094,12 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
   const emptyCount = selectedStats.empty;
   const splitCount = selectedStats.split;
   const activeSequenceCount = activeSelectedUnits.length;
+  const selectedAllocation = useMemo(() => summarizeHandlingUnitAllocation(
+    Number(selected?.stock || 0), selectedUnits, packedBySku.get(selected?.sku || "") || 0,
+  ), [selected, selectedUnits, packedBySku]);
+  const selectedPackedStock = useMemo(() => packedStockForSku(workspace.packedInventory, selected?.sku || ""),
+    [workspace.packedInventory, selected?.sku]);
+  const selectedPackedComboCount = selected ? Number(packedComboBySku.get(selected.sku) || 0) : 0;
 
   const displayedUnits = useMemo(() => {
     if (statusFilter === "all")
@@ -2433,16 +2436,17 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
 
   const currentAllocAllocated = useMemo(() => {
     if (!currentAllocProduct) return 0;
-    return (packedBySku.get(currentAllocProduct.sku) || 0) + (unitsBySku.get(currentAllocProduct.sku) || []).reduce(
-      (sum, unit) => sum + unit.currentPcs,
-      0,
-    );
+    return summarizeHandlingUnitAllocation(
+      Number(currentAllocProduct.stock || 0), unitsBySku.get(currentAllocProduct.sku) || [],
+      packedBySku.get(currentAllocProduct.sku) || 0,
+    ).allocatedQuantity;
   }, [currentAllocProduct, unitsBySku, packedBySku]);
 
   const currentAllocDifference = useMemo(() => {
     if (!currentAllocProduct) return 0;
     return currentAllocAllocated - Number(currentAllocProduct.stock || 0);
   }, [currentAllocProduct, currentAllocAllocated]);
+  const currentAllocAvailable = Math.max(0, -currentAllocDifference);
 
   const totalCalculatedQuantity = useMemo(() => {
     if (watchAllocMethod === "LE") {
@@ -2567,6 +2571,12 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
       }
 
       const totalPcs = created.reduce((s, u) => s + u.currentPcs, 0);
+      const available = summarizeHandlingUnitAllocation(
+        Number(targetSku.stock || 0), unitsBySku.get(targetSku.sku) || [], packedBySku.get(targetSku.sku) || 0,
+      ).unallocatedQuantity;
+      if (totalPcs > available) {
+        throw new Error(`Chỉ còn ${fmt(available)} ${unitName} chưa phân kiện; không thể tạo thêm ${fmt(totalPcs)} ${unitName}. Nếu số kiểm thực tế cao hơn tồn phần mềm, hãy đối chiếu kiểm kho trước.`);
+      }
       const nextRegister = [...workspace.register, ...created];
 
       const createUnits = window.electronAPI?.handlingUnits?.createUnits;
@@ -2615,24 +2625,28 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
     }
   };
 
-  const openCreatePackageModal = (targetSku?: string) => {
+  const openCreatePackageModal = (targetSku?: string, useAvailable = false) => {
     const skuToUse = targetSku || selected?.sku || workspace.catalog[0]?.sku;
     const product = workspace.catalog.find((item) => item.sku === skuToUse);
     const spec = latestPackagingSpec(workspace.packagingSpecs, skuToUse);
-    const method = normalizeUnitName(product?.unitName).includes("hop")
+    let method = normalizeUnitName(product?.unitName).includes("hop")
       ? "THUNG"
       : spec
         ? packagingMethodForSpec(spec)
         : "TAI";
     const methodSpec = latestPackagingSpec(workspace.packagingSpecs, skuToUse, method);
-    const factor = methodSpec?.conversionFactor || (method === "THUNG" ? 50 : 1200);
+    const available = summarizeHandlingUnitAllocation(
+      Number(product?.stock || 0), unitsBySku.get(skuToUse || "") || [], packedBySku.get(skuToUse || "") || 0,
+    ).unallocatedQuantity;
+    const suggestion = suggestHandlingUnitAllocation(available, methodSpec?.conversionFactor || (method === "THUNG" ? 50 : 300));
+    if (useAvailable && suggestion.fullPackages === 0) method = "LE";
 
     allocationForm.setFieldsValue({
       sku: skuToUse,
       packageMethod: method,
-      packageCount: 1,
-      conversionFactor: methodSpec?.conversionFactor || factor,
-      looseQty: undefined,
+      packageCount: useAvailable ? Math.max(1, suggestion.fullPackages) : 1,
+      conversionFactor: suggestion.size,
+      looseQty: useAvailable && method === "LE" ? Math.min(300, available) : undefined,
       zone: "A1",
     });
     setShowAllocation(true);
@@ -3252,6 +3266,8 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
                             .length;
                           const colorInfo = getColorDot(item.color, item.sku);
                           const missingQuantity = Number(allocationGapBySku.get(item.sku) || 0);
+                          const packedQuantity = Number(packedBySku.get(item.sku) || 0);
+                          const packedComboCount = Number(packedComboBySku.get(item.sku) || 0);
                           // Each variant is identified by its actual SKU in the catalog.
                           const shortName = item.sku;
                           return (
@@ -3282,6 +3298,8 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
                                     <b>{fmt(item.stock)}</b> {item.unitName} ·{" "}
                                     {unitCount} kiện
                                   </span>
+                                  {missingQuantity > 0 && <span className="hu-sku-unallocated">Còn {fmt(missingQuantity)} {item.unitName} chưa phân kiện</span>}
+                                  {packedComboCount > 0 && <span className="hu-sku-prepacked">Đóng sẵn: {fmt(packedComboCount)} combo · {fmt(packedQuantity)} {item.unitName}</span>}
                                 </div>
                               </div>
                             </button>
@@ -3315,8 +3333,8 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
             <div>
               <Typography.Title level={2}>Quản lý kiện hàng</Typography.Title>
             </div>
-            {activeModuleTab === "prepack" && (isAdmin || user?.role === "manager") && (
-              <Button className="hu-packing-assign" type="primary" icon={<UserAddOutlined />} onClick={() => setPrepackCreateRequest(value => value + 1)}>Giao việc</Button>
+            {activeModuleTab === "prepack" && canCreatePackagePacking(user?.role, isRolePreview) && (
+              <Button className="hu-packing-assign" type="primary" icon={<UserAddOutlined />} onClick={() => setPrepackCreateRequest(value => value + 1)}>{isAdmin || user?.role === "manager" ? 'Giao việc' : 'Tạo đóng gói'}</Button>
             )}
           </header>
           <div className="hu-module-tabs" role="tablist" aria-label="Phân hệ quản lý kiện hàng">
@@ -3359,6 +3377,16 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
                           </span>
                         </div>
                       </Tooltip>
+                      {activeModuleTab === "units" && <>
+                        <div className="hu-metric-chip">
+                          <span className="hu-chip-label">Trong kiện:</span>
+                          <span className="hu-chip-val"><strong>{fmt(selectedAllocation.packagedQuantity)} {selected.unitName}</strong></span>
+                        </div>
+                        {selectedAllocation.packedQuantity > 0 && <div className="hu-metric-chip">
+                          <span className="hu-chip-label">Đóng sẵn:</span>
+                          <span className="hu-chip-val"><strong>{fmt(selectedPackedComboCount)} combo · {fmt(selectedAllocation.packedQuantity)} {selected.unitName}</strong></span>
+                        </div>}
+                      </>}
                     </div>
                   </div>
                 </div>
@@ -3413,6 +3441,23 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
                   </Dropdown.Button>
                 </div>
               </header>
+              {activeModuleTab === "units" && <HandlingUnitPackedStock rows={selectedPackedStock} unitName={selected.unitName}
+                onOpen={() => { setActiveModuleTab("prepack"); void loadWorkspace(true); }} />}
+              {activeModuleTab === "units" && (selectedAllocation.unallocatedQuantity > 0 || selectedAllocation.excessQuantity > 0) && (
+                <div className="hu-allocation-notice">
+                  <Alert showIcon type="warning"
+                    title={selectedAllocation.unallocatedQuantity > 0
+                      ? `Còn ${fmt(selectedAllocation.unallocatedQuantity)} ${selected.unitName} chưa phân kiện`
+                      : `Tổng đã phân vượt tồn phần mềm ${fmt(selectedAllocation.excessQuantity)} ${selected.unitName}`}
+                    description={selectedAllocation.unallocatedQuantity > 0
+                      ? `${activeSelectedUnits.length} kiện đang hoạt động chứa ${fmt(selectedAllocation.packagedQuantity)} ${selected.unitName}${selectedAllocation.packedQuantity > 0 ? `; hàng đóng sẵn dùng ${fmt(selectedAllocation.packedQuantity)} ${selected.unitName}` : ""}. Phần còn lại chưa có mã kiện. Tạo kiện theo số đếm thực tế; nếu khác tồn phần mềm, cần đối chiếu kiểm kho.`
+                      : "Kiểm tra tồn trong kiện và hàng đóng sẵn trước khi tạo thêm kiện."}
+                    action={selectedAllocation.unallocatedQuantity > 0 ? <Button size="small" onClick={() => openCreatePackageModal(selected.sku, true)}>
+                      {selectedAllocation.unallocatedQuantity < 300 ? `Phân ${fmt(selectedAllocation.unallocatedQuantity)} ${selected.unitName} còn lại` : "Phân phần tồn còn lại"}
+                    </Button> : undefined}
+                  />
+                </div>
+              )}
               <div className="hu-physical-toolbar">
                 <div className="hu-toolbar-left">
                   <span className="hu-toolbar-title">
@@ -5285,6 +5330,7 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
         onOk={allocateUnits}
         okText="Tạo kiện ngay"
         confirmLoading={isAllocating}
+        okButtonProps={{ disabled: !currentAllocProduct || totalCalculatedQuantity > currentAllocAvailable || currentAllocAvailable <= 0 }}
         width={940}
         destroyOnHidden
         className="hu-create-package-modal"
@@ -5329,7 +5375,7 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
                   if (method === "TAI" || method === "THUNG") {
                     allocationForm.setFieldValue(
                       "conversionFactor",
-                      spec?.conversionFactor || (method === "THUNG" ? 50 : 1200),
+                      suggestHandlingUnitAllocation(0, spec?.conversionFactor || (method === "THUNG" ? 50 : 300)).size,
                     );
                   } else {
                     allocationForm.setFieldValue("looseQty", undefined);
@@ -5364,13 +5410,13 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
                 </div>
                 <div className="hu-alloc-sku-stats">
                   <div>
-                    <small>TỒN QUẢN LÝ KIỆN</small>
+                    <small>ĐÃ PHÂN KIỆN / ĐÓNG SẴN</small>
                     <b>
                       {fmt(currentAllocAllocated)} {currentAllocProduct.unitName}
                     </b>
                   </div>
                   <div>
-                    <small>TỒN PHẦN MỀM THAM KHẢO</small>
+                    <small>TỒN PHẦN MỀM</small>
                     <b>
                       {fmt(currentAllocProduct.stock)} {currentAllocProduct.unitName}
                     </b>
@@ -5380,13 +5426,18 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
                       currentAllocDifference !== 0 ? "has-unallocated" : ""
                     }
                   >
-                    <small>CHÊNH LỆCH ĐỐI CHIẾU</small>
+                    <small>{currentAllocDifference > 0 ? "VƯỢT TỒN PHẦN MỀM" : "CÒN CHƯA PHÂN KIỆN"}</small>
                     <b>
-                      {fmtSigned(currentAllocDifference)} {currentAllocProduct.unitName}
+                      {fmt(Math.abs(currentAllocDifference))} {currentAllocProduct.unitName}
                     </b>
                   </div>
                 </div>
               </div>
+            )}
+            {currentAllocAvailable > 0 && currentAllocAvailable < 300 && (
+              <Button size="small" onClick={() => allocationForm.setFieldsValue({ packageMethod: "LE", looseQty: currentAllocAvailable })}>
+                Tạo kiện lẻ {fmt(currentAllocAvailable)} {currentAllocUnitName}
+              </Button>
             )}
           </div>
 
@@ -5535,6 +5586,10 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
                 Đơn vị cơ sở: {currentAllocUnitName}
               </Tag>
             </div>
+            {totalCalculatedQuantity > currentAllocAvailable && <Alert showIcon type="warning"
+              title={`Chỉ còn ${fmt(currentAllocAvailable)} ${currentAllocUnitName} chưa phân kiện`}
+              description={`Số lượng đang chọn vượt phần có thể phân ${fmt(totalCalculatedQuantity - currentAllocAvailable)} ${currentAllocUnitName}. Chọn kiện lẻ hoặc giảm số lượng; nếu số đếm thực tế cao hơn tồn phần mềm, cần đối chiếu kiểm kho trước.`}
+            />}
           </div>
 
           {/* 5. VỊ TRÍ LƯU KHO & THÔNG TIN PHIẾU */}

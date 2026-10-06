@@ -264,6 +264,70 @@
   flex-wrap: wrap;
   font-size: 10px;
 }
+.hu-sku-unallocated {
+  flex-basis: 100%;
+  color: #9a6700;
+}
+.hu-sku-prepacked {
+  flex-basis: 100%;
+  color: #0369a1;
+}
+.hu-packed-stock {
+  margin: 0 24px 16px;
+  padding: 14px;
+  border: 1px solid #cde9df;
+  border-radius: 10px;
+  background: #f6fcf9;
+}
+.hu-packed-stock-heading,
+.hu-packed-stock-card-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.hu-packed-stock-heading > div {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.hu-packed-stock-heading strong { color: #166534; }
+.hu-packed-stock-heading span { color: #475569; font-size: 12px; }
+.hu-packed-stock-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(260px, 100%), 1fr));
+  gap: 10px;
+  margin-top: 12px;
+}
+.hu-packed-stock-card {
+  padding: 12px;
+  border: 1px solid #dcebe5;
+  border-radius: 8px;
+  background: #fff;
+  min-width: 0;
+}
+.hu-packed-stock-card-heading strong { overflow-wrap: anywhere; }
+.hu-packed-stock-card-heading .ant-tag { margin: 0; }
+.hu-packed-stock-quantity { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; margin: 10px 0 6px; }
+.hu-packed-stock-quantity b { font-size: 19px; color: #166534; }
+.hu-packed-stock-quantity span { color: #334155; }
+.hu-packed-stock-card small,
+.hu-packed-stock p { color: #64748b; font-size: 12px; }
+.hu-packed-stock p { margin: 10px 0 0; }
+.hu-allocation-notice {
+  margin: 0 24px 16px;
+}
+.hu-allocation-notice .ant-alert {
+  flex-wrap: wrap;
+}
+.hu-allocation-notice .ant-alert-content {
+  min-width: 180px;
+}
+.hu-allocation-notice .ant-alert-action {
+  margin-block: 4px;
+}
 .hu-sku-code {
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   color: #94a3b8;

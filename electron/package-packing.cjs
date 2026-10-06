@@ -214,14 +214,24 @@ function createPackagePackingService({ getDb, getSession, recordTransfers }) {
     },
     async create(payload) {
       return mutate(payload, async (tx, actor, state) => {
-        if (!manager(actor)) throw new Error('Chỉ quản lý được giao việc.');
+        if (!manager(actor) && actor.role !== 'staff') throw new Error('Bạn không có quyền tạo công việc đóng gói.');
+        // Staff ownership comes from the authenticated session, never the payload.
+        const self = manager(actor) ? null : await tx.user.findUnique({ where: { username: actor.username } });
+        if (!manager(actor) && (!self || self.status !== 'active')) throw new Error('Nhân viên không còn hoạt động.');
+        if (self) {
+          const requestedIds = [...(Array.isArray(payload.packerIds) ? payload.packerIds : []), ...(payload.packerId == null ? [] : [payload.packerId])];
+          if (requestedIds.some(id => Number(id) !== self.id)) throw new Error('Chỉ được tạo công việc đóng gói cho chính bạn.');
+        }
         const requestKey = String(payload.requestKey || '');
         if (!/^[a-zA-Z0-9-]{16,80}$/.test(requestKey)) throw new Error('Mã chống tạo trùng không hợp lệ.');
         const existing = state.rows.filter(row => row.requestKey === requestKey);
-        if (existing.length) return existing.length === 1 ? existing[0] : existing;
+        if (existing.length) {
+          if (self && existing.some(row => row.packerUsername !== actor.username || row.events?.[0]?.actor !== actor.username)) throw new Error('Mã tạo công việc đã được sử dụng. Vui lòng tạo lại.');
+          return existing.length === 1 ? existing[0] : existing;
+        }
         const code = String(payload.code || '').trim();
         if (!code || code.length > 80) throw new Error('Nhập tên hoặc mã combo (tối đa 80 ký tự).');
-        const rawPackerIds = Array.isArray(payload.packerIds) ? payload.packerIds : [payload.packerId];
+        const rawPackerIds = self ? [self.id] : Array.isArray(payload.packerIds) ? payload.packerIds : [payload.packerId];
         const packerIds = [...new Set(rawPackerIds.map(Number).filter(id => Number.isInteger(id) && id > 0))];
         if (!packerIds.length) throw new Error('Hãy chọn ít nhất một nhân viên.');
         const employees = [];
@@ -274,8 +284,15 @@ function createPackagePackingService({ getDb, getSession, recordTransfers }) {
         const row = state.rows.find(item => item.id === payload.id);
         if (!row) throw new Error('Không tìm thấy công việc.');
         assertOwner(actor, row);
-        if (row.revision !== payload.revision) throw new Error('Công việc đã thay đổi trên máy khác. Vui lòng tải lại.');
         const action = payload.action;
+        if (action === 'delete') {
+          if (!manager(actor) && actor.role !== 'staff') throw new Error('Bạn không có quyền xóa công việc đóng gói.');
+          // Retain the row and request key for audit/idempotency. Deletion only
+          // hides never-submitted work; it never refunds or modifies stock.
+          if (row.status === 'deleted' && payload.revision === row.revision - 1) return row;
+        }
+        if (row.revision !== payload.revision) throw new Error('Công việc đã thay đổi trên máy khác. Vui lòng tải lại.');
+        if (row.status === 'deleted') throw new Error('Công việc đã xóa. Vui lòng tải lại.');
         if (action === 'draft' || action === 'submit') {
           if (row.status !== 'draft') throw new Error('Công việc đã gửi xác nhận.');
           const value = payload.quantity === null && action === 'draft' ? null : quantity(payload.quantity);
@@ -294,6 +311,13 @@ function createPackagePackingService({ getDb, getSession, recordTransfers }) {
           const lot = inventory.lots.find(item => item.assignmentId === row.id);
           if (lot) lot.status = row.status;
           if (action === 'return') row.reportedQty = null;
+        } else if (action === 'delete') {
+          if (row.status !== 'draft' || Number(row.transferredQty || 0) !== 0
+            || Number(row.reportedQty || 0) !== 0 || row.events?.some(event => event.action === 'submit')
+            || inventory.lots.some(lot => lot.assignmentId === row.id)) {
+            throw new Error('Chỉ được xóa công việc chưa từng gửi xác nhận và chưa chuyển hàng sang combo.');
+          }
+          row.status = 'deleted';
         } else throw new Error('Thao tác không hợp lệ.');
         row.revision += 1;
         row.events.push({ action, actor: actor.username, quantity: row.reportedQty ?? row.draftQty, at: new Date().toISOString() });

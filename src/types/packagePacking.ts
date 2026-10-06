@@ -18,7 +18,7 @@ export interface PackingAssignment {
     draftQty: number | null;
     reportedQty: number | null;
     transferredQty?: number;
-    status: 'draft' | 'submitted' | 'ready';
+    status: 'draft' | 'submitted' | 'ready' | 'deleted';
     revision: number;
     events: Array<{ action: string; actor: string; at: string; quantity?: number | null }>;
 }

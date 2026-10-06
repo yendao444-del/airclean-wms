@@ -28031,7 +28031,7 @@ for (const method of ['list', 'create', 'update', 'inventory']) {
   ipcMain.handle(`packagePacking:${method}`, async (_event, payload = {}) => {
     try {
       const data = await packagePackingService[method](payload);
-      if (method === 'update' && ['submit', 'return', 'accept'].includes(payload.action)) broadcastHandlingUnitsChanged('PACKAGE_PACKING', { assignmentId: data.id });
+      if (method === 'update' && ['submit', 'return', 'accept', 'delete'].includes(payload.action)) broadcastHandlingUnitsChanged('PACKAGE_PACKING', { assignmentId: data.id });
       return { success: true, data };
     }
     catch (error) { return { success: false, error: error.message }; }
