@@ -364,10 +364,8 @@ if (!mapMatch) {
   }
 }
 
-if (!ipc.includes('startTelegramWmsPolling();') || !ipc.includes('TELEGRAM_WMS_BOT_TOKEN')) {
-  failures.push('Transactional Telegram WMS polling must remain enabled');
-}
-rejectText(ipc, 'Telegram WMS mutation polling is disabled', 'Telegram WMS polling is still disabled');
+rejectText(ipc, 'startTelegramWmsPolling', 'Retired warehouse Telegram polling must not restart');
+requireText(ipc, 'const TELEGRAM_WMS_BOT_TOKEN = "";', 'Retired warehouse Telegram must not load a runtime token');
 requireText(ipc, 'handling-unit-code:${normalizedCode}', 'Telegram handling-unit mutations must serialize by unit code');
 requireText(ipc, 'lockHandlingConfigKeys(tx, [HANDLING_QR_LABELS_KEY])', 'QR registry updates must hold the shared registry lock');
 requireText(ipc, 'Skipped automatic log/export cleanup', 'Automatic log cleanup guard is missing');
@@ -459,7 +457,7 @@ requireText(purchasePage, 'expectedGroupUpdatedAt: effectiveGroupUpdatedAt', 'VA
 requireText(purchasePage, 'purchase.updatedAt,', 'THHT and VAT group actions must send the current purchase revision');
 rejectText(refundsPage, 'refunds.adjustStock(', 'Refund UI must not use the legacy split stock/status workflow');
 rejectText(handlingUnitsPage, 'handlingUnits.pickUnit(', 'Handling-unit UI and Telegram simulation must not invoke the retired manual picking flow');
-requireText(handlingUnitsPage, 'Rút hàng thủ công đã ngừng sử dụng.', 'Legacy Telegram picking commands must explain that manual picking is retired');
+rejectText(handlingUnitsPage, 'showTelegramModal', 'Retired warehouse Telegram control panel must not be exposed');
 requireText(handlingUnitsPage, 'message: "Chọn nhà cung cấp trước khi tạo mã QR"', 'QR creation must require a supplier in the form');
 requireText(ipc, 'SELECT id FROM "EcommerceExport" WHERE id = ${exportId} FOR UPDATE', 'Ecommerce updates must lock the row before applying stock changes');
 requireText(ipc, 'Phiếu xuất TMĐT vừa được thay đổi ở máy khác.', 'Ecommerce updates must reject stale queued or renderer writes');

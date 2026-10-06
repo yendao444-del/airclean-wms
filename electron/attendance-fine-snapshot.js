@@ -11,7 +11,7 @@ async function readLateFineSnapshot(prisma, options = {}) {
         : logIds.length ? Prisma.sql`AND "id" IN (${Prisma.join(logIds)})` : Prisma.sql`AND FALSE`;
     const rows = await prisma.$queryRaw(Prisma.sql`
         WITH source AS MATERIALIZED (
-            SELECT "value"::jsonb AS data, "updatedAt" FROM "AppConfig"
+            SELECT "value"::json AS data, "updatedAt" FROM "AppConfig"
             WHERE "key" = 'attendanceData' LIMIT 1
         ), logs AS (
             SELECT "id", "userId", "userName", "faceId", "date", "checkType",
@@ -19,7 +19,7 @@ async function readLateFineSnapshot(prisma, options = {}) {
             FROM "AttendanceLog"
             WHERE "checkType" IN ('morning_in', 'afternoon_in') ${logFilter}
         )
-        SELECT jsonb_build_object(
+        SELECT json_build_object(
             'config', data->'config', 'employees', data->'employees',
             'extraFines', data->'extraFines', 'fineAuditLog', data->'fineAuditLog',
             'fineWaivers', data->'fineWaivers', 'workSchedules', data->'workSchedules',

@@ -141,15 +141,18 @@ async function reconcileMissingSeasonalScheduleFinesLegacy(prisma, options = {})
         // Keep large payroll snapshots in PostgreSQL. Reconciliation needs
         // only these fields and must not rewrite unrelated attendance data.
         const configRows = await tx.$queryRaw`
-            SELECT jsonb_build_object(
-                'employees', "value"::jsonb->'employees',
-                'workSchedules', "value"::jsonb->'workSchedules',
-                'leaveRecords', "value"::jsonb->'leaveRecords',
-                'extraFines', "value"::jsonb->'extraFines',
-                'fineAuditLog', "value"::jsonb->'fineAuditLog',
-                'config', "value"::jsonb->'config'
+            WITH source AS MATERIALIZED (
+                SELECT "value"::json AS data FROM "AppConfig" WHERE "key" = 'attendanceData'
+            )
+            SELECT json_build_object(
+                'employees', data->'employees',
+                'workSchedules', data->'workSchedules',
+                'leaveRecords', data->'leaveRecords',
+                'extraFines', data->'extraFines',
+                'fineAuditLog', data->'fineAuditLog',
+                'config', data->'config'
             )::text AS "value"
-            FROM "AppConfig" WHERE "key" = 'attendanceData'
+            FROM source
         `;
         const configRow = configRows[0];
         if (!configRow) return { created: [], removed: [], checked: 0 };
@@ -307,7 +310,10 @@ async function reconcileMissingSeasonalScheduleFinesLegacy(prisma, options = {})
             const patch = JSON.stringify({ extraFines: nextFines });
             await tx.$executeRaw`
                 UPDATE "AppConfig"
-                SET "value" = ("value"::jsonb || ${patch}::jsonb)::text,
+                SET "value" = (SELECT json_object_agg(key, value) FROM (
+                    SELECT key, value FROM json_each("AppConfig"."value"::json) WHERE key <> 'extraFines'
+                    UNION ALL SELECT key, value FROM json_each(${patch}::json)
+                ) AS fine_fields)::text,
                     "updatedAt" = CURRENT_TIMESTAMP
                 WHERE "key" = 'attendanceData'
             `;
@@ -338,15 +344,18 @@ async function readScheduleReconcileSnapshot(client, options, evaluationNow) {
     const latestLogDate = options.dateKey ? String(options.dateKey) : dateKeyFromTimestamp(evaluationNow);
     const [configRows, resignedCutoffs, logs] = await Promise.all([
         client.$queryRaw`
-            SELECT jsonb_build_object(
-                'employees', "value"::jsonb->'employees',
-                'workSchedules', "value"::jsonb->'workSchedules',
-                'leaveRecords', "value"::jsonb->'leaveRecords',
-                'extraFines', "value"::jsonb->'extraFines',
-                'fineAuditLog', "value"::jsonb->'fineAuditLog',
-                'config', "value"::jsonb->'config'
+            WITH source AS MATERIALIZED (
+                SELECT "value"::json AS data FROM "AppConfig" WHERE "key" = 'attendanceData'
+            )
+            SELECT json_build_object(
+                'employees', data->'employees',
+                'workSchedules', data->'workSchedules',
+                'leaveRecords', data->'leaveRecords',
+                'extraFines', data->'extraFines',
+                'fineAuditLog', data->'fineAuditLog',
+                'config', data->'config'
             )::text AS "value"
-            FROM "AppConfig" WHERE "key" = 'attendanceData'
+            FROM source
         `,
         loadResignedEmployeeCutoffs(client),
         client.attendanceLog.findMany({
@@ -499,10 +508,10 @@ async function reconcileMissingSeasonalScheduleFinesFast(prisma, options = {}) {
         try {
             const saved = await prisma.$transaction(async (tx) => {
                 await tx.$executeRaw`SET LOCAL lock_timeout = '700ms'`;
-                await tx.$executeRaw`SET LOCAL statement_timeout = '2500ms'`;
+                await tx.$executeRaw`SET LOCAL statement_timeout = '8000ms'`;
                 const rows = await tx.$queryRaw`
-                    SELECT "value"::jsonb->'extraFines' AS "extraFines",
-                           "value"::jsonb->'fineAuditLog' AS "fineAuditLog"
+                    SELECT "value"::json->'extraFines' AS "extraFines",
+                           "value"::json->'fineAuditLog' AS "fineAuditLog"
                     FROM "AppConfig" WHERE "key" = 'attendanceData' FOR UPDATE NOWAIT
                 `;
                 const currentFines = Array.isArray(rows?.[0]?.extraFines) ? rows[0].extraFines : [];
@@ -523,12 +532,15 @@ async function reconcileMissingSeasonalScheduleFinesFast(prisma, options = {}) {
                 }
                 await tx.$executeRaw`
                     UPDATE "AppConfig"
-                    SET "value" = jsonb_set("value"::jsonb, '{extraFines}', ${JSON.stringify(nextFines)}::jsonb, true)::text,
+                    SET "value" = (SELECT json_object_agg(key, value) FROM (
+                        SELECT key, value FROM json_each("AppConfig"."value"::json) WHERE key <> 'extraFines'
+                        UNION ALL SELECT 'extraFines', ${JSON.stringify(nextFines)}::json
+                    ) AS fine_fields)::text,
                         "updatedAt" = CURRENT_TIMESTAMP
                     WHERE "key" = 'attendanceData'
                 `;
                 return true;
-            }, { isolationLevel: 'Serializable', timeout: 4000, maxWait: 1000 });
+            }, { isolationLevel: 'Serializable', timeout: 20000, maxWait: 5000 });
             console.info(`[Attendance Schedule] attempt=${attempt + 1} transaction=${Date.now() - transactionStartedAt}ms created=${result.created.length} removed=${result.removed.length} updated=${result.updated.length}`);
             return result;
         } catch (error) {

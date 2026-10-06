@@ -32,10 +32,8 @@ import {
   EyeOutlined,
   InfoCircleOutlined,
   SearchOutlined,
-  RobotOutlined,
   UnlockOutlined,
   LockOutlined,
-  SendOutlined,
   RightOutlined,
   QrcodeOutlined,
   PrinterOutlined,
@@ -53,6 +51,7 @@ import {
 import { Warehouse2DMap } from "../components/Warehouse2DMap";
 import Modal from "../components/HandlingUnitModal";
 import HandlingUnitPrintLabel from "../components/HandlingUnitPrintLabel";
+import { prepareHandlingUnitPrintUnits } from "../lib/handlingUnitPrintNumbers";
 import HandlingUnitStockHistory from "../components/HandlingUnitStockHistory";
 import { useAuth } from "../contexts/AuthContext";
 import PrepackManagement from "./PrepackManagement";
@@ -128,22 +127,6 @@ type LocationItem = {
   type: string;
   description?: string;
   isActive: boolean;
-};
-type TelegramStatus = {
-  isRunning: boolean;
-  isPollingOwner: boolean;
-  pollingOwner: string;
-  nodeLabel: string;
-  nodeRole: "production" | "development";
-  nodePriority: number;
-  tokenConfigured: boolean;
-  takeoverTimeoutSeconds: number;
-  botUsername: string;
-  groupChatId: string | null;
-  groupTitle: string;
-  isGroupConnected: boolean;
-  lastPollAt: string | null;
-  lastError: string | null;
 };
 type Workspace = {
   packedInventory: PackingLot[];
@@ -935,7 +918,7 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
   ) => {
     if (!units.length || isExportingLabelPdf) return;
     updatePrintLabelSize(size);
-    setPrintUnits(units);
+    setPrintUnits(prepareHandlingUnitPrintUnits(units, displaySequenceByUnitId));
     setIsExportingLabelPdf(true);
     setShowPrintModal(true);
   };
@@ -1214,27 +1197,6 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
   const [isSubmittingShiftCheck, setIsSubmittingShiftCheck] = useState(false);
   const shiftCheckRequestIdRef = useRef("");
 
-  // Telegram Bot modal & Interactive Chatbox
-  const [showTelegramModal, setShowTelegramModal] = useState(false);
-  const [telegramTestMsg, setTelegramTestMsg] = useState("");
-  const [isSendingTelegram, setIsSendingTelegram] = useState(false);
-  const [telegramStatus, setTelegramStatus] = useState<TelegramStatus | null>(
-    null,
-  );
-  const [telegramChatLog, setTelegramChatLog] = useState<
-    Array<{ id: string; sender: "user" | "bot"; text: string; time: string }>
-  >([
-    {
-      id: "m-0",
-      sender: "bot",
-      text: "👋 Bot <b>@quanlykienhang_bot</b> hỗ trợ thao tác kho theo nhóm. Tạo nhóm, thêm bot làm quản trị viên, rồi chủ hệ thống gửi <code>/ketnoi</code> trong nhóm để nhân viên cùng tra cứu kiện hàng.",
-      time: new Date().toLocaleTimeString("vi-VN", {
-        hour: "2-digit",
-        minute: "2-digit",
-      }),
-    },
-  ]);
-
   const loadWorkspace = async (prioritizeFreshData = false) => {
     if (workspaceLoadInFlightRef.current) {
       if (prioritizeFreshData) {
@@ -1372,25 +1334,6 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
     workspace.recentTransactions,
     workspace.packedInventory,
   ]);
-
-  useEffect(() => {
-    if (!showTelegramModal) return;
-    let active = true;
-    const loadStatus = () => {
-      window.electronAPI?.handlingUnits
-        ?.getTelegramStatus?.()
-        .then((res) => {
-          if (active && res?.success && res.data) setTelegramStatus(res.data);
-        })
-        .catch((err) => console.warn("Load Telegram status error:", err));
-    };
-    loadStatus();
-    const timer = window.setInterval(loadStatus, 10000);
-    return () => {
-      active = false;
-      window.clearInterval(timer);
-    };
-  }, [showTelegramModal]);
 
   const handleUnsealUnit = async (unit: UnitRow): Promise<boolean> => {
     try {
@@ -1557,6 +1500,7 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
     );
 
   const handleDeleteUnit = (unit: UnitRow) => {
+    if (!isAdmin) return;
     const hasQuantityChanges = unit.currentPcs !== unit.initialPcs;
     const hasWithdrawalHistory = unitHasWithdrawalHistory(unit);
     const lockedForNonAdmin = !isAdmin && hasWithdrawalHistory;
@@ -1746,127 +1690,6 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
     } finally {
       isFinalizingCheckRef.current = false;
       setIsFinalizingCheck(false);
-    }
-  };
-
-  const sendToTelegramApi = async (text: string) => {
-    if (!window.electronAPI?.handlingUnits?.sendTelegramTest) {
-      throw new Error("Telegram Bot chưa sẵn sàng trong ứng dụng desktop.");
-    }
-    const res = await window.electronAPI.handlingUnits.sendTelegramTest({ text });
-    if (!res?.success) {
-      throw new Error(res?.error || "Không thể gửi tin nhắn tới nhóm Telegram.");
-    }
-  };
-
-  const handleSendTelegramTest = async (cmdText?: string) => {
-    const textToSend = (cmdText || telegramTestMsg).trim();
-    if (!textToSend) return;
-    setIsSendingTelegram(true);
-    const nowTime = new Date().toLocaleTimeString("vi-VN", {
-      hour: "2-digit",
-      minute: "2-digit",
-    });
-
-    // 1. Thêm tin nhắn của user vào chat box
-    const userMsg = {
-      id: `u-${Date.now()}`,
-      sender: "user" as const,
-      text: textToSend,
-      time: nowTime,
-    };
-
-    setTelegramChatLog((prev) => [...prev, userMsg]);
-    setTelegramTestMsg("");
-
-    try {
-      // 2. Gửi tin nhắn lên Telegram API thật
-      await sendToTelegramApi(`👤 <b>Yêu cầu:</b> ${textToSend}`);
-
-      // 3. Xử lý phản hồi nghiệp vụ
-      const parts = textToSend.split(/\s+/);
-      const cmd = parts[0]?.toLowerCase();
-      let botReply = "";
-
-      if (cmd === "/ton") {
-        const totalPkgs = workspace.register.length;
-        const sealed = workspace.register.filter(
-          (u) => u.status === "Nguyên niêm phong",
-        ).length;
-        const opened = workspace.register.filter(
-          (u) => u.status === "Đang sử dụng",
-        ).length;
-        const empty = workspace.register.filter(
-          (u) => u.status === "Đã hết",
-        ).length;
-        const totalPcs = workspace.register.reduce(
-          (s, u) => s + u.currentPcs,
-          0,
-        );
-
-        botReply = `📊 <b>BÁO CÁO TỒN KHO KIỆN HÀNG:</b>\n• Tổng số kiện: <b>${totalPkgs} kiện</b>\n• 🟢 Nguyên niêm phong: <b>${sealed} kiện</b>\n• 🟠 Đang sử dụng (mở): <b>${opened} kiện</b>\n• ⚪ Đã hết: <b>${empty} kiện</b>\n• 📦 Tổng sản phẩm trong kiện: <b>${fmt(totalPcs)} đơn vị</b>`;
-      } else if (cmd === "/khui") {
-        const targetCode = parts[1]?.toUpperCase();
-        if (!targetCode) {
-          botReply = `⚠️ <b>Vui lòng nhập mã kiện!</b>\nCú pháp: <code>/khui [MÃ_KIỆN]</code> (Ví dụ: <code>/khui KN-5DTR-01</code>)`;
-        } else {
-          const targetUnit = workspace.register.find(
-            (u) => u.id.toUpperCase() === targetCode,
-          );
-          if (!targetUnit) {
-            botReply = `❌ Không tìm thấy kiện <code>${targetCode}</code> trong hệ thống kho!`;
-          } else if (targetUnit.status === "Đang sử dụng") {
-            botReply = `⚠️ Kiện <code>${targetCode}</code> đang mở sẵn rồi!`;
-          } else if (targetUnit.status === "Đã hết") {
-            botReply = `❌ Kiện <code>${targetCode}</code> đã hết hàng!`;
-          } else {
-            const conflict = getPendingCheckConflict(targetUnit, workspace.register);
-            const opened = conflict ? false : await handleUnsealUnit(targetUnit);
-            botReply = conflict
-              ? `❌ ${pendingCheckBlockText(targetUnit, conflict, "khui kiện mới")}`
-              : opened
-                ? `✅ <b>KHUI KIỆN THÀNH CÔNG!</b>\n📦 Mã Kiện: <code>${targetUnit.id}</code>\n🏷️ SKU: <b>${targetUnit.skuName}</b>\n📍 Vị trí: <b>${locationFor(targetUnit)}</b>\n📊 Tồn: <b>${fmt(targetUnit.currentPcs)} ${targetUnit.unitName}</b>\n👉 Đã chuyển sang: <b>Đang sử dụng</b>`
-                : `❌ Không thể khui kiện <code>${targetUnit.id}</code>. Vui lòng kiểm tra cảnh báo trên màn hình.`;
-          }
-        }
-      } else if (cmd === "/rut") {
-        botReply = "⚠️ Rút hàng thủ công đã ngừng sử dụng. Xuất TMDT tự động phân bổ hàng từ kiện; không cần rút thêm.";
-      } else if (cmd === "/kiem") {
-        const targetCode = parts[1]?.toUpperCase();
-        const targetUnit = workspace.register.find(
-          (u) => u.id.toUpperCase() === targetCode,
-        );
-        if (!targetUnit) {
-          botReply = `❌ Không tìm thấy kiện <code>${targetCode}</code> trong kho.`;
-        } else {
-          botReply = `🔍 <b>THÔNG TIN KIỆN ${targetUnit.id}</b>\n🏷️ SKU: <b>${targetUnit.skuName}</b>\n📦 Quy cách: ${targetUnit.packageLabel || targetUnit.packageType}\n📊 Số lượng: <b>${fmt(targetUnit.currentPcs)} / ${fmt(targetUnit.initialPcs)} ${targetUnit.unitName}</b>\n📍 Vị trí: <b>${locationFor(targetUnit)}</b>\n🏷️ Trạng thái: <b>${targetUnit.status}</b>`;
-        }
-      } else if (cmd === "/help" || cmd === "/start") {
-        botReply = `📦 <b>CÁC LỆNH KHO HỖ TRỢ:</b>\n• <code>/khui [MÃ_KIỆN]</code> — Mở niêm phong kiện\n• <code>/ton</code> — Báo cáo tổng tồn kho\n• <code>/kiem [MÃ_KIỆN]</code> — Tra cứu chi tiết kiện`;
-      } else {
-        botReply = `⚠️ Lệnh "<b>${textToSend}</b>" không hợp lệ.\n👉 Gõ <code>/help</code> hoặc <code>/ton</code>, <code>/khui [MÃ_KIỆN]</code> để thao tác.`;
-      }
-
-      // Gửi phản hồi của bot lên Telegram và thêm vào chatbox
-      await sendToTelegramApi(`🤖 <b>@quanlykienhang_bot:</b>\n${botReply}`);
-
-      setTelegramChatLog((prev) => [
-        ...prev,
-        {
-          id: `b-${Date.now()}`,
-          sender: "bot",
-          text: botReply,
-          time: new Date().toLocaleTimeString("vi-VN", {
-            hour: "2-digit",
-            minute: "2-digit",
-          }),
-        },
-      ]);
-      message.success("Đã gửi và đồng bộ với Telegram Bot!");
-    } catch (err: any) {
-      message.error(err?.message || "Lỗi gửi tin nhắn");
-    } finally {
-      setIsSendingTelegram(false);
     }
   };
 
@@ -2241,14 +2064,17 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
       status: unit.status === "Đang sử dụng" ? "opened" : unit.status === "Nguyên niêm phong" ? "sealed" : unit.status });
     return [...selectedUnits].sort((a, b) => compareHandlingUnitPickOrder(pickView(a), pickView(b)));
   }, [selectedUnits]);
+  const activeSelectedUnits = useMemo(
+    () => orderedSelectedUnits.filter(
+      (unit) => unit.status !== "Đã hết" && unit.status !== "Đã tách",
+    ),
+    [orderedSelectedUnits],
+  );
   const displaySequenceByUnitId = useMemo(() => {
     // Show a compact pick queue; completed or split history must not leave
     // gaps such as 1, 3 in the active warehouse view.
-    const activeUnits = orderedSelectedUnits.filter(
-      (unit) => !["Đã hết", "Đã tách"].includes(unit.status),
-    );
-    return new Map(activeUnits.map((unit, index) => [unit.id, index + 1] as const));
-  }, [orderedSelectedUnits]);
+    return new Map(activeSelectedUnits.map((unit, index) => [unit.id, index + 1] as const));
+  }, [activeSelectedUnits]);
   const selectedStats = useMemo(
     () =>
       selectedUnits.reduce(
@@ -2270,9 +2096,7 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
   const pendingCheckCount = selectedStats.pendingCheck;
   const emptyCount = selectedStats.empty;
   const splitCount = selectedStats.split;
-  const activeSequenceCount = orderedSelectedUnits.filter(
-    (unit) => unit.status !== "Đã hết" && unit.status !== "Đã tách",
-  ).length;
+  const activeSequenceCount = activeSelectedUnits.length;
 
   const displayedUnits = useMemo(() => {
     if (statusFilter === "all")
@@ -2432,6 +2256,18 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
     : scopedShiftCheckCandidates
   ).slice(0, 100);
 
+  const shiftCheckEnteredCount = visibleShiftCheckCandidates.filter(({ unit }) => {
+    const actual = shiftCheckDrafts[unit.id]?.actualQuantity;
+    return actual !== null && actual !== undefined;
+  }).length;
+  const canSubmitShiftCheck = visibleShiftCheckCandidates.length > 0 && visibleShiftCheckCandidates.every(({ unit }) => {
+    const draft = shiftCheckDrafts[unit.id];
+    const actual = draft?.actualQuantity;
+    if (actual === null || actual === undefined || !Number.isSafeInteger(actual) || actual < 0 || actual > unit.initialPcs) return false;
+    if (actual !== unit.currentPcs && (!draft.reason || (draft.reason === "Khác" && !draft.note.trim()))) return false;
+    return true;
+  });
+
   const openShiftCheck = (scope: "all" | "mandatory" = "all") => {
     const candidates = scope === "mandatory"
       ? mandatoryShiftCheckCandidates
@@ -2450,7 +2286,8 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
       Object.fromEntries(
         candidates.map(({ unit }) => [
           unit.id,
-          { actualQuantity: unit.currentPcs, reason: "", note: "" },
+          // The expected balance is reference-only. Never prefill the physical count.
+          { actualQuantity: null, reason: "", note: "" },
         ]),
       ),
     );
@@ -2470,7 +2307,8 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
     setShiftCheckFocusCode(unit.id);
     shiftCheckRequestIdRef.current = `HU-SHIFT-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     setShiftCheckDrafts({
-      [unit.id]: { actualQuantity: unit.currentPcs, reason: "", note: "" },
+      // Require the assignee to count this package instead of confirming the software balance.
+      [unit.id]: { actualQuantity: null, reason: "", note: "" },
     });
     setShowShiftCheckModal(true);
   };
@@ -2494,7 +2332,7 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
           throw new Error(`Hãy nhập tồn thực tế của kiện ${unit.id}.`);
         }
         const actualQuantity = Number(draft?.actualQuantity);
-        if (!Number.isFinite(actualQuantity) || actualQuantity < 0) {
+        if (!Number.isSafeInteger(actualQuantity) || actualQuantity < 0) {
           throw new Error(`Hãy nhập tồn thực tế của kiện ${unit.id}.`);
         }
         if (actualQuantity > unit.initialPcs) {
@@ -3306,8 +3144,7 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
                   <p><b>Ngày mai:</b> {workspace.shiftCheckPolicy.nextAssignedTo}</p>
                   <p>Hạn kiểm: <b>23:59</b> (giờ Việt Nam).</p>
                   <p>
-                    Từ 30/09/2026, chưa hoàn thành kiểm cuối ca:
-                    {' '}<b>{fmt(workspace.shiftCheckPolicy.fineAmount)}đ/người/ngày</b>, không tính theo số kiện.
+                    Tạm thời chưa áp dụng phạt kiểm kiện cuối ca.
                   </p>
                   <Typography.Paragraph type="secondary">
                     Kiện chưa kiểm chuyển sang ngày tiếp theo. Kết quả độc lập với Kiểm hàng trong Quản lý kho.
@@ -3327,7 +3164,7 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
                   <span className="hu-shift-assignee-label">Phụ trách kiểm</span>
                   <span className="hu-shift-assignee-name">{workspace.shiftCheckPolicy.assignedTo}</span>
                   <span className="hu-shift-assignee-fine">
-                    Phạt {fmt(workspace.shiftCheckPolicy.fineAmount)}đ nếu quá hạn
+                    Hạn kiểm 23:59 · Chưa áp dụng phạt
                   </span>
                 </span>
                 <svg width="12" height="12" viewBox="0 0 12 12" fill="none" className="hu-shift-assignee-chevron" aria-hidden="true">
@@ -3343,16 +3180,6 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
               className="hu-nav-btn-location"
               onClick={() => setShowLocations(true)}
             />
-          </Tooltip>
-          <Tooltip title="Telegram Bot: @quanlykienhang_bot · Trực tuyến (Bấm để xem bảng điều khiển)">
-            <button
-              type="button"
-              className="hu-telegram-bot-badge"
-              onClick={() => setShowTelegramModal(true)}
-            >
-              <span className="hu-bot-dot online" />
-              <RobotOutlined style={{ color: "#0088cc", fontSize: 15 }} />
-            </button>
           </Tooltip>
         </Flex>
       </nav>
@@ -3644,6 +3471,20 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
                   </div>
                 </div>
                 <div className="hu-toolbar-right">
+                  {(isAdmin || user?.role === "manager") && activeSelectedUnits.length > 0 && (
+                    <Tooltip title={`In toàn bộ ${activeSelectedUnits.length} kiện đang hoạt động của SKU này · mỗi kiện một trang PDF ${printLabelSize}`}>
+                      <Button
+                        size="small"
+                        icon={<PrinterOutlined />}
+                        className="hu-btn-bulk-print"
+                        loading={isExportingLabelPdf}
+                        disabled={isExportingLabelPdf}
+                        onClick={() => handlePrintLabels(activeSelectedUnits, printLabelSize)}
+                      >
+                        In hàng loạt ({activeSelectedUnits.length})
+                      </Button>
+                    </Tooltip>
+                  )}
                   {activeSequenceCount > 0 && (
                     <span className="hu-sequence-order" title="Thứ tự lấy hàng: kiện đang mở, ít hàng trước; bằng số lượng thì lấy kiện cũ trước. Số thứ tự lấy hàng thay đổi theo tồn, số tem giữ nguyên.">
                       <LockOutlined /> <b>Ít hàng trước</b> · {activeSequenceCount} kiện đang hoạt động
@@ -3682,20 +3523,22 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
                         </div>
                         <div className="hu-card-header-actions">
                           {statusFor(unit.status)}
-                          <Tooltip title={unit.status === "Đã tách" ? "Kiện cha đã tách phải được giữ lại để tra cứu lịch sử và QR cũ" : isReturnHandlingUnit(unit) ? "Kiện hàng hoàn phải chuyển sang kiện khác để bảo toàn tồn kho, không được xóa" : deleteLocked ? "Kiện đã có lịch sử rút hàng — chỉ admin được xóa" : "Xóa kiện"}>
-                            <button
-                              type="button"
-                              className="hu-card-delete-icon"
-                              disabled={deletingUnitCode === unit.id || deleteLocked}
-                              aria-label={`Xóa kiện ${unit.id}`}
-                              onClick={(event) => {
-                                event.stopPropagation();
-                                handleDeleteUnit(unit);
-                              }}
-                            >
-                              <DeleteOutlined />
-                            </button>
-                          </Tooltip>
+                          {isAdmin && (
+                            <Tooltip title={unit.status === "Đã tách" ? "Kiện cha đã tách phải được giữ lại để tra cứu lịch sử và QR cũ" : isReturnHandlingUnit(unit) ? "Kiện hàng hoàn phải chuyển sang kiện khác để bảo toàn tồn kho, không được xóa" : deleteLocked ? "Kiện đã có lịch sử rút hàng — chỉ admin được xóa" : "Xóa kiện"}>
+                              <button
+                                type="button"
+                                className="hu-card-delete-icon"
+                                disabled={deletingUnitCode === unit.id || deleteLocked}
+                                aria-label={`Xóa kiện ${unit.id}`}
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  handleDeleteUnit(unit);
+                                }}
+                              >
+                                <DeleteOutlined />
+                              </button>
+                            </Tooltip>
+                          )}
                         </div>
                       </header>
                       <img src={imageFor(unit)} alt={`Minh hoạ ${unit.id}`} />
@@ -4710,7 +4553,8 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
           setShiftCheckFocusCode(null);
         }}
         onOk={submitShiftCheck}
-        okText={`${shiftCheckScope === "mandatory" ? "Chốt" : "Hoàn tất kiểm"} ${visibleShiftCheckCandidates.length} mục`}
+        okText={`${shiftCheckScope === "mandatory" ? "Chốt" : "Hoàn tất kiểm"} ${shiftCheckEnteredCount}/${visibleShiftCheckCandidates.length} mục`}
+        okButtonProps={{ disabled: !canSubmitShiftCheck }}
         cancelText="Để kiểm sau"
         confirmLoading={isSubmittingShiftCheck}
         closable={!isSubmittingShiftCheck}
@@ -4727,7 +4571,7 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
           message={shiftCheckScope === "mandatory" ? "Nhập số lượng thực tế để chốt kiện" : "Nhập số lượng đếm thực tế trong từng kiện"}
           description={shiftCheckScope === "mandatory"
             ? "Kiện chỉ được mở lại thao tác sau khi đã chốt số thực tế."
-            : "Đếm hàng còn trong kiện và số combo đóng sẵn chưa xuất; không tháo combo để đếm lại. Từ 30/09/2026, hoàn thành trước 23:59; chưa hoàn thành phạt 50.000đ/người/ngày. Kết quả độc lập với Kiểm hàng trong Quản lý kho."}
+            : "Đếm hàng còn trong kiện và số combo đóng sẵn chưa xuất; không tháo combo để đếm lại. Hạn kiểm 23:59; tạm thời chưa áp dụng phạt kiểm kiện cuối ca. Kết quả độc lập với Kiểm hàng trong Quản lý kho."}
           style={{ marginBottom: 14 }}
         />
         {scopedShiftCheckCandidates.length > 100 && (
@@ -4792,6 +4636,7 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
                   min={0}
                   max={item.unit.initialPcs}
                   precision={0}
+                  placeholder="Nhập số đếm"
                   value={shiftCheckDrafts[item.unit.id]?.actualQuantity}
                   onChange={(value) =>
                     updateShiftCheckDraft(item.unit.id, {
@@ -4812,7 +4657,7 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
               align: "center" as const,
               render: (_, item) => {
                 const actual = shiftCheckDrafts[item.unit.id]?.actualQuantity;
-                if (actual === null || actual === undefined) return <Tag>--</Tag>;
+                if (actual === null || actual === undefined) return <Tag>Chưa nhập</Tag>;
                 const variance = Number(actual) - item.unit.currentPcs;
                 return (
                   <Tag color={variance === 0 ? "green" : variance > 0 ? "blue" : "red"}>
@@ -4835,7 +4680,7 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
                     allowClear
                     disabled={!hasVariance}
                     value={shiftCheckDrafts[item.unit.id]?.reason || undefined}
-                    placeholder={hasVariance ? "Chọn lý do" : "Không cần"}
+                    placeholder={actual === null || actual === undefined ? "Chưa nhập số đếm" : hasVariance ? "Chọn lý do" : "Không cần"}
                     onChange={(value) =>
                       updateShiftCheckDraft(item.unit.id, { reason: value || "" })
                     }
@@ -5851,152 +5696,6 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
         })()}
       </Modal>
 
-      <Modal
-        title={
-          <Flex align="center" gap={8}>
-            <RobotOutlined style={{ color: "#0088cc", fontSize: 20 }} />
-            <div>
-              <b>Điều khiển & Kết nối Telegram Bot</b>
-              <Typography.Text
-                type="secondary"
-                style={{ display: "block", fontSize: 12 }}
-              >
-                Bot: @quanlykienhang_bot · {telegramStatus?.isGroupConnected
-                  ? `Nhóm: ${telegramStatus.groupTitle || telegramStatus.groupChatId}`
-                  : "Chưa kết nối nhóm"}
-              </Typography.Text>
-            </div>
-          </Flex>
-        }
-        open={showTelegramModal}
-        onCancel={() => setShowTelegramModal(false)}
-        footer={
-          <Button onClick={() => setShowTelegramModal(false)}>Đóng</Button>
-        }
-        width={680}
-        destroyOnHidden
-      >
-        <div className="hu-telegram-modal-content">
-          <div className="hu-tg-banner">
-            <p>
-              {telegramStatus?.isGroupConnected ? (
-                <>
-                  ✅ Bot đang kết nối với nhóm <b>{telegramStatus.groupTitle}</b>.
-                  Nhân viên trong nhóm có thể dùng menu để tra cứu kiện và hệ thống
-                  sẽ ghi lại tài khoản Telegram thực hiện.
-                </>
-              ) : (
-                <>
-                  1. Tạo nhóm Telegram và thêm nhân viên. 2. Thêm bot
-                  <b> @quanlykienhang_bot</b> làm quản trị viên. 3. Chủ hệ thống
-                  gửi <code>/ketnoi</code> trong nhóm để hoàn tất kết nối.
-                </>
-              )}
-            </p>
-            <Typography.Text style={{ fontSize: 12 }}>
-              Máy xử lý Telegram: <b>{telegramStatus?.pollingOwner || "Đang xác định"}</b>
-              {telegramStatus?.isPollingOwner ? " · Máy này đang giữ quyền bot" : " · Máy này đang ở chế độ chờ"}
-            </Typography.Text>
-            <Typography.Text type="secondary" style={{ display: "block", marginTop: 4, fontSize: 11 }}>
-              Node hiện tại: <b>{telegramStatus?.nodeRole === "production" ? "Production" : "Development"}</b>
-              {telegramStatus ? ` · Ưu tiên ${telegramStatus.nodePriority}` : ""}
-              {telegramStatus?.tokenConfigured ? " · Đã cấu hình token" : " · Chưa có token Telegram WMS"}
-              {telegramStatus ? ` · Tự chuyển node sau tối đa khoảng ${telegramStatus.takeoverTimeoutSeconds + 3} giây khi mất kết nối đột ngột` : ""}
-            </Typography.Text>
-          </div>
-
-          {/* KHUNG CHAT TELEGRAM TRỰC QUAN */}
-          <div className="hu-tg-chat-box">
-            <div className="hu-tg-chat-messages">
-              {telegramChatLog.map((msg) => (
-                <div
-                  key={msg.id}
-                  className={`hu-tg-msg-bubble ${msg.sender === "user" ? "user" : "bot"}`}
-                >
-                  <div className="hu-tg-msg-header">
-                    <b>
-                      {msg.sender === "user"
-                        ? "👤 Bạn (Admin)"
-                        : "🤖 @quanlykienhang_bot"}
-                    </b>
-                    <small>{msg.time}</small>
-                  </div>
-                  <div
-                    className="hu-tg-msg-content"
-                    style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}
-                  >
-                    {msg.text}
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-
-          <div className="hu-tg-quick-bar">
-            <Typography.Text strong style={{ fontSize: 12 }}>
-              Lệnh nhanh:
-            </Typography.Text>
-            <Flex gap={6} wrap="wrap">
-              <Button
-                size="small"
-                onClick={() => handleSendTelegramTest("/ton")}
-                loading={isSendingTelegram}
-              >
-                📊 /ton
-              </Button>
-              {displayedUnits[0] && (
-                <Button
-                  size="small"
-                  onClick={() =>
-                    handleSendTelegramTest(`/khui ${displayedUnits[0].id}`)
-                  }
-                  loading={isSendingTelegram}
-                >
-                  🔓 /khui {displayedUnits[0].id}
-                </Button>
-              )}
-            </Flex>
-          </div>
-
-          <Flex gap={8} style={{ marginTop: 4 }}>
-            <Input
-              placeholder="Nhập lệnh (/khui, /ton, /kiem...) hoặc tin nhắn test"
-              value={telegramTestMsg}
-              onChange={(e) => setTelegramTestMsg(e.target.value)}
-              onPressEnter={() => handleSendTelegramTest()}
-            />
-            <Button
-              type="primary"
-              icon={<SendOutlined />}
-              onClick={() => handleSendTelegramTest()}
-              loading={isSendingTelegram}
-              style={{ background: "#0088cc", borderColor: "#0088cc" }}
-            >
-              Gửi
-            </Button>
-          </Flex>
-
-          <div className="hu-tg-syntax-guide">
-            <Typography.Text strong>
-              📖 Tra cứu cú pháp lệnh Telegram:
-            </Typography.Text>
-            <ul>
-              <li>
-                <code>/khui [MÃ_KIỆN]</code> — Mở niêm phong kiện để bắt đầu lấy
-                lẻ (VD: <code>/khui KN-5DTR-01</code>)
-              </li>
-              <li>
-                <code>/ton</code> — Báo cáo nhanh tổng số kiện, tổng tồn vật lý
-                và lượng hàng chờ đóng gói
-              </li>
-              <li>
-                <code>/kiem [MÃ_KIỆN]</code> — Tra cứu vị trí, trạng thái và số
-                lượng chi tiết kiện
-              </li>
-            </ul>
-          </div>
-        </div>
-      </Modal>
 
       <Modal
         className="hu-split-modal"

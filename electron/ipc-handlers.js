@@ -277,10 +277,10 @@ const {
   resolveEmployeeId,
 } = require("./attendance-rewards");
 const { reconcileEcommerceOrderFines } = require("./ecommerce-order-fines");
-const { reconcilePrepackShortfallFines } = require("./prepack-fines");
+const { reconcilePrepackShortfallFines, isPrepackShortfallFine } = require("./prepack-fines");
 const { MAX_QUANTITY: HANDLING_UNIT_MAX_QUANTITY, assertPackageQuantity, readLabelNumbers, assignLabelNumbers } = require("./handling-unit-labels.cjs");
 const { assertMergePolicy } = require("./handling-unit-merge-policy.cjs");
-const { recordShiftEvents, readShiftPolicy, reconcileShiftFines, assigneeFor: shiftAssigneeFor, dayKey: shiftDayKey } = require("./handling-unit-shift-policy.cjs");
+const { recordShiftEvents, readShiftPolicy, reconcileShiftFines, isHandlingUnitShiftFine, assigneeFor: shiftAssigneeFor, dayKey: shiftDayKey } = require("./handling-unit-shift-policy.cjs");
 
 // Fine reconciliation scans the shared attendance ledger and can be expensive
 // on a large order history. Keep it out of the pickup/resolve response path.
@@ -576,8 +576,8 @@ async function cleanupExpiredPrepackEvidence() {
 
 setTimeout(() => void cleanupExpiredPrepackEvidence().catch((error) => console.warn("Prepack evidence cleanup error:", error?.message || error)), 60_000);
 setInterval(() => void cleanupExpiredPrepackEvidence().catch((error) => console.warn("Prepack evidence cleanup error:", error?.message || error)), 24 * 60 * 60 * 1000);
-// Reconcile completed prepack days in the background so a new page visit is
-// not required for the end-of-day penalty to be recorded.
+// Withdraw old prepack shortfall fines in the background. No quota penalty
+// is created; the attendance read layer excludes these rows immediately.
 setTimeout(() => void enqueueAttendanceMaintenance("prepack", () => reconcilePrepackShortfallFines(getPrismaDirectTx(), { now: new Date() })).catch((error) => console.warn("Prepack fine reconciliation error:", error?.message || error)), 90_000);
 setInterval(() => void enqueueAttendanceMaintenance("prepack", () => reconcilePrepackShortfallFines(getPrismaDirectTx(), { now: new Date() })).catch((error) => console.warn("Prepack fine reconciliation error:", error?.message || error)), 15 * 60 * 1000);
 async function maintainHandlingUnitShiftFines() {
@@ -2009,7 +2009,7 @@ function isPasswordRotationRequired(user) {
 
 function getDriveAuthMessage(error) {
   if (isGoogleReauthError(error)) {
-    return "Phiên Google Drive trên máy này đã hết hạn hoặc không còn hợp lệ. Vui lòng kết nối lại Google Drive rồi tải lại file; nếu bạn không có quyền cấu hình, hãy liên hệ admin.";
+    return "Google Drive hết phiên hoặc không còn hợp lệ. Vui lòng liên hệ admin.";
   }
   return error?.message || "Không thể kết nối Google Drive.";
 }
@@ -9468,7 +9468,8 @@ ipcMain.handle("handlingUnits:splitUnit", async (_event, payload = {}) => {
 // ────────────────────────────────────────────────────────────────────────────
 // The WMS bot token is runtime configuration and is deliberately absent from
 // the installer so it can be rotated without rebuilding or redistributing the app.
-const TELEGRAM_WMS_BOT_TOKEN = String(config.TELEGRAM_WMS_BOT_TOKEN || "").trim();
+// Warehouse Telegram integration is retired, including outbound notifications.
+const TELEGRAM_WMS_BOT_TOKEN = "";
 const TELEGRAM_WMS_DEFAULT_CHAT = "1397184795";
 const TELEGRAM_WMS_GROUP_CONFIG_KEY = "telegramWmsGroupConfig";
 const TELEGRAM_WMS_LEASE_KEY = "telegramWmsPollingLease";
@@ -12351,174 +12352,6 @@ async function handleTelegramWmsIncomingMessage(message, telegramUpdateId = null
   await sendRutHangMenu(chatId);
 }
 
-function startTelegramWmsPolling() {
-  if (telegramWmsBotRunning || !TELEGRAM_WMS_BOT_TOKEN) return;
-  telegramWmsBotRunning = true;
-  telegramWmsLastError = null;
-  console.log("🤖 [TelegramWMS] Starting Telegram Bot 1-Touch polling loop...");
-
-  const scheduleNextPoll = (delay) => {
-    if (!telegramWmsBotRunning) return;
-    clearTimeout(telegramWmsPollTimer);
-    telegramWmsPollTimer = setTimeout(pollUpdates, delay);
-  };
-
-  const pollUpdates = async () => {
-    if (!telegramWmsBotRunning) return;
-    try {
-      const acquiredLease = await tryAcquireTelegramWmsLease();
-      if (!telegramWmsBotRunning) return;
-      if (!acquiredLease) {
-        if (telegramWmsIsLeaseOwner) {
-          console.warn("[TelegramWMS] Lost polling ownership.");
-        }
-        telegramWmsIsLeaseOwner = false;
-        telegramWmsOffsetLoaded = false;
-        scheduleNextPoll(3000);
-        return;
-      }
-      if (!telegramWmsIsLeaseOwner) {
-        console.log(
-          `🤖 [TelegramWMS] This machine is now bot owner: ${telegramWmsLeaseOwnerLabel}`,
-        );
-      }
-      telegramWmsIsLeaseOwner = true;
-      if (!telegramWmsOffsetLoaded) {
-        await loadTelegramWmsOffset();
-      }
-
-      const path = `/bot${TELEGRAM_WMS_BOT_TOKEN}/getUpdates?offset=${telegramWmsLastUpdateId}&timeout=8`;
-      telegramWmsPollRequest = https.request(
-        {
-          hostname: "api.telegram.org",
-          path,
-          method: "GET",
-          timeout: 13000,
-        },
-        (res) => {
-          let body = "";
-          res.on("data", (chunk) => (body += chunk));
-          res.on("end", async () => {
-            telegramWmsPollRequest = null;
-            try {
-              const json = JSON.parse(body);
-              if (json.ok && Array.isArray(json.result)) {
-                telegramWmsLastPollAt = new Date().toISOString();
-                telegramWmsLastError = null;
-                for (const update of json.result) {
-                  try {
-                    if (update.callback_query) {
-                      console.log(
-                        `[TelegramWMS] Callback ${update.callback_query.data || "(empty)"} | update ${update.update_id}`,
-                      );
-                      await handleTelegramWmsCallbackQuery(
-                        update.callback_query,
-                        update.update_id,
-                      );
-                    } else if (update.message) {
-                      await handleTelegramWmsIncomingMessage(
-                        update.message,
-                        update.update_id,
-                      );
-                    }
-                  } catch (updateError) {
-                    telegramWmsLastError = `Telegram update ${update.update_id} lỗi: ${updateError.message}`;
-                    console.error(
-                      `[TelegramWMS] Update ${update.update_id} failed:`,
-                      updateError,
-                    );
-                    if (update.callback_query) {
-                      await answerTelegramCallbackQuery(
-                        update.callback_query.id,
-                        "Có lỗi xử lý. Vui lòng thử lại.",
-                      );
-                      await sendTelegramWmsMessage(
-                        update.callback_query.message?.chat?.id,
-                        "❌ <b>Bot gặp lỗi khi xử lý nút vừa chọn.</b> Vui lòng bấm lại hoặc gửi <code>/rut</code> để tải menu mới.",
-                      );
-                    }
-                  } finally {
-                    // Một callback lỗi không được phép chặn toàn bộ hàng đợi bot.
-                    await saveTelegramWmsOffset(update.update_id + 1);
-                  }
-                }
-              } else {
-                telegramWmsLastError =
-                  json.description || `Telegram HTTP ${res.statusCode}`;
-                console.warn(
-                  "[TelegramWMS] Polling rejected:",
-                  telegramWmsLastError,
-                );
-              }
-            } catch (e) {
-              telegramWmsLastError = e.message;
-              console.warn("[TelegramWMS] Parse update error:", e.message);
-            }
-            // Avoid a tight request loop when Telegram returns no updates.
-            // The long-poll itself waits up to 8s, so 1s is still responsive
-            // while reducing idle wakeups and network churn.
-            scheduleNextPoll(telegramWmsLastError ? 3000 : 1000);
-          });
-        },
-      );
-      telegramWmsPollRequest.on("error", (error) => {
-        telegramWmsPollRequest = null;
-        if (!telegramWmsBotRunning) return;
-        telegramWmsLastError = error.message;
-        console.warn("[TelegramWMS] Polling request error:", error.message);
-        scheduleNextPoll(3000);
-      });
-      telegramWmsPollRequest.on("timeout", () => {
-        telegramWmsPollRequest?.destroy();
-      });
-      telegramWmsPollRequest.end();
-    } catch (err) {
-      telegramWmsPollRequest = null;
-      telegramWmsLastError = err.message;
-      console.warn("[TelegramWMS] Polling loop error:", err.message);
-      scheduleNextPoll(3000);
-    }
-  };
-
-  pollUpdates();
-}
-
-function stopTelegramWmsPolling() {
-  telegramWmsBotRunning = false;
-  clearTimeout(telegramWmsStartTimer);
-  telegramWmsStartTimer = null;
-  clearTimeout(telegramWmsPollTimer);
-  telegramWmsPollTimer = null;
-  if (telegramWmsPollRequest) {
-    telegramWmsPollRequest.destroy();
-    telegramWmsPollRequest = null;
-  }
-  void releaseTelegramWmsLease();
-  telegramWmsIsLeaseOwner = false;
-  telegramWmsOffsetLoaded = false;
-}
-
-// Telegram mutations use database transactions, idempotency keys, and
-// database-wide locks. Context authorization still limits the bot to the
-// configured warehouse group. Delay startup until after the shell has had
-// time to paint; this service is not needed for first paint.
-if (TELEGRAM_WMS_BOT_TOKEN) {
-  const startTelegramWmsAfterSession = () => {
-    telegramWmsStartTimer = null;
-    // The lease check is a database write/read pair.  Do not start it while
-    // the renderer is still restoring or establishing the user's session.
-    // Otherwise Telegram and login can contend for the same Supabase pool.
-    if (!currentSession) {
-      telegramWmsStartTimer = setTimeout(startTelegramWmsAfterSession, 5000);
-      telegramWmsStartTimer.unref?.();
-      return;
-    }
-    startTelegramWmsPolling();
-  };
-  telegramWmsStartTimer = setTimeout(startTelegramWmsAfterSession, 5000);
-  telegramWmsStartTimer.unref?.();
-}
-
 ipcMain.handle("handlingUnits:unsealUnit", async (_event, payload = {}) => {
   try {
     requireRole("admin", "manager");
@@ -13292,44 +13125,13 @@ ipcMain.handle("handlingUnits:finalizeShiftCheck", async (_event, payload = {}) 
   }
 });
 
-ipcMain.handle("handlingUnits:getTelegramStatus", async () => {
-  const groupConfig = await loadTelegramWmsGroupConfig();
-  return {
-    success: true,
-    data: {
-      isRunning: telegramWmsBotRunning,
-      isPollingOwner: telegramWmsIsLeaseOwner,
-      pollingOwner: telegramWmsLeaseOwnerLabel,
-      nodeLabel: `${os.hostname()} (PID ${process.pid})`,
-      nodeRole: TELEGRAM_WMS_NODE_ROLE,
-      nodePriority: TELEGRAM_WMS_NODE_PRIORITY,
-      tokenConfigured: Boolean(TELEGRAM_WMS_BOT_TOKEN),
-      takeoverTimeoutSeconds: Math.ceil(TELEGRAM_WMS_LEASE_DURATION_MS / 1000),
-      botUsername: "quanlykienhang_bot",
-      defaultChatId: TELEGRAM_WMS_DEFAULT_CHAT,
-      groupChatId: groupConfig.chatId,
-      groupTitle: groupConfig.title,
-      isGroupConnected: Boolean(groupConfig.chatId),
-      lastPollAt: telegramWmsLastPollAt,
-      lastError: telegramWmsLastError,
-    },
-  };
-});
-
-ipcMain.handle(
-  "handlingUnits:sendTelegramTest",
-  async (_event, payload = {}) => {
-    try {
-      requireRole("admin", "manager");
-      const text = String(payload.text || "Test message từ hệ thống POS");
-      const chatId = payload.chatId || null;
-      const res = await sendTelegramWmsMessage(chatId, text);
-      return { success: !!res?.ok, data: res };
-    } catch (error) {
-      return { success: false, error: error.message };
-    }
-  },
-);
+// Keep old renderer calls harmless during an update: no DB or Telegram access.
+for (const channel of ["handlingUnits:getTelegramStatus", "handlingUnits:sendTelegramTest"]) {
+  ipcMain.handle(channel, async () => ({
+    success: false,
+    error: "Telegram Bot quản lý kiện hàng đã ngừng sử dụng.",
+  }));
+}
 
 // Header alerts only need VAT state and date. Never send purchase line items
 // to every open desktop just to calculate a notification badge.
@@ -30384,7 +30186,13 @@ let attendanceMaintenanceTimer = null;
 const ATTENDANCE_FINE_PATCH_KEY = "attendanceFinePatchesV1";
 
 function normalizeAttendanceFinePatches(value) {
-  const source = value && typeof value === "object" ? value : {};
+  const source = value === undefined ? {} : value;
+  const isRecord = (item) => item !== null && typeof item === "object" && !Array.isArray(item);
+  if (!isRecord(source)
+    || (source.manual !== undefined && !isRecord(source.manual))
+    || (source.system !== undefined && !isRecord(source.system))) {
+    throw new Error("Dữ liệu lịch sử xóa phạt không hợp lệ. Chưa thực hiện thay đổi.");
+  }
   return {
     version: 1,
     manual: source.manual && typeof source.manual === "object" ? source.manual : {},
@@ -30392,7 +30200,28 @@ function normalizeAttendanceFinePatches(value) {
   };
 }
 
+function parseAttendanceFinePatches(record) {
+  let value = {};
+  if (record) {
+    try { value = JSON.parse(record.value); }
+    catch { throw new Error("Dữ liệu lịch sử xóa phạt không hợp lệ. Chưa thực hiện thay đổi."); }
+  }
+  return normalizeAttendanceFinePatches(value);
+}
+
 function applyAttendanceFinePatches(data, patchValue) {
+  if (data !== undefined && (data === null || typeof data !== "object" || Array.isArray(data))) {
+    throw new Error("Dữ liệu chấm công hiện hành không hợp lệ. Chưa thực hiện thay đổi.");
+  }
+  for (const field of ["extraFines", "fineAuditLog"]) {
+    if (data?.[field] != null && !Array.isArray(data[field])) {
+      throw new Error(`Dữ liệu ${field} không hợp lệ. Chưa thực hiện thay đổi.`);
+    }
+  }
+  if (data?.fineOverrides != null
+    && (typeof data.fineOverrides !== "object" || Array.isArray(data.fineOverrides))) {
+    throw new Error("Dữ liệu fineOverrides không hợp lệ. Chưa thực hiện thay đổi.");
+  }
   const patches = normalizeAttendanceFinePatches(patchValue);
   const extraFines = Array.isArray(data?.extraFines) ? [...data.extraFines] : [];
   const fineOverrides = data?.fineOverrides && typeof data.fineOverrides === "object"
@@ -30425,7 +30254,9 @@ function applyAttendanceFinePatches(data, patchValue) {
     }
   }
 
-  return { ...(data || {}), extraFines, fineOverrides, fineAuditLog };
+  // Exclude the retired penalty even while background withdrawal is waiting
+  // for a lock, or if an older workstation creates it again.
+  return { ...(data || {}), extraFines: extraFines.filter(fine => !isPrepackShortfallFine(fine) && !isHandlingUnitShiftFine(fine)), fineOverrides, fineAuditLog };
 }
 
 async function readAttendanceFinePatchRecord(client = prisma) {
@@ -30433,10 +30264,8 @@ async function readAttendanceFinePatchRecord(client = prisma) {
     where: { key: ATTENDANCE_FINE_PATCH_KEY },
     select: { value: true, updatedAt: true },
   });
-  let value = {};
-  try { value = record?.value ? JSON.parse(record.value) : {}; } catch { value = {}; }
   return {
-    value: normalizeAttendanceFinePatches(value),
+    value: parseAttendanceFinePatches(record),
     updatedAt: record?.updatedAt?.toISOString?.() || null,
   };
 }
@@ -30499,18 +30328,19 @@ async function getAttendanceCoreSnapshot() {
     const [rows, patchRecord] = await Promise.all([
       prisma.$queryRaw(Prisma.sql`
       WITH source AS MATERIALIZED (
-        SELECT "value"::jsonb AS data, "updatedAt" FROM "AppConfig"
+        SELECT "value"::json AS data, "updatedAt" FROM "AppConfig"
         WHERE "key" = 'attendanceData' LIMIT 1
       )
-      SELECT jsonb_set(
-        data,
-        '{lockedPeriods}',
-        COALESCE((
-          SELECT jsonb_agg(period_row - 'payrollSnapshot')
-          FROM jsonb_array_elements(
-            COALESCE(data->'lockedPeriods', '[]'::jsonb)
-          ) AS period_row
-        ), '[]'::jsonb)
+      -- Remove the frozen payroll before converting the compact result to
+      -- jsonb. Materializing the original ~12 MB document dominated this read.
+      SELECT (
+        COALESCE((SELECT json_object_agg(key, value)
+          FROM json_each(data) WHERE key <> 'lockedPeriods'), '{}'::json)::jsonb
+        || jsonb_build_object('lockedPeriods', COALESCE((
+          SELECT json_agg(COALESCE((SELECT json_object_agg(key, value)
+            FROM json_each(period_row) WHERE key <> 'payrollSnapshot'), '{}'::json))
+          FROM json_array_elements(COALESCE(data->'lockedPeriods', '[]'::json)) AS period_row
+        ), '[]'::json))
       )::text AS "value", "updatedAt"
       FROM source
     `),
@@ -31175,14 +31005,13 @@ ipcMain.handle("appConfig:set", async (event, key, value, expectedUpdatedAt) => 
                 const current = await tx.appConfig.findUnique({ where: { key } });
                 let valueToSave = { ...(value || {}), employees: [] };
                 let currentValueForFineMerge = null;
-                if (current?.value) {
+                if (current) {
                   try {
                     const patchRow = await tx.appConfig.findUnique({
                       where: { key: ATTENDANCE_FINE_PATCH_KEY },
                       select: { value: true },
                     });
-                    let finePatches = {};
-                    try { finePatches = patchRow?.value ? JSON.parse(patchRow.value) : {}; } catch {}
+                    const finePatches = parseAttendanceFinePatches(patchRow);
                     const currentValue = applyAttendanceFinePatches(JSON.parse(current.value), finePatches);
                     currentValueForFineMerge = currentValue;
                     valueToSave = {
@@ -31247,7 +31076,12 @@ ipcMain.handle("appConfig:set", async (event, key, value, expectedUpdatedAt) => 
                         scheduleHistory: currentConfig.scheduleHistory,
                       };
                     }
-                  } catch {}
+                  } catch (error) {
+                    if (error instanceof SyntaxError) {
+                      throw new Error("Dữ liệu chấm công hiện hành không hợp lệ. Chưa thực hiện thay đổi.");
+                    }
+                    throw error;
+                  }
                 }
                 if (currentValueForFineMerge) {
                   const mergedFineLedger = mergeAttendanceFineLedger(currentValueForFineMerge, valueToSave);
@@ -31698,15 +31532,14 @@ ipcMain.handle("attendance:deleteFine", async (event, payload = {}) => {
         try {
           return await getPrismaDirectTx().$transaction(async (tx) => {
             await tx.$executeRaw`SET LOCAL lock_timeout = '500ms'`;
-            await tx.$executeRaw`SET LOCAL statement_timeout = '2500ms'`;
-            // The attendanceData JSON is ~12 MB in production. Read and write
-            // only the fine branches in one SQL statement; a Node-side
-            // parse/stringify round-trip made this action spend 3–6 seconds
-            // before the actual delete even began.
+            await tx.$executeRaw`SET LOCAL statement_timeout = '8000ms'`;
+            // Parse as json and project the fine branch; converting the large
+            // frozen payroll document to jsonb can exceed the query deadline.
+            // Persist only a small deletion patch rather than the full document.
             let deletedFine = fine;
             if (kind === 'manual') {
               const rows = await tx.$queryRaw`
-                SELECT "value"::jsonb->'extraFines' AS "extraFines"
+                SELECT "value"::json->'extraFines' AS "extraFines"
                 FROM "AppConfig"
                 WHERE "key" = 'attendanceData'
                 FOR UPDATE NOWAIT
@@ -31728,9 +31561,7 @@ ipcMain.handle("attendance:deleteFine", async (event, payload = {}) => {
               where: { key: ATTENDANCE_FINE_PATCH_KEY },
               select: { value: true },
             });
-            let currentPatches = {};
-            try { currentPatches = patchRow?.value ? JSON.parse(patchRow.value) : {}; } catch {}
-            const nextPatches = normalizeAttendanceFinePatches(currentPatches);
+            const nextPatches = parseAttendanceFinePatches(patchRow);
             if (kind === 'manual') {
               if (nextPatches.manual[fineId]) throw new Error("Khoản phạt đã được xóa trước đó.");
               nextPatches.manual[fineId] = { fine: deletedFine, audit: auditObject };
@@ -31744,7 +31575,7 @@ ipcMain.handle("attendance:deleteFine", async (event, payload = {}) => {
               create: { key: ATTENDANCE_FINE_PATCH_KEY, value: JSON.stringify(nextPatches) },
             });
             return { deletedFine, audit: auditObject };
-          }, { isolationLevel: "Serializable", timeout: 4000, maxWait: 1000 });
+          }, { isolationLevel: "Serializable", timeout: 20000, maxWait: 5000 });
         } catch (error) {
           if (!isAttendanceFineDeleteRetryableError(error)
             || attempt === 2 || Date.now() - transactionStartedAt >= 2200) throw error;
@@ -36391,6 +36222,12 @@ async function publishPackingCommissionChangeAnnouncement({ changes, effectiveAt
   return { created: true, announcementId: created.id, recipientCount: recipientIds.length };
 }
 
+let attendancePolicyRead;
+async function getAttendancePolicySnapshot() {
+  attendancePolicyRead ||= require('./attendance-policy-read.cjs').createAttendancePolicyRead(prisma, Prisma);
+  return attendancePolicyRead();
+}
+
 // Announcements still work before the Announcement migration is deployed. Their
 // figures intentionally come from the same attendance config as payroll.
 async function getFallbackAnnouncements() {
@@ -36402,7 +36239,7 @@ async function getFallbackAnnouncements() {
   try {
     // Announcements only need policy/config fields; avoid fetching the large
     // locked payroll snapshots stored in the full attendance document.
-    const snapshot = await getAttendanceCoreSnapshot();
+    const snapshot = await getAttendancePolicySnapshot();
     attendanceData = snapshot.data || {};
     updatedAt = snapshot.updatedAt;
   } catch (error) {
@@ -36560,7 +36397,7 @@ async function getAttendanceEmployeeUsernames() {
   try {
     // Recipient matching only needs employee usernames, so use the compact
     // snapshot and keep the multi-megabyte payroll payload off this read path.
-    const snapshot = await getAttendanceCoreSnapshot();
+    const snapshot = await getAttendancePolicySnapshot();
     const attendanceData = snapshot.data || {};
     return new Set(
       (Array.isArray(attendanceData?.employees) ? attendanceData.employees : [])
@@ -39670,7 +39507,6 @@ function ensureFaceService() {
 
 // Tự dọn process khi app thoát
 app.on("before-quit", () => {
-  stopTelegramWmsPolling();
   if (faceServiceProcess) {
     console.log("[Face] 🧹 Tắt Python service khi app thoát");
     faceServiceProcess.kill();
@@ -41114,7 +40950,7 @@ ipcMain.handle("attendance:reconcileLateFines", async () => {
     });
     if (result.ledger) {
       const now = new Date();
-      result.ledger.extraFines = result.ledger.extraFines.filter(fine => !isPrematureMissingScheduleFine(fine, now));
+      result.ledger.extraFines = result.ledger.extraFines.filter(fine => !isPrematureMissingScheduleFine(fine, now) && !isPrepackShortfallFine(fine) && !isHandlingUnitShiftFine(fine));
     }
     invalidateAttendanceSnapshotCaches();
     console.log(`[Perf] attendance:reconcileLateFines ms=${Date.now() - startedAt} checked=${result.checked}`);

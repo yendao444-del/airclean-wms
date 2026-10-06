@@ -141,10 +141,10 @@ async function reconcileLateAttendanceFinesNow(prisma, options = {}) {
         const configRow = typeof tx.$queryRaw === 'function'
             ? (await tx.$queryRaw`
                 WITH source AS MATERIALIZED (
-                    SELECT "value"::jsonb AS data FROM "AppConfig"
+                    SELECT "value"::json AS data FROM "AppConfig"
                     WHERE "key" = 'attendanceData' LIMIT 1
                 )
-                SELECT jsonb_build_object(
+                SELECT json_build_object(
                     'config', data->'config',
                     'employees', data->'employees',
                     'extraFines', data->'extraFines',
@@ -184,12 +184,13 @@ async function reconcileLateAttendanceFinesNow(prisma, options = {}) {
                 // Only fine branches change; payroll snapshots stay untouched.
                 await tx.$executeRaw`
                     UPDATE "AppConfig"
-                    SET "value" = jsonb_set(
-                        jsonb_set(
-                            jsonb_set("value"::jsonb, '{extraFines}', ${JSON.stringify(patch.extraFines)}::jsonb, true),
-                            '{fineWaivers}', ${JSON.stringify(patch.fineWaivers)}::jsonb, true
-                        ), '{fineAuditLog}', ${JSON.stringify(patch.fineAuditLog)}::jsonb, true
-                    )::text, "updatedAt" = NOW()
+                    SET "value" = (SELECT json_object_agg(key, value) FROM (
+                        SELECT key, value FROM json_each("AppConfig"."value"::json)
+                        WHERE key NOT IN ('extraFines', 'fineWaivers', 'fineAuditLog')
+                        UNION ALL SELECT 'extraFines', ${JSON.stringify(patch.extraFines)}::json
+                        UNION ALL SELECT 'fineWaivers', ${JSON.stringify(patch.fineWaivers)}::json
+                        UNION ALL SELECT 'fineAuditLog', ${JSON.stringify(patch.fineAuditLog)}::json
+                    ) AS fine_fields)::text, "updatedAt" = NOW()
                     WHERE "key" = 'attendanceData'
                 `;
             } else {
@@ -219,7 +220,7 @@ async function applyLateFinePatchOptimistic(prisma, snapshotUpdatedAt, patch, re
         // The row update remains conditional on updatedAt and therefore
         // safely aborts/recomputes when another writer commits first.
         await tx.$executeRaw`SET LOCAL lock_timeout = '800ms'`;
-        await tx.$executeRaw`SET LOCAL statement_timeout = '5000ms'`;
+        await tx.$executeRaw`SET LOCAL statement_timeout = '8000ms'`;
         // Employment data lives outside attendanceData. Validate it too so a
         // resignation during the scan cannot create new fines for that user.
         const currentCutoffs = await loadResignedEmployeeCutoffs(tx);
@@ -228,12 +229,13 @@ async function applyLateFinePatchOptimistic(prisma, snapshotUpdatedAt, patch, re
         }
         const rows = await tx.$queryRaw`
             UPDATE "AppConfig"
-            SET "value" = jsonb_set(
-                jsonb_set(
-                    jsonb_set("value"::jsonb, '{extraFines}', ${JSON.stringify(patch.extraFines)}::jsonb, true),
-                    '{fineWaivers}', ${JSON.stringify(patch.fineWaivers)}::jsonb, true
-                ), '{fineAuditLog}', ${JSON.stringify(patch.fineAuditLog)}::jsonb, true
-            )::text, "updatedAt" = NOW()
+            SET "value" = (SELECT json_object_agg(key, value) FROM (
+                        SELECT key, value FROM json_each("AppConfig"."value"::json)
+                        WHERE key NOT IN ('extraFines', 'fineWaivers', 'fineAuditLog')
+                        UNION ALL SELECT 'extraFines', ${JSON.stringify(patch.extraFines)}::json
+                        UNION ALL SELECT 'fineWaivers', ${JSON.stringify(patch.fineWaivers)}::json
+                        UNION ALL SELECT 'fineAuditLog', ${JSON.stringify(patch.fineAuditLog)}::json
+                    ) AS fine_fields)::text, "updatedAt" = NOW()
             WHERE "key" = 'attendanceData' AND "updatedAt" = ${new Date(snapshotUpdatedAt)}
             RETURNING "updatedAt"
         `;
@@ -241,7 +243,7 @@ async function applyLateFinePatchOptimistic(prisma, snapshotUpdatedAt, patch, re
             throw Object.assign(new Error('Dữ liệu Bảng công vừa thay đổi.'), { code: 'P2034' });
         }
         return result;
-    }, { isolationLevel: 'Serializable', timeout: 6000, maxWait: 3000 });
+    }, { isolationLevel: 'Serializable', timeout: 20000, maxWait: 5000 });
 }
 
 function calculateLateAttendanceFinePlan(attendanceData, logs, options = {}) {

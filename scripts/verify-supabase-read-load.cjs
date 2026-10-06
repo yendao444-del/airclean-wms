@@ -24,6 +24,10 @@ async function main() {
   const diagnosticUrl = new URL(mainUrl);
   const prisma = new PrismaClient({ datasources: { db: { url: diagnosticUrl.toString() } } });
   const auth = new PrismaClient({ datasources: { db: { url: authUrl.toString() } } });
+  const direct = new PrismaClient({ datasources: { db: {
+    url: desktopPrismaUrl(process.env.DIRECT_URL || env.DIRECT_URL || rawUrl, { transactions: true }),
+  } } });
+  const policyRead = require('../electron/attendance-policy-read.cjs').createAttendancePolicyRead(prisma, Prisma);
   const concurrency = Math.max(1, Number(diagnosticUrl.searchParams.get('connection_limit')) - 1);
   prisma.$use(createPrismaReadRecovery({ concurrency, replay: params => {
     const delegate = params.model[0].toLowerCase() + params.model.slice(1);
@@ -46,18 +50,21 @@ async function main() {
         ['packingRevision', () => context.getPackingSourceRevision(range)],
         ['packingSource', () => require('../electron/packing-payroll-source').readPackingPayrollOrders(prisma, Prisma, range, 50000)],
         ['attendanceSnapshot', () => require('../electron/attendance-fine-snapshot').readLateFineSnapshot(prisma)],
+        ['notificationPolicy', () => policyRead()],
         ['attendanceLogs', () => prisma.attendanceLog.findMany({ where: { date: { gte: since.toISOString().slice(0, 10) } }, orderBy: { timestamp: 'asc' }, take: 10000 })],
         ['dailyTasks', () => prisma.dailyTask.findMany({ where: { status: { not: 'completed' } }, select: { id: true, title: true, assignee: true, status: true, attachments: true }, take: 300 })],
         ['prepackCleanupRead', () => prisma.prepackEvidence.findMany({ select: { id: true }, take: 300 })],
         ['auth', () => withIsolatedReadFallback(() => auth.user.findFirst({ select: { id: true, status: true } }), () => prisma.user.findFirst({ select: { id: true, status: true } }))],
-        ['leaseTransactionRead', () => prisma.$transaction(async tx => {
+        ['fineTransactionRead', () => direct.$transaction(async tx => {
           await tx.$executeRawUnsafe('SET TRANSACTION READ ONLY');
-          return tx.appConfig.findUnique({ where: { key: 'telegramWmsPollingLease' }, select: { updatedAt: true } });
-        }, { maxWait: 10000, timeout: 15000 })],
+          await tx.$executeRawUnsafe("SET LOCAL statement_timeout = '8000ms'");
+          await tx.$queryRaw`SELECT "value"::json->'extraFines' AS fines FROM "AppConfig" WHERE "key" = 'attendanceData'`;
+          return tx.appConfig.findUnique({ where: { key: 'attendanceFinePatchesV1' }, select: { updatedAt: true } });
+        }, { maxWait: 5000, timeout: 20000 })],
       ];
       // Two report callers at once, plus an independent auth and transaction
       // read. Results remain only in memory and are not emitted.
-      const jobs = [...requests, ...requests.slice(0, 6)];
+      const jobs = [...requests, ...requests.slice(0, 7)];
       const results = await Promise.allSettled(jobs.map(async ([name, work]) => {
         const started = Date.now();
         await work();
@@ -69,7 +76,7 @@ async function main() {
     }
     console.log(JSON.stringify({ result: 'SUPABASE_READ_LOAD_OK', mainPool: Number(diagnosticUrl.searchParams.get('connection_limit')), reportConcurrency: concurrency, authPool: 1, samples }));
   } finally {
-    await Promise.allSettled([prisma.$disconnect(), auth.$disconnect()]);
+    await Promise.allSettled([prisma.$disconnect(), auth.$disconnect(), direct.$disconnect()]);
   }
 }
 

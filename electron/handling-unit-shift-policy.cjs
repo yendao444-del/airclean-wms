@@ -1,6 +1,8 @@
 const LEDGER_KEY = "handlingUnitShiftChecksV1";
 const EFFECTIVE_DATE = "2026-09-30";
-const FINE_AMOUNT = 50000;
+// No reactivation date: only a future explicit policy change may enable fines.
+const FINE_AMOUNT = 0;
+const { reconcileWithdrawnFines } = require('./attendance-withdrawn-fines.cjs');
 const ROTATION = ["nguyendinhtoan", "nguyenvankhanh"];
 
 function dayKey(value) {
@@ -155,37 +157,24 @@ async function readShiftPolicy(tx, now = new Date()) {
   return policySnapshot(parseLedger(await tx.appConfig.findUnique({ where: { key: LEDGER_KEY } })), now);
 }
 
-function buildFines(ledger, attendance, now) {
-  carryDuties(ledger, now);
-  const existing = new Set((attendance.extraFines || []).map((fine) => String(fine.id)));
-  const deleted = new Set((attendance.fineAuditLog || []).filter((item) => item.action === "delete").map((item) => String(item.before?.id)));
-  const created = [];
-  for (const [date, day] of Object.entries(ledger.days)) {
-    const deadline = deadlineFor(date);
-    if (date < EFFECTIVE_DATE || new Date(now) <= deadline) continue;
-    if ((attendance.lockedPeriods || []).some((period) => period.start && period.end && dayKey(period.start) <= date && date <= dayKey(period.end))) continue;
-    const matches = (attendance.employees || []).filter((employee) => String(employee.username || "").trim().toLowerCase() === day.assignedTo);
-    // Never guess an employee's identity or charge an ambiguous payroll mapping.
-    if (matches.length !== 1 || !Number.isInteger(Number(matches[0].id))) continue;
-    const employee = matches[0];
-    const overdue = Object.entries(day.units).filter(([, unit]) => !unit.checkedAt || new Date(unit.checkedAt) > deadline).map(([code]) => code);
-    if (!overdue.length) continue;
-    const id = `fine-hu-shift-${date}-${day.assignedTo}`;
-    if (existing.has(id) || deleted.has(id)) continue;
-    created.push({
-      id, empId: Number(employee.id), amount: FINE_AMOUNT,
-      type: "Chưa kiểm kiện cuối ca",
-      detail: `Ngày ${date}: ${day.assignedTo} chưa hoàn thành kiểm cuối ca trước 23:59 (${overdue.join(", ")}). Phạt một lần/ngày.`,
-      date: deadline.toISOString(), attendanceDate: date, source: "handling-unit-shift-check",
-      assignedTo: day.assignedTo, unitCodes: overdue,
-    });
-  }
-  return created;
+function buildFines() {
+  return [];
+}
+
+function isHandlingUnitShiftFine(fine) {
+  return fine?.source === 'handling-unit-shift-check'
+    || String(fine?.id || '').startsWith('fine-hu-shift-')
+    || String(fine?.type || '').trim().toLocaleLowerCase('vi-VN') === 'chưa kiểm kiện cuối ca';
 }
 
 async function reconcileShiftFines(prisma, { now = new Date() } = {}) {
-  return prisma.$transaction(async (tx) => {
-    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('attendanceData'))`;
+  const result = await reconcileWithdrawnFines(prisma, isHandlingUnitShiftFine,
+    'Tạm ngừng phạt chưa kiểm kiện cuối ca theo yêu cầu quản lý.', { now });
+  if (!prisma?.$transaction) return result;
+  // Duties still carry over normally. This transaction touches only the
+  // checklist ledger, never a full attendance/payroll document.
+  await prisma.$transaction(async (tx) => {
+    await tx.$executeRaw`SET LOCAL lock_timeout = '1000ms'`;
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${LEDGER_KEY}))`;
     const ledgerRow = await tx.appConfig.findUnique({ where: { key: LEDGER_KEY } });
     const ledger = parseLedger(ledgerRow);
@@ -201,18 +190,8 @@ async function reconcileShiftFines(prisma, { now = new Date() } = {}) {
     if (ledgerRow?.value !== ledgerValue) {
       await tx.appConfig.upsert({ where: { key: LEDGER_KEY }, create: { key: LEDGER_KEY, value: ledgerValue }, update: { value: ledgerValue } });
     }
-    const row = await tx.appConfig.findUnique({ where: { key: "attendanceData" } });
-    const attendance = JSON.parse(row?.value || "{}");
-    const created = buildFines(ledger, attendance, now);
-    if (created.length) {
-      const value = JSON.stringify({ ...attendance, extraFines: [...(attendance.extraFines || []), ...created] });
-      await tx.appConfig.upsert({ where: { key: "attendanceData" }, create: { key: "attendanceData", value }, update: { value } });
-    }
-    return { created };
-  // Fine deletion intentionally bypasses the long-lived advisory lock. Never
-  // commit a full-document snapshot read before a concurrent deletion: a
-  // serialization conflict rolls this pass back and the next pass re-reads.
   }, { isolationLevel: 'Serializable', timeout: 15000, maxWait: 10000 });
+  return { ...result, skipped: 'policy_paused' };
 }
 
-module.exports = { LEDGER_KEY, EFFECTIVE_DATE, assigneeFor, deadlineFor, dayKey, applyEvents, policySnapshot, recordShiftEvents, readShiftPolicy, buildFines, reconcileShiftFines };
+module.exports = { LEDGER_KEY, EFFECTIVE_DATE, assigneeFor, deadlineFor, dayKey, applyEvents, policySnapshot, recordShiftEvents, readShiftPolicy, buildFines, reconcileShiftFines, isHandlingUnitShiftFine };

@@ -924,10 +924,12 @@ const normalizeAttendanceText = (value?: string | null) =>
         .trim();
 
 const isTemporarilyExcludedFine = (fine: Partial<FineRecord>) => {
-    if (fine.source === 'prepack-shortfall') {
-        const dateKey = String(fine.attendanceDate || (fine.date && dayjs(fine.date).format('YYYY-MM-DD')) || '');
-        return dateKey < '2026-09-30';
-    }
+    if (fine.source === 'prepack-shortfall'
+        || String(fine.id || '').startsWith('fine-prepack-shortfall-')
+        || String(fine.type || '').trim().toLocaleLowerCase('vi-VN') === 'thiếu đóng gói sẵn') return true;
+    if (fine.source === 'handling-unit-shift-check'
+        || String(fine.id || '').startsWith('fine-hu-shift-')
+        || String(fine.type || '').trim().toLocaleLowerCase('vi-VN') === 'chưa kiểm kiện cuối ca') return true;
     return String(fine.source || '').startsWith('daily_task_')
         && normalizeAttendanceText(`${(fine as any).taskTitle || ''} ${fine.detail || ''}`).includes('tach kien 5d unicare');
 };
