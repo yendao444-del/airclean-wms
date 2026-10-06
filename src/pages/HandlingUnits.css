@@ -1294,6 +1294,12 @@
   color: #fff;
   background: #d97706;
 }
+.hu-card-actions-bar .hu-action-btn:disabled,
+.hu-card-actions-bar .hu-action-btn:disabled:hover {
+  color: #94a3b8;
+  background: #f1f5f9;
+  cursor: not-allowed;
+}
 .hu-action-btn.final-check {
   color: #fff;
   background: #ea580c;
@@ -3442,3 +3448,15 @@
 .hu-history-ledger-meta > span:last-child { color: #1677ff; font-size: 11px; }
 .hu-history-reference { color: #1890ff; cursor: pointer; text-decoration: underline; font-family: monospace; font-size: 11px; }
 .hu-history-muted { color: #d9d9d9; }
+.hu-movement-history-filters {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+
+.hu-movement-history-filters .ant-input-affix-wrapper {
+  flex: 1;
+  min-width: 200px;
+}

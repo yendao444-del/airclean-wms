@@ -55,8 +55,10 @@ import { prepareHandlingUnitPrintUnits } from "../lib/handlingUnitPrintNumbers";
 import { packedStockForSku, summarizeHandlingUnitAllocation, summarizePackedInventory, suggestHandlingUnitAllocation } from "../lib/handlingUnitAllocation";
 import HandlingUnitPackedStock from "../components/HandlingUnitPackedStock";
 import HandlingUnitStockHistory from "../components/HandlingUnitStockHistory";
+import HandlingUnitMovementHistory from "../components/HandlingUnitMovementHistory";
 import { useAuth } from "../contexts/AuthContext";
 import { canCreatePackagePacking } from "../lib/packagePackingPermissions";
+import { canRecheckHandlingUnit } from "../lib/handlingUnitCheck";
 import PrepackManagement from "./PrepackManagement";
 import type { PackingLot } from "../types/packagePacking";
 import { compareHandlingUnitPickOrder } from "../../electron/handling-unit-pick-order.mjs";
@@ -1194,6 +1196,7 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
   const [showShiftCheckModal, setShowShiftCheckModal] = useState(false);
   const [shiftCheckScope, setShiftCheckScope] = useState<"all" | "mandatory">("all");
   const [shiftCheckFocusCode, setShiftCheckFocusCode] = useState<string | null>(null);
+  const [shiftCheckSnapshot, setShiftCheckSnapshot] = useState<ShiftCheckCandidate[]>([]);
   const [shiftCheckDrafts, setShiftCheckDrafts] = useState<
     Record<string, ShiftCheckDraft>
   >({});
@@ -2254,16 +2257,16 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
   const scopedShiftCheckCandidates = shiftCheckScope === "mandatory"
     ? mandatoryShiftCheckCandidates
     : shiftCheckCandidates;
-  const visibleShiftCheckCandidates = (shiftCheckFocusCode
-    ? scopedShiftCheckCandidates.filter(({ unit }) => unit.id === shiftCheckFocusCode)
-    : scopedShiftCheckCandidates
-  ).slice(0, 100);
+  // Keep the reference count/revision captured when opening the form. A live
+  // workspace refresh must not silently change what the employee is counting.
+  const visibleShiftCheckCandidates = (showShiftCheckModal ? shiftCheckSnapshot : scopedShiftCheckCandidates).slice(0, 100);
+  const canPerformUnitCheck = !isRolePreview && (isAdmin || user?.role === 'manager' || (user?.role === 'staff' && user.username === workspace.shiftCheckPolicy?.assignedTo));
 
   const shiftCheckEnteredCount = visibleShiftCheckCandidates.filter(({ unit }) => {
     const actual = shiftCheckDrafts[unit.id]?.actualQuantity;
     return actual !== null && actual !== undefined;
   }).length;
-  const canSubmitShiftCheck = visibleShiftCheckCandidates.length > 0 && visibleShiftCheckCandidates.every(({ unit }) => {
+  const canSubmitShiftCheck = canPerformUnitCheck && visibleShiftCheckCandidates.length > 0 && visibleShiftCheckCandidates.every(({ unit }) => {
     const draft = shiftCheckDrafts[unit.id];
     const actual = draft?.actualQuantity;
     if (actual === null || actual === undefined || !Number.isSafeInteger(actual) || actual < 0 || actual > unit.initialPcs) return false;
@@ -2272,6 +2275,7 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
   });
 
   const openShiftCheck = (scope: "all" | "mandatory" = "all") => {
+    if (!canPerformUnitCheck) { message.info('Chỉ người được phân công hôm nay hoặc quản lý được chốt kiểm kiện.'); return; }
     const candidates = scope === "mandatory"
       ? mandatoryShiftCheckCandidates
       : shiftCheckCandidates;
@@ -2285,6 +2289,7 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
     }
     setShiftCheckScope(scope);
     setShiftCheckFocusCode(null);
+    setShiftCheckSnapshot(candidates.map(candidate => ({ ...candidate, unit: { ...candidate.unit } })));
     setShiftCheckDrafts(
       Object.fromEntries(
         candidates.map(({ unit }) => [
@@ -2301,13 +2306,15 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
   };
 
   const openShiftCheckForUnit = (unit: UnitRow) => {
-    const candidate = shiftCheckCandidates.find((entry) => entry.unit.id === unit.id);
-    if (!candidate) {
-      message.info("Kiện này hiện chưa phát sinh nghĩa vụ kiểm cuối ca.");
+    if (!canPerformUnitCheck) { message.info('Chỉ người được phân công hôm nay hoặc quản lý được chốt kiểm kiện.'); return; }
+    if (!canRecheckHandlingUnit(unit.status)) {
+      message.info("Kiện này đã hết hoặc đã tách, không còn hoạt động để kiểm lại.");
       return;
     }
+    const candidate = shiftCheckCandidates.find((entry) => entry.unit.id === unit.id) || { unit, withdrawalCount: 0, withdrawnQuantity: 0, lastWithdrawalAt: 0 };
     setShiftCheckScope("all");
     setShiftCheckFocusCode(unit.id);
+    setShiftCheckSnapshot([{ ...candidate, unit: { ...unit } }]);
     shiftCheckRequestIdRef.current = `HU-SHIFT-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     setShiftCheckDrafts({
       // Require the assignee to count this package instead of confirming the software balance.
@@ -2327,7 +2334,7 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
   };
 
   const submitShiftCheck = async () => {
-    if (isSubmittingShiftCheck) return;
+    if (isSubmittingShiftCheck || !canPerformUnitCheck) return;
     try {
       const items = visibleShiftCheckCandidates.map(({ unit }) => {
         const draft = shiftCheckDrafts[unit.id];
@@ -2353,7 +2360,7 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
         return {
           code: unit.id,
           expectedQuantity: unit.currentPcs,
-          expectedUpdatedAt: unit.id.startsWith('PACKED:') ? unit.updatedAt : undefined,
+          expectedUpdatedAt: unit.updatedAt,
           actualQuantity,
           reason: draft?.reason || "",
           note: draft?.note || "",
@@ -2368,7 +2375,6 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
       if (!response?.success) {
         throw new Error(response?.error || "Không thể hoàn tất kiểm cuối ca.");
       }
-      if (response.data?.duplicate) return;
       const resultByCode = new Map(
         (response.data?.items || []).map((item: any) => [item.code, item]),
       );
@@ -2380,7 +2386,7 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
           return {
             ...unit,
             currentPcs: result.actualQuantity,
-            status: result.actualQuantity === 0 ? "Đã hết" : "Đang sử dụng",
+            status: result.status === 'sealed' ? 'Nguyên niêm phong' : result.actualQuantity === 0 ? "Đã hết" : "Đang sử dụng",
           };
         }),
       }));
@@ -2389,12 +2395,13 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
       ).length;
       message.success(
         varianceCount > 0
-          ? `Đã kiểm ${items.length} kiện; ghi nhận ${varianceCount} kiện chênh lệch.`
+          ? `Đã kiểm ${items.length} mục; chênh lệch đã cập nhật vào tồn phần mềm.`
           : `Đã kiểm khớp ${items.length} kiện cuối ca.`,
       );
       setShowShiftCheckModal(false);
       setShiftCheckDrafts({});
       setShiftCheckFocusCode(null);
+      setShiftCheckSnapshot([]);
       void loadWorkspace(true);
     } catch (error: any) {
       message.error(error?.message || "Không thể hoàn tất kiểm cuối ca.");
@@ -3398,6 +3405,7 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
                       <Button
                         icon={<CheckCircleOutlined />}
                         className="hu-btn-secondary hu-btn-shift-check"
+                        disabled={!canPerformUnitCheck}
                         onClick={() => openShiftCheck("all")}
                       >
                         Kiểm cuối ca
@@ -3669,20 +3677,14 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
                                   </button>
                                 );
                               })()}
-                            {unit.status === "Đang sử dụng" && shiftCheckCandidates.some(({ unit: candidate }) => candidate.id === unit.id) && (
+                            {canRecheckHandlingUnit(unit.status) && (
                               <button
                                 className="hu-action-btn pick"
+                                disabled={!canPerformUnitCheck}
+                                title={!canPerformUnitCheck ? 'Chỉ người được phân công hôm nay hoặc quản lý được chốt kiểm kiện.' : 'Đếm thực tế và cập nhật chênh lệch vào tồn phần mềm'}
                                 onClick={() => openShiftCheckForUnit(unit)}
                               >
                                 <CheckCircleOutlined /> Kiểm kiện
-                              </button>
-                            )}
-                            {unit.status === "Chờ kiểm" && (
-                              <button
-                                className="hu-action-btn pick"
-                                onClick={() => openFinalCheck(unit)}
-                              >
-                                <CheckCircleOutlined /> Kiểm thực tế
                               </button>
                             )}
                             {["Nguyên niêm phong", "Đang sử dụng"].includes(unit.status) &&
@@ -3722,14 +3724,17 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
                   </Button>
                 </Flex>
               )}
+              {activeModuleTab === "history" && (
+                <HandlingUnitMovementHistory key={selected.sku} sku={selected.sku} entries={workspace.recentTransactions} units={workspace.register} />
+              )}
               <section className="hu-global-history" aria-labelledby="hu-sku-history-title">
                 <header className="hu-global-history-header">
                   <div>
                     <Typography.Title level={5} id="hu-sku-history-title">
-                      <HistoryOutlined /> Lịch sử {selected.color || selected.sku}
+                      <HistoryOutlined /> Thẻ kho {selected.color || selected.sku}
                     </Typography.Title>
                     <Typography.Text type="secondary">
-                      Hoạt động của SKU {selected.sku} · {selected.productGroup}
+                      Nhập / xuất SKU {selected.sku} · Số tồn đầu / cuối là tồn toàn bộ SKU
                     </Typography.Text>
                   </div>
                   <Tag color="blue" style={{ margin: 0 }}>
@@ -3993,7 +3998,7 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
                     ? "Kiện hàng hoàn: chuyển sang kiện đang khui cùng SKU hoặc chuyển vị trí."
                     : detail.status === "Đã tách"
                       ? "Kiện cha đã khóa sau khi tách; theo dõi ở các kiện con."
-                      : "Kiện đang chờ kiểm; nhập số thực tế bằng Kiểm kiện cuối ca."}
+                      : "Kiện đang chờ kiểm; bấm Kiểm kiện và nhập số đếm thực tế."}
                 </Typography.Text>
               ) : null}
               {detail.status === "Nguyên niêm phong" &&
@@ -4030,26 +4035,16 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
                     </Button>
                   );
                 })()}
-              {detail.status === "Đang sử dụng" && shiftCheckCandidates.some(({ unit }) => unit.id === detail.id) && (
+              {canRecheckHandlingUnit(detail.status) && (
                 <Button
                   type="primary"
+                  disabled={!canPerformUnitCheck}
                   icon={<CheckCircleOutlined />}
                   size="middle"
                   style={{ background: "#d48806", borderColor: "#d48806" }}
                   onClick={() => openShiftCheckForUnit(detail)}
                 >
                   Kiểm kiện
-                </Button>
-              )}
-              {detail.status === "Chờ kiểm" && (
-                <Button
-                  type="primary"
-                  icon={<CheckCircleOutlined />}
-                  size="middle"
-                  style={{ background: "#d48806", borderColor: "#d48806" }}
-                  onClick={() => openFinalCheck(detail)}
-                >
-                  Kiểm và chốt hết kiện
                 </Button>
               )}
               {["Nguyên niêm phong", "Đang sử dụng"].includes(detail.status) &&
@@ -4087,6 +4082,7 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
                 </Dropdown>
               )}
             </div>
+            <HandlingUnitMovementHistory key={detail.id} sku={detail.skuName} unitCode={detail.id} entries={workspace.recentTransactions} units={workspace.register} />
             <HandlingUnitStockHistory sku={detail.skuName} />
           </div>
         )}
@@ -4581,9 +4577,9 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
               <CheckCircleOutlined />
             </span>
             <div>
-              <b>{shiftCheckScope === "mandatory" ? "Kiểm và chốt kiện" : "Kiểm cuối ca"}</b>
+              <b>{shiftCheckFocusCode ? "Kiểm kiện" : shiftCheckScope === "mandatory" ? "Kiểm và chốt kiện" : "Kiểm cuối ca"}</b>
               <small>
-                {shiftCheckScope === "mandatory"
+                {shiftCheckFocusCode ? `Kiểm lại kiện ${shiftCheckFocusCode}, không phụ thuộc phát sinh xuất hàng` : shiftCheckScope === "mandatory"
                   ? "Chỉ gồm các kiện đang ở trạng thái Chờ kiểm"
                   : "Đối chiếu các kiện cần kiểm hôm nay, gồm cả kiện chưa kiểm từ ngày trước"}
               </small>
@@ -4596,6 +4592,7 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
           setShowShiftCheckModal(false);
           setShiftCheckDrafts({});
           setShiftCheckFocusCode(null);
+          setShiftCheckSnapshot([]);
         }}
         onOk={submitShiftCheck}
         okText={`${shiftCheckScope === "mandatory" ? "Chốt" : "Hoàn tất kiểm"} ${shiftCheckEnteredCount}/${visibleShiftCheckCandidates.length} mục`}
@@ -4614,12 +4611,10 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
           type="info"
           showIcon
           message={shiftCheckScope === "mandatory" ? "Nhập số lượng thực tế để chốt kiện" : "Nhập số lượng đếm thực tế trong từng kiện"}
-          description={shiftCheckScope === "mandatory"
-            ? "Kiện chỉ được mở lại thao tác sau khi đã chốt số thực tế."
-            : "Đếm hàng còn trong kiện và số combo đóng sẵn chưa xuất; không tháo combo để đếm lại. Hạn kiểm 23:59; tạm thời chưa áp dụng phạt kiểm kiện cuối ca. Kết quả độc lập với Kiểm hàng trong Quản lý kho."}
+          description="Chỉ nhập hàng thực tế trong từng kiện hoặc lô combo đang kiểm. Chênh lệch sẽ cộng/trừ tồn phần mềm theo đúng SKU, không phải xuất bán. Hàng đã chuyển sang combo hoặc hàng rời cần được ghi nhận chuyển nội bộ, không tính là thiếu. Số đếm không tự điền. Tạm thời chưa áp dụng phạt kiểm cuối ca."
           style={{ marginBottom: 14 }}
         />
-        {scopedShiftCheckCandidates.length > 100 && (
+        {!shiftCheckFocusCode && scopedShiftCheckCandidates.length > 100 && (
           <Alert type="info" showIcon style={{ marginBottom: 14 }} message={`Đang kiểm 100/${scopedShiftCheckCandidates.length} kiện. Sau khi chốt đợt này, tiếp tục kiểm các kiện còn lại.`} />
         )}
         <Table
@@ -4658,8 +4653,8 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
                     </>
                   ) : (
                     <>
-                      <b>Chưa kiểm từ ngày trước</b>
-                      <small>Không có phát sinh rút mới · {formatHistoryTime(new Date(item.lastWithdrawalAt).toISOString())}</small>
+                      <b>{shiftCheckFocusCode ? 'Kiểm lại chủ động' : 'Chưa kiểm từ ngày trước'}</b>
+                      <small>Không có phát sinh rút mới{item.lastWithdrawalAt > 0 ? ` · ${formatHistoryTime(new Date(item.lastWithdrawalAt).toISOString())}` : ''}</small>
                     </>
                   )}
                 </div>

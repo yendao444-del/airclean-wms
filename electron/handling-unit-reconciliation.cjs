@@ -58,8 +58,8 @@ function planPacked(lots, requestedSkus, stockBySku) {
   return { lots: nextLots, skus: [...skus].sort(), changes };
 }
 
-// Preserve package identities after FIFO exports. Only reconcile the net
-// difference; rebuilding the queue would refill partially consumed packages.
+// Software stock caps containment, but a surplus is unallocated stock.
+// Never infer that it was put back into a counted or partially used package.
 function planPackages(units, sku, target) {
   const packages = packageView(units, sku);
   for (const item of packages) if (!isCount(item.quantity) || !isCount(item.capacity)) throw new Error('Số dư kiện không hợp lệ.');
@@ -70,14 +70,6 @@ function planPackages(units, sku, target) {
     const removed = Math.min(balances[i], -remaining);
     balances[i] -= removed;
     remaining += removed;
-  }
-  for (let i = 0; i < packages.length && remaining > 0; i++) {
-    const item = packages[i];
-    if (!item.quantity || item.status === 'empty' || item.status === 'split') continue;
-    const capacity = Math.min(item.capacity, 300);
-    const allocated = Math.min(capacity - balances[i], remaining);
-    balances[i] += allocated;
-    remaining -= allocated;
   }
   return {
     packages: packages.map((item, i) => ({ ...item, synchronizedQuantity: balances[i],

@@ -103,6 +103,9 @@ async function transferToPacked(tx, row, nextQuantity, inventory, actor, recordT
   const delta = nextQuantity - previousQuantity;
   if (!delta) return lot;
   if (Number(lot?.issuedQty || 0) > 0) throw new Error('Combo đã xuất, không được sửa số đã đóng.');
+  // A physical count has already adjusted component stock. Reinterpreting the
+  // counted difference as another source transfer would invent/reduce goods.
+  if (lot?.lastCheckedAt) throw new Error('Combo đã kiểm thực tế, không được sửa số đã đóng. Hãy dùng kiểm lại để ghi nhận chênh lệch mới.');
   const components = [...row.components].sort((a, b) => String(a.sku).localeCompare(String(b.sku)));
   const changes = [];
   const plans = [];

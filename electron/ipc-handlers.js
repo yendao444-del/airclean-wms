@@ -12938,16 +12938,14 @@ const isHandlingUnitCompletedCheckHistory = (item) =>
     String(item?.type || ""),
   );
 
+const { finalizeCountsInTx } = require('./handling-unit-count.cjs');
+
 ipcMain.handle("handlingUnits:finalizeShiftCheck", async (_event, payload = {}) => {
   const idempotencyKey = String(payload.idempotencyKey || "").trim();
-  const requestKey = idempotencyKey ? `shift-check:${idempotencyKey}` : null;
-  if (requestKey && handlingUnitPickRequests.has(requestKey)) {
-    return { success: true, data: { duplicate: true } };
-  }
-  if (requestKey) handlingUnitPickRequests.add(requestKey);
   try {
     requireRole("admin", "manager", "staff");
-    if (currentSession.role === "staff" && currentSession.username !== shiftAssigneeFor(shiftDayKey(new Date()))) {
+    const actor = { ...currentSession };
+    if (actor.role === "staff" && actor.username !== shiftAssigneeFor(shiftDayKey(new Date()))) {
       throw new Error("Bạn không phải người được phân công kiểm cuối ca hôm nay.");
     }
     if (!prisma) throw new Error("Không kết nối được cơ sở dữ liệu kiện hàng.");
@@ -12990,138 +12988,33 @@ ipcMain.handle("handlingUnits:finalizeShiftCheck", async (_event, payload = {}) 
       const packedInventory = packagePackingModule.decodeInventory(await tx.appConfig.findUnique({ where: { key: packagePackingModule.INVENTORY_KEY } }));
       const completed = await tx.appConfig.findUnique({ where: { key: operationKey } });
       if (completed) {
-        return { items: JSON.parse(completed.value || "[]"), duplicate: true };
+        return { items: JSON.parse(completed.value || "[]"), stockChanges: [], duplicate: true };
       }
       await tx.$queryRaw(
         Prisma.sql`SELECT "id" FROM "HandlingUnit" WHERE "code" IN (${Prisma.join(normalizedItems.map((item) => item.code))}) FOR UPDATE`,
       );
-      const historyConfig = await tx.appConfig.findUnique({
-        where: { key: "handlingUnitsTransactionsJson" },
-        select: { value: true },
+      const checked = await finalizeCountsInTx(tx, normalizedItems, {
+        actor, packedInventory, updateStock: updateProductStockInTx,
+        appendHistory: appendHandlingUnitsTransactions, reference: operationKey,
       });
-      let history = [];
-      try {
-        const parsed = JSON.parse(historyConfig?.value || "[]");
-        history = Array.isArray(parsed) ? parsed : [];
-      } catch {}
-      const todayKey = shiftDayKey(new Date());
-      const shiftPolicy = await readShiftPolicy(tx);
-      const outstandingCodes = new Set(shiftPolicy.outstanding.map((entry) => entry.code));
-      const checked = [];
-      const historyEntries = [];
-
-      for (const item of normalizedItems) {
-        if (item.code.startsWith('PACKED:')) {
-          if (!outstandingCodes.has(item.code)) throw new Error('Combo này không có nghĩa vụ kiểm cuối ca chưa hoàn thành.');
-          const result = packagePackingModule.checkPackedCount(packedInventory, item, currentSession.username);
-          checked.push(result.checked);
-          historyEntries.push(result.history);
-          continue;
-        }
-        const unit = await tx.handlingUnit.findUnique({ where: { code: item.code } });
-        if (!unit) throw new Error(`Không tìm thấy kiện [${item.code}].`);
-        if (unit.status === "split" || unit.status === "Đã tách") {
-          throw new Error(await buildSplitHandlingUnitMessage(tx, item.code));
-        }
-        if (Number(unit.remainingQuantity) !== item.expectedQuantity) {
-          throw new Error(
-            `Tồn kiện [${item.code}] vừa thay đổi từ ${item.expectedQuantity} thành ${unit.remainingQuantity}. Vui lòng tải lại và kiểm lại.`,
-          );
-        }
-        if (item.actualQuantity > Number(unit.initialQuantity)) {
-          throw new Error(
-            `Tồn thực tế kiện [${item.code}] không thể lớn hơn số lượng ban đầu ${unit.initialQuantity}.`,
-          );
-        }
-
-        const unitHistory = history.filter(
-          (entry) => String(entry?.unitId || "").trim().toUpperCase() === item.code,
-        );
-        const isPendingCheck = unit.status === "pending_check" || unit.status === "Chờ kiểm";
-        const latestWithdrawalAt = unitHistory
-          .filter(
-            (entry) =>
-              isHandlingUnitWithdrawalHistory(entry) &&
-              (isPendingCheck || shiftDayKey(entry.createdAt) === todayKey),
-          )
-          .reduce((latest, entry) => Math.max(latest, new Date(entry.createdAt).getTime() || 0), 0);
-        const latestCheckAt = unitHistory
-          .filter(isHandlingUnitCompletedCheckHistory)
-          .reduce((latest, entry) => Math.max(latest, new Date(entry.createdAt).getTime() || 0), 0);
-        if (!isPendingCheck && !outstandingCodes.has(item.code) && (!latestWithdrawalAt || latestCheckAt >= latestWithdrawalAt)) {
-          throw new Error(`Kiện [${item.code}] không ở trạng thái chờ kiểm và không có lượt rút mới cần kiểm trong hôm nay.`);
-        }
-
-        const variance = item.actualQuantity - item.expectedQuantity;
-        if (variance !== 0 && !item.reason) {
-          throw new Error(`Vui lòng chọn lý do chênh lệch cho kiện [${item.code}].`);
-        }
-        if (variance !== 0 && item.reason === "Khác" && !item.note) {
-          throw new Error(`Vui lòng nhập ghi chú cho lý do khác của kiện [${item.code}].`);
-        }
-
-        const nextStatus = item.actualQuantity === 0 ? "empty" : "opened";
-        const updated = await tx.handlingUnit.update({
-          where: { code: item.code },
-          data: {
-            remainingQuantity: item.actualQuantity,
-            status: nextStatus,
-            updatedAt: new Date(),
-          },
-        });
-        historyEntries.push({
-          unitId: item.code,
-          sku: unit.sku,
-          type: variance === 0 ? "Kiểm cuối ca - khớp" : "Kiểm cuối ca - điều chỉnh",
-          quantity: variance,
-          remaining: item.actualQuantity,
-          expectedQuantity: item.expectedQuantity,
-          actualQuantity: item.actualQuantity,
-          variance,
-          actor: currentSession?.username || "Renderer",
-          reason: variance === 0 ? "Kiểm khớp" : item.reason,
-          note: [
-            `Tồn dự kiến ${item.expectedQuantity}; thực tế ${item.actualQuantity}; chênh lệch ${variance > 0 ? "+" : ""}${variance}`,
-            item.reason,
-            item.note,
-          ]
-            .filter(Boolean)
-            .join(" · "),
-        });
-        checked.push({
-          code: item.code,
-          expectedQuantity: item.expectedQuantity,
-          actualQuantity: item.actualQuantity,
-          variance,
-          status: nextStatus,
-          unit: updated,
-        });
-      }
-
-      if (normalizedItems.some(item => item.code.startsWith('PACKED:'))) {
-        const value = JSON.stringify(packedInventory);
-        await tx.appConfig.upsert({ where: { key: packagePackingModule.INVENTORY_KEY }, create: { key: packagePackingModule.INVENTORY_KEY, value }, update: { value } });
-      }
-      await appendHandlingUnitsTransactions(tx, historyEntries);
       await tx.appConfig.create({
-        data: { key: operationKey, value: JSON.stringify(checked) },
+        data: { key: operationKey, value: JSON.stringify(checked.items) },
       });
-      return { items: checked, duplicate: false };
-    });
+      return { ...checked, duplicate: false };
+    }, { timeout: 30000, maxWait: 10000 });
 
     if (!result.duplicate) {
+      emitStockChangedForSkus(result.stockChanges.map(item => item.sku), { referenceType: 'KIEM_KIEN', reference: operationKey });
       broadcastHandlingUnitsChanged("SHIFT_CHECK", {
         codes: result.items.map((item) => item.code),
         checkedCount: result.items.length,
-        actor: currentSession?.username || "Renderer",
+        actor: actor.username,
       });
     }
     return { success: true, data: result };
   } catch (error) {
     console.error("Finalize handling-unit shift check error:", error);
     return { success: false, error: error.message };
-  } finally {
-    if (requestKey) handlingUnitPickRequests.delete(requestKey);
   }
 });
 

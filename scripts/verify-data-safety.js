@@ -420,6 +420,8 @@ try {
     '--test',
     path.join(root, 'tests/handling-unit-shift-checklist.test.cjs'),
     path.join(root, 'tests/handling-unit-shift-policy.test.cjs'),
+    path.join(root, 'tests/handling-unit-count-stock.test.cjs'),
+    path.join(root, 'tests/handling-unit-shift-count.test.cjs'),
   ], {
     cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 30000,
   });
@@ -427,7 +429,8 @@ try {
   failures.push(`End-of-shift checklist behavior verification failed:\n${error.stdout || error.stderr || error.message}`);
 }
 requireText(ipc, 'await recordShiftEvents(tx, nextItems);', 'End-of-shift evidence must persist atomically with package history');
-requireText(ipc, '!outstandingCodes.has(item.code)', 'End-of-shift submission must accept durable obligations beyond the rolling history');
+requireText(ipc, 'await finalizeCountsInTx(tx, normalizedItems, {', 'Package rechecks must use the atomic count service independently of display history');
+requireText(ipc, 'updateStock: updateProductStockInTx,', 'Package count variances must update the shared software-stock ledger in the same transaction');
 requireText(ipc, 'DATA_SAFETY_MUTABLE_CONFIG_KEYS', 'Narrow mutable AppConfig allowlist is missing');
 requireText(preload, 'const appConfigWriteTails = new Map();', 'AppConfig writes must be serialized per key in preload');
 requireText(preload, 'hasRevision ? appConfigRevisions.get(key) : undefined', 'AppConfig writes must include the last read revision');
