@@ -375,6 +375,10 @@ function watchElectronBackend({ devServerUrl, useBuiltRenderer = false }) {
     'packing-read-model.js',
     'update-handlers.js',
     'offline-queue.js',
+    'tmdt-physical-stock.cjs',
+    'package-packing.cjs',
+    'handling-unit-reconciliation.cjs',
+    'handling-unit-pick-order.mjs',
   ];
   for (const filename of watchedFiles) {
     const filePath = path.join(projectRoot, 'electron', filename);

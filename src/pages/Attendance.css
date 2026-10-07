@@ -2873,6 +2873,17 @@
     color: #f07500;
 }
 
+.att-shift-pill.is-pending-checkout {
+    border-color: #efd566;
+    background: #fff8cc;
+    color: #876800;
+}
+
+.att-shift-pill__warning {
+    margin-left: 4px;
+    font-size: 9px;
+}
+
 .att-shift-pill.is-rest {
     border-color: #e1e5e8;
     background: #f7f8f9;

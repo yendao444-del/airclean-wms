@@ -58,7 +58,6 @@ const DAILY_MAX_SKUS = 15;
 const TEMPORARY_DAILY_ONLY_MODE = false;
 const DAILY_PRODUCT_NAMES = ['5D UNICARE', 'UPF UNICARE', 'AMI ECO'];
 const FULL_CHECK_OPEN_HOUR = 16;
-const DAILY_CHECK_OPEN_HOUR = 17;
 // The test operator can use the stock-check workflow, but must never be part
 // of the real manager rotation or receive a production assignment.
 const STOCK_CHECK_EXCLUDED_ASSIGNEE_USERNAMES = new Set(['test']);
@@ -589,15 +588,12 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
     const isPast = currentDate.isBefore(dayjs(), 'day');
     const isFuture = currentDate.isAfter(dayjs(), 'day');
     const isLockedDate = isPast || isFuture;
-    const dailyWindowOpen = !isToday || clockNow.hour() >= DAILY_CHECK_OPEN_HOUR;
+    const dailyWindowOpen = true;
     const fullWindowOpen = !isToday || clockNow.hour() >= FULL_CHECK_OPEN_HOUR;
-    // Admin may prepare the daily session before the staff opening time, but
-    // non-admin checkers remain locked until 17:00.
-    const dailyWindowOpenForUser = dailyWindowOpen || isAdmin;
     const activeWindowOpen = activeTab === 'inspection'
-        || (activeTab === 'full' ? fullWindowOpen : dailyWindowOpenForUser);
+        || (activeTab === 'full' ? fullWindowOpen : dailyWindowOpen);
     const isActiveTimeLocked = isToday && !activeWindowOpen;
-    const activeOpeningTime = activeTab === 'full' ? '16:00' : '17:00';
+    const activeOpeningTime = '16:00';
     const activeTimedLabel = activeTab === 'full' ? 'Kiểm toàn bộ' : 'Kiểm hàng ngày';
     const canCreateInspection = user?.role === 'admin' || user?.role === 'manager' || user?.isTestAccount === true;
     // Only admin can compare the physical count to system stock. A historical
@@ -1080,15 +1076,11 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
                                         e.currentTarget.style.color = '#334155';
                                     }
                                 }}
-                                title={dailyDisabledByFull
-                                    ? 'Hôm nay đã có phiên kiểm toàn bộ'
-                                    : !dailyWindowOpen && !isAdmin ? 'Kiểm hàng ngày mở lúc 17:00' : undefined}
+                                title={dailyDisabledByFull ? 'Hôm nay đã có phiên kiểm toàn bộ' : undefined}
                             >
                                 <span>Kiểm hàng ngày</span>
                                 {dailyDisabledByFull ? (
                                     <span style={getBadgeStyle(activeTab === 'daily', 'alert')}>Tạm dừng</span>
-                                ) : !dailyWindowOpen && !isAdmin ? (
-                                    <span style={getBadgeStyle(activeTab === 'daily', 'time')}>17:00</span>
                                 ) : null}
                             </button>
 
@@ -1309,7 +1301,12 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
                 reason: inspectionReason.trim(),
             });
             if (!result?.success || !result.session) throw new Error(result?.error || 'Không thể tạo phiếu kiểm.');
-            const nextSessions = [...sessions.filter(session => session.id !== result.session.id), result.session as CheckSession];
+            // Creating a priority inspection can change the scope of older
+            // sessions too. Reload the authoritative ledger, not only the new row.
+            const nextSessions = await loadSessions().catch(() => {
+                message.warning('Phiếu kiểm đã tạo. Chưa tải lại được các phiên cũ, vui lòng tải lại danh sách.');
+                return [...sessions.filter(session => session.id !== result.session.id), result.session as CheckSession];
+            });
             setSessions(nextSessions);
             localStorage.setItem(LS_KEY, JSON.stringify(nextSessions));
             setSelectedInspectionId(result.session.id);
@@ -1618,10 +1615,6 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
         const useFullInventory = activeTab === 'full';
         if (useFullInventory && !fullWindowOpen) {
             message.info('Kiểm toàn bộ chỉ mở từ 16:00.');
-            return;
-        }
-        if (!useFullInventory && !dailyWindowOpen && !isAdmin) {
-            message.info('Kiểm hàng ngày chỉ mở từ 17:00.');
             return;
         }
         if (!useFullInventory && weekend) {

@@ -54,8 +54,9 @@ import HandlingUnitPrintLabel from "../components/HandlingUnitPrintLabel";
 import { prepareHandlingUnitPrintUnits } from "../lib/handlingUnitPrintNumbers";
 import { packedStockForSku, summarizeHandlingUnitAllocation, summarizePackedInventory, suggestHandlingUnitAllocation } from "../lib/handlingUnitAllocation";
 import HandlingUnitPackedStock from "../components/HandlingUnitPackedStock";
-import HandlingUnitStockHistory from "../components/HandlingUnitStockHistory";
-import HandlingUnitMovementHistory from "../components/HandlingUnitMovementHistory";
+import HandlingUnitShiftChecklist, { ShiftFamilySearch } from "../components/HandlingUnitShiftChecklist";
+import { identifyShiftCandidates, scopeShiftCandidates, type ShiftIdentity } from "../lib/handlingUnitShiftScope";
+import HandlingUnitUnifiedHistory from "../components/HandlingUnitUnifiedHistory";
 import { useAuth } from "../contexts/AuthContext";
 import { canCreatePackagePacking } from "../lib/packagePackingPermissions";
 import { canRecheckHandlingUnit } from "../lib/handlingUnitCheck";
@@ -154,7 +155,7 @@ type Workspace = {
     trackedCodes: string[];
   };
 };
-type ShiftCheckCandidate = {
+type ShiftCheckCandidate = ShiftIdentity & {
   packed?: boolean;
   unit: UnitRow;
   withdrawnQuantity: number;
@@ -495,39 +496,6 @@ const buildSplitQuantities = (total: number, targetSize: number) => {
     ...Array.from({ length: fullUnits }, () => normalizedTarget),
     ...(remainder > 0 ? [remainder] : []),
   ];
-};
-
-const historyActionMeta = (type?: string) => {
-  const value = String(type || "Hoạt động khác");
-  if (/^NHAP$/i.test(value)) return { label: "Nhập", color: "green" };
-  if (/^POS$/i.test(value)) return { label: "POS", color: "blue" };
-  if (/^TMDT$/i.test(value)) return { label: "TMĐT", color: "purple" };
-  if (/^XUAT$/i.test(value)) return { label: "Xuất", color: "orange" };
-  if (/^TRA$/i.test(value)) return { label: "Trả", color: "gold" };
-  if (/^HOAN$/i.test(value)) return { label: "Hoàn", color: "cyan" };
-  if (/^CAN_BANG$/i.test(value)) return { label: "Cân bằng", color: "geekblue" };
-  if (/đồng bộ kiện/i.test(value)) return { label: "Đồng bộ", color: "default" };
-  if (/chuyển chờ xuất kho tmdt/i.test(value)) return { label: "Xuất TMĐT", color: "blue" };
-  if (/nhập kiện|tạo kiện/i.test(value)) return { label: "Nhập kiện", color: "green" };
-  if (/lấy hàng|rút hàng|chuyển/i.test(value)) return { label: "Chuyển", color: "blue" };
-  if (/khui|mở/i.test(value)) return { label: "Mở kiện", color: "orange" };
-  if (/đóng|niêm phong/i.test(value)) return { label: "Đóng kiện", color: "cyan" };
-  if (/tách kiện|nhận từ tách/i.test(value)) return { label: "Tách kiện", color: "blue" };
-  if (/kiểm|điều chỉnh/i.test(value)) return { label: "Điều chỉnh", color: "gold" };
-  if (/xóa/i.test(value)) return { label: "Xóa", color: "red" };
-  return { label: value, color: "default" };
-};
-
-const formatHistoryTime = (value?: string) => {
-  const date = value ? new Date(value) : null;
-  if (!date || Number.isNaN(date.getTime())) return "--";
-  return date.toLocaleString("vi-VN", {
-    day: "2-digit",
-    month: "2-digit",
-    year: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
 };
 
 const localDayKey = (value: string | number | Date) => {
@@ -1141,13 +1109,6 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
 
   const [statusFilter, setStatusFilter] = useState<string>("all");
   const [visibleUnitLimit, setVisibleUnitLimit] = useState(100);
-  const [historySearch, setHistorySearch] = useState("");
-  const [historyType, setHistoryType] = useState("all");
-  const [historyFromDate, setHistoryFromDate] = useState("");
-  const [historyToDate, setHistoryToDate] = useState("");
-  const [expandedHistoryId, setExpandedHistoryId] = useState<string | number | null>(null);
-  const [ledgerHistory, setLedgerHistory] = useState<any[]>([]);
-  const [ledgerHistoryLoading, setLedgerHistoryLoading] = useState(false);
   const [locModalView, setLocModalView] = useState<"map" | "list">("map");
 
   const [selectedLocationCode, setSelectedLocationCode] =
@@ -1197,6 +1158,8 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
   const [shiftCheckScope, setShiftCheckScope] = useState<"all" | "mandatory">("all");
   const [shiftCheckFocusCode, setShiftCheckFocusCode] = useState<string | null>(null);
   const [shiftCheckSnapshot, setShiftCheckSnapshot] = useState<ShiftCheckCandidate[]>([]);
+  const [shiftCheckFamily, setShiftCheckFamily] = useState("");
+  const [shiftCheckColorSku, setShiftCheckColorSku] = useState("all");
   const [shiftCheckDrafts, setShiftCheckDrafts] = useState<
     Record<string, ShiftCheckDraft>
   >({});
@@ -2119,56 +2082,6 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
     [displayedUnits, visibleUnitLimit],
   );
 
-  const selectedSkuTransactions = useMemo(() => {
-    return ledgerHistory;
-  }, [ledgerHistory]);
-
-  useEffect(() => {
-    let cancelled = false;
-    const sku = String(selected?.sku || "").trim();
-    if (!sku || activeModuleTab !== "history") return undefined;
-    setLedgerHistoryLoading(true);
-    void window.electronAPI.inventoryLogs.getBySku({ sku, limit: 500 })
-      .then((result) => {
-        if (!cancelled) setLedgerHistory(result.success && Array.isArray(result.data) ? result.data : []);
-      })
-      .catch(() => { if (!cancelled) setLedgerHistory([]); })
-      .finally(() => { if (!cancelled) setLedgerHistoryLoading(false); });
-    return () => { cancelled = true; };
-  }, [selected?.sku, activeModuleTab]);
-
-  const historyTypes = useMemo(
-    () =>
-      [...new Set(selectedSkuTransactions.map((item) => String(item.referenceType || item.type || "Hoạt động khác")))].sort(),
-    [selectedSkuTransactions],
-  );
-
-  useEffect(() => {
-    setHistoryType("all");
-  }, [selected?.sku]);
-
-  const selectedSkuHistory = useMemo(() => {
-    const term = normalizeSearch(historySearch);
-    const fromTime = historyFromDate ? new Date(`${historyFromDate}T00:00:00`).getTime() : 0;
-    const toTime = historyToDate ? new Date(`${historyToDate}T23:59:59.999`).getTime() : Number.POSITIVE_INFINITY;
-    return selectedSkuTransactions
-      .filter((item) => {
-        const createdAt = new Date(item.createdAt || 0).getTime();
-        const content = normalizeSearch(
-          [item.unitId, item.sku, item.type, item.referenceType, item.reference, item.note, item.actor, item.destination]
-            .filter(Boolean)
-            .join(" "),
-        );
-        return (
-          (!term || content.includes(term)) &&
-          (historyType === "all" || (item.referenceType || item.type) === historyType) &&
-          createdAt >= fromTime &&
-          createdAt <= toTime
-        );
-      })
-      .sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
-  }, [selectedSkuTransactions, historySearch, historyType, historyFromDate, historyToDate]);
-
   // Index history once instead of re-scanning every transaction for every
   // handling unit when calculating the end-of-shift checklist.
   const transactionsByUnitId = useMemo(() => {
@@ -2194,7 +2107,7 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
     });
     return workspace.register
       .map((unit) => {
-        if (unit.status === "Đã tách" || unit.status === "split") return null;
+        if (!["Đang sử dụng", "opened", "Chờ kiểm", "pending_check"].includes(unit.status)) return null;
         const code = unit.id.trim().toUpperCase();
         const obligation = outstanding.get(code);
         const history = transactionsByUnitId.get(unit.id.trim().toUpperCase()) || [];
@@ -2217,19 +2130,12 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
             (isPendingCheck || localDayKey(item.createdAt) === todayKey)
           );
         });
-        // A pending package remains actionable across day boundaries. The old
-        // today-only filter made carried-over pending packages disappear from
-        // the end-of-shift badge even though they still blocked the same SKU.
-        // A package that the TMDT physical allocation has depleted is already
-        // verified at zero. Historical tracking must not resurrect it in the
-        // end-of-shift checklist; only an outstanding duty or a new movement
-        // can make it actionable again.
-        if ((unit.status === "Đã hết" || unit.status === "empty") && !obligation) return null;
-        // An opened package that was left unchecked on an older day must not
-        // keep resurfacing as a fresh check every morning. A new withdrawal
-        // creates a new obligation with today's requiredAt; pending packages
-        // remain visible until they are explicitly finalized.
-        if (!isPendingCheck && !obligationRequiredToday && withdrawals.length === 0) return null;
+        // Only an opened physical package or an explicit pending final count
+        // belongs here. Historic duties never bring sealed/empty rows back.
+        // An opened package is counted once today even without a new movement.
+        // A later withdrawal reopens the check; pending counts always remain.
+        if (!isPendingCheck && latestCompletedCheck > 0 && localDayKey(latestCompletedCheck) === todayKey
+            && !obligationRequiredToday && withdrawals.length === 0) return null;
         return {
           unit,
           withdrawalCount: withdrawals.length,
@@ -2254,19 +2160,25 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
     [shiftCheckCandidates],
   );
 
-  const scopedShiftCheckCandidates = shiftCheckScope === "mandatory"
-    ? mandatoryShiftCheckCandidates
-    : shiftCheckCandidates;
   // Keep the reference count/revision captured when opening the form. A live
   // workspace refresh must not silently change what the employee is counting.
-  const visibleShiftCheckCandidates = (showShiftCheckModal ? shiftCheckSnapshot : scopedShiftCheckCandidates).slice(0, 100);
+  const identifiedShiftCheckCandidates = useMemo(() => identifyShiftCandidates(
+    shiftCheckCandidates, workspace.register, workspace.catalog,
+  ), [shiftCheckCandidates, workspace.register, workspace.catalog]);
+  const selectedFamilyShiftCandidates = scopeShiftCandidates(identifiedShiftCheckCandidates, selected?.productGroup || "");
+  const shiftCheckBatchCandidates = (shiftCheckFocusCode
+    ? shiftCheckSnapshot
+    : scopeShiftCandidates(showShiftCheckModal ? shiftCheckSnapshot : identifiedShiftCheckCandidates,
+      showShiftCheckModal ? shiftCheckFamily : selected?.productGroup || "")).slice(0, 100);
+  const visibleShiftCheckCandidates = shiftCheckFocusCode || shiftCheckColorSku === "all"
+    ? shiftCheckBatchCandidates : shiftCheckBatchCandidates.filter(item => item.unit.skuName === shiftCheckColorSku);
   const canPerformUnitCheck = !isRolePreview && (isAdmin || user?.role === 'manager' || (user?.role === 'staff' && user.username === workspace.shiftCheckPolicy?.assignedTo));
 
-  const shiftCheckEnteredCount = visibleShiftCheckCandidates.filter(({ unit }) => {
+  const shiftCheckEnteredCount = shiftCheckBatchCandidates.filter(({ unit }) => {
     const actual = shiftCheckDrafts[unit.id]?.actualQuantity;
     return actual !== null && actual !== undefined;
   }).length;
-  const canSubmitShiftCheck = canPerformUnitCheck && visibleShiftCheckCandidates.length > 0 && visibleShiftCheckCandidates.every(({ unit }) => {
+  const canSubmitShiftCheck = canPerformUnitCheck && shiftCheckBatchCandidates.length > 0 && shiftCheckBatchCandidates.every(({ unit }) => {
     const draft = shiftCheckDrafts[unit.id];
     const actual = draft?.actualQuantity;
     if (actual === null || actual === undefined || !Number.isSafeInteger(actual) || actual < 0 || actual > unit.initialPcs) return false;
@@ -2279,17 +2191,20 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
     const candidates = scope === "mandatory"
       ? mandatoryShiftCheckCandidates
       : shiftCheckCandidates;
-    if (candidates.length === 0) {
+    const identified = identifyShiftCandidates(candidates, workspace.register, workspace.catalog);
+    if (scopeShiftCandidates(identified, selected?.productGroup || "").length === 0) {
       message.info(
         scope === "mandatory"
           ? "Không có kiện nào đang chờ kiểm."
-          : "Hôm nay không có kiện nào phát sinh rút hàng cần kiểm.",
+          : "Dòng sản phẩm này không có kiện đang khui hoặc chờ kiểm cần đối chiếu.",
       );
       return;
     }
     setShiftCheckScope(scope);
     setShiftCheckFocusCode(null);
-    setShiftCheckSnapshot(candidates.map(candidate => ({ ...candidate, unit: { ...candidate.unit } })));
+    setShiftCheckFamily(selected?.productGroup || "");
+    setShiftCheckColorSku("all");
+    setShiftCheckSnapshot(identified);
     setShiftCheckDrafts(
       Object.fromEntries(
         candidates.map(({ unit }) => [
@@ -2314,7 +2229,8 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
     const candidate = shiftCheckCandidates.find((entry) => entry.unit.id === unit.id) || { unit, withdrawalCount: 0, withdrawnQuantity: 0, lastWithdrawalAt: 0 };
     setShiftCheckScope("all");
     setShiftCheckFocusCode(unit.id);
-    setShiftCheckSnapshot([{ ...candidate, unit: { ...unit } }]);
+    setShiftCheckColorSku("all");
+    setShiftCheckSnapshot(identifyShiftCandidates([{ ...candidate, unit: { ...unit } }], workspace.register, workspace.catalog));
     shiftCheckRequestIdRef.current = `HU-SHIFT-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     setShiftCheckDrafts({
       // Require the assignee to count this package instead of confirming the software balance.
@@ -2334,9 +2250,9 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
   };
 
   const submitShiftCheck = async () => {
-    if (isSubmittingShiftCheck || !canPerformUnitCheck) return;
+    if (isSubmittingShiftCheck || !canPerformUnitCheck || shiftCheckBatchCandidates.length === 0) return;
     try {
-      const items = visibleShiftCheckCandidates.map(({ unit }) => {
+      const items = shiftCheckBatchCandidates.map(({ unit }) => {
         const draft = shiftCheckDrafts[unit.id];
         if (draft?.actualQuantity === null || draft?.actualQuantity === undefined) {
           throw new Error(`Hãy nhập tồn thực tế của kiện ${unit.id}.`);
@@ -3398,9 +3314,9 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
                   </div>
                 </div>
                 <div className="hu-header-right hu-selected-actions">
-                  {shiftCheckCandidates.length > 0 && (
+                  {selectedFamilyShiftCandidates.length > 0 && (
                     <Tooltip
-                      title={`${shiftCheckCandidates.length} kiện chưa đối chiếu. Từ 30/09/2026 phải kiểm cuối ca trước hết ngày; kiện Chờ kiểm cần chốt ngay để tiếp tục thao tác.`}
+                      title={`${selectedFamilyShiftCandidates.length} kiện đang khui hoặc chờ kiểm của ${displayProductGroup(selected.productGroup)} cần đối chiếu.`}
                     >
                       <Button
                         icon={<CheckCircleOutlined />}
@@ -3410,7 +3326,7 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
                       >
                         Kiểm cuối ca
                         <span className="hu-shift-check-count">
-                          {shiftCheckCandidates.length}
+                          {selectedFamilyShiftCandidates.length}
                         </span>
                       </Button>
                     </Tooltip>
@@ -3725,133 +3641,16 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
                 </Flex>
               )}
               {activeModuleTab === "history" && (
-                <HandlingUnitMovementHistory key={selected.sku} sku={selected.sku} entries={workspace.recentTransactions} units={workspace.register} />
-              )}
-              <section className="hu-global-history" aria-labelledby="hu-sku-history-title">
-                <header className="hu-global-history-header">
-                  <div>
-                    <Typography.Title level={5} id="hu-sku-history-title">
-                      <HistoryOutlined /> Thẻ kho {selected.color || selected.sku}
-                    </Typography.Title>
-                    <Typography.Text type="secondary">
-                      Nhập / xuất SKU {selected.sku} · Số tồn đầu / cuối là tồn toàn bộ SKU
-                    </Typography.Text>
-                  </div>
-                  <Tag color="blue" style={{ margin: 0 }}>
-                    {selectedSkuHistory.length} dòng
-                  </Tag>
-                </header>
-                <div className="hu-global-history-filters">
-                  <Input
-                    allowClear
-                    prefix={<SearchOutlined />}
-                    value={historySearch}
-                    onChange={(event) => setHistorySearch(event.target.value)}
-                    placeholder="Tìm kiện, SKU, ghi chú..."
-                  />
-                  <Select
-                    value={historyType}
-                    onChange={setHistoryType}
-                    options={[
-                      { value: "all", label: "Tất cả" },
-                      ...historyTypes.map((type) => ({ value: type, label: type })),
-                    ]}
-                  />
-                  <Input
-                    aria-label="Từ ngày"
-                    type="date"
-                    value={historyFromDate}
-                    onChange={(event) => setHistoryFromDate(event.target.value)}
-                  />
-                  <Input
-                    aria-label="Đến ngày"
-                    type="date"
-                    value={historyToDate}
-                    onChange={(event) => setHistoryToDate(event.target.value)}
-                  />
-                </div>
-                <Table
-                  key={selected.sku}
-                  className="hu-global-history-table"
-                  rowKey={(item) => item.id || `${item.unitId}-${item.createdAt}`}
-                  size="middle"
-                  dataSource={selectedSkuHistory}
-                  loading={ledgerHistoryLoading}
-                  tableLayout="fixed"
-                  scroll={{ x: 1080 }}
-                  locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={`Chưa có hoạt động của ${selected.sku}`} /> }}
-                  pagination={{
-                    pageSize: 8,
-                    size: "small",
-                    showSizeChanger: false,
-                    showTotal: (total) => `Tổng ${total} hoạt động`,
-                  }}
-                  expandable={{
-                    expandedRowKeys: expandedHistoryId == null ? [] : [expandedHistoryId],
-                    showExpandColumn: false,
-                    expandedRowRender: (item) => (
-                      <div className="hu-history-expanded">
-                        <span><b>SKU:</b> {item.sku || selected.sku}</span>
-                        <span><b>Người thao tác:</b> {item.actor || "Hệ thống"}</span>
-                        <span><b>Mã tham chiếu:</b> {item.reference || item.destination || "--"}</span>
-                        <span><b>Ghi chú:</b> {item.note || "--"}</span>
-                      </div>
-                    ),
-                    rowExpandable: (item) => Boolean(item.note || item.actor || item.reference || item.destination),
-                  }}
-                  columns={[
-                    {
-                      title: "TG / NV",
-                      dataIndex: "createdAt",
-                      width: 145,
-                      render: (value, item) => <div className="hu-history-ledger-meta"><span className="hu-history-time">{formatHistoryTime(value)}</span><span>👤 {item.actor || "Hệ thống"}</span></div>,
-                    },
-                    { title: "SKU", dataIndex: "sku", width: 145, render: (value) => <span className="hu-history-cell-ellipsis" title={String(value || selected.sku)}>{value || selected.sku}</span> },
-                    {
-                      title: "Loại",
-                      dataIndex: "referenceType",
-                      width: 165,
-                      render: (value) => {
-                        const meta = historyActionMeta(value || "");
-                        return <Tag color={meta.color} title={String(value || "")}>{meta.label}</Tag>;
-                      },
-                    },
-                    {
-                      title: "Mã CT",
-                      dataIndex: "reference",
-                      width: 140,
-                      render: (value, item) => value ? <span className="hu-history-reference" onClick={() => setExpandedHistoryId((item.id || `${item.unitId}-${item.createdAt}`) === expandedHistoryId ? null : (item.id || `${item.unitId}-${item.createdAt}`))}>{value}</span> : <span className="hu-history-muted">—</span>,
-                    },
-                    {
-                      title: "Đầu",
-                      dataIndex: "oldStock",
-                      align: "right" as const,
-                      width: 85,
-                      render: (value) => value == null ? "—" : Number(value).toLocaleString("vi-VN"),
-                    },
-                    {
-                      title: "±",
-                      dataIndex: "quantity",
-                      align: "right" as const,
-                      width: 90,
-                      render: (value) => <b className={Number(value) < 0 ? "is-negative" : "is-positive"}>{fmtSigned(Number(value || 0))}</b>,
-                    },
-                    {
-                      title: "Cuối",
-                      dataIndex: "newStock",
-                      align: "right" as const,
-                      width: 85,
-                      render: (value) => value == null ? "—" : Number(value).toLocaleString("vi-VN"),
-                    },
-                    {
-                      title: "Ghi chú",
-                      dataIndex: "note",
-                      ellipsis: true,
-                      render: (value, item) => value || item.note || "—",
-                    },
-                  ]}
+                <HandlingUnitUnifiedHistory
+                  key={`history-${selected.sku}`}
+                  sku={selected.sku}
+                  entries={workspace.recentTransactions}
+                  units={workspace.register}
+                  currentNumbers={displaySequenceByUnitId}
+                  packedLots={workspace.packedInventory}
+                  onReloadSources={() => loadWorkspace(true)}
                 />
-              </section>
+              )}
             </>
           ) : (
             <Empty description="Không tìm thấy SKU demo" />
@@ -4082,8 +3881,7 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
                 </Dropdown>
               )}
             </div>
-            <HandlingUnitMovementHistory key={detail.id} sku={detail.skuName} unitCode={detail.id} entries={workspace.recentTransactions} units={workspace.register} />
-            <HandlingUnitStockHistory sku={detail.skuName} />
+            <HandlingUnitUnifiedHistory key={detail.id} sku={detail.skuName} unitCode={detail.id} entries={workspace.recentTransactions} units={workspace.register} currentNumbers={displaySequenceByUnitId} packedLots={workspace.packedInventory} onReloadSources={() => loadWorkspace(true)} />
           </div>
         )}
       </Modal>
@@ -4581,9 +4379,14 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
               <small>
                 {shiftCheckFocusCode ? `Kiểm lại kiện ${shiftCheckFocusCode}, không phụ thuộc phát sinh xuất hàng` : shiftCheckScope === "mandatory"
                   ? "Chỉ gồm các kiện đang ở trạng thái Chờ kiểm"
-                  : "Đối chiếu các kiện cần kiểm hôm nay, gồm cả kiện chưa kiểm từ ngày trước"}
+                  : "Đối chiếu kiện đang khui và kiện chờ kiểm của dòng sản phẩm đã chọn"}
               </small>
             </div>
+            {!shiftCheckFocusCode && <ShiftFamilySearch
+              families={[...new Set(shiftCheckSnapshot.flatMap(item => !item.packed && item.productGroup ? [item.productGroup] : []))].sort()}
+              busy={isSubmittingShiftCheck}
+              onFamily={family => { setShiftCheckFamily(family); setShiftCheckColorSku("all"); }}
+            />}
           </div>
         }
         open={showShiftCheckModal}
@@ -4595,173 +4398,34 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
           setShiftCheckSnapshot([]);
         }}
         onOk={submitShiftCheck}
-        okText={`${shiftCheckScope === "mandatory" ? "Chốt" : "Hoàn tất kiểm"} ${shiftCheckEnteredCount}/${visibleShiftCheckCandidates.length} mục`}
+        okText={`${shiftCheckScope === "mandatory" ? "Chốt" : "Hoàn tất kiểm"} ${shiftCheckEnteredCount}/${shiftCheckBatchCandidates.length} kiện`}
         okButtonProps={{ disabled: !canSubmitShiftCheck }}
         cancelText="Để kiểm sau"
         confirmLoading={isSubmittingShiftCheck}
         closable={!isSubmittingShiftCheck}
         maskClosable={!isSubmittingShiftCheck}
         cancelButtonProps={{ disabled: isSubmittingShiftCheck }}
-        centered
-        width={1180}
+        centered={false}
+        transitionName=""
+        width={1240}
         destroyOnHidden
         className="hu-shift-check-modal"
       >
-        <Alert
-          type="info"
-          showIcon
-          message={shiftCheckScope === "mandatory" ? "Nhập số lượng thực tế để chốt kiện" : "Nhập số lượng đếm thực tế trong từng kiện"}
-          description="Chỉ nhập hàng thực tế trong từng kiện hoặc lô combo đang kiểm. Chênh lệch sẽ cộng/trừ tồn phần mềm theo đúng SKU, không phải xuất bán. Hàng đã chuyển sang combo hoặc hàng rời cần được ghi nhận chuyển nội bộ, không tính là thiếu. Số đếm không tự điền. Tạm thời chưa áp dụng phạt kiểm cuối ca."
-          style={{ marginBottom: 14 }}
-        />
-        {!shiftCheckFocusCode && scopedShiftCheckCandidates.length > 100 && (
-          <Alert type="info" showIcon style={{ marginBottom: 14 }} message={`Đang kiểm 100/${scopedShiftCheckCandidates.length} kiện. Sau khi chốt đợt này, tiếp tục kiểm các kiện còn lại.`} />
-        )}
-        <Table
-          rowKey={(item) => item.unit.id}
-          dataSource={visibleShiftCheckCandidates}
-          size="small"
-          pagination={false}
-          scroll={{ x: 1050, y: 480 }}
-          locale={{ emptyText: "Không còn kiện nào cần kiểm" }}
-          columns={[
-            {
-              title: "Kiện / SKU",
-              width: 190,
-              fixed: "left",
-              render: (_, item) => (
-                <div className="hu-shift-unit-cell">
-                  <b>{item.packed ? item.unit.variantName : item.unit.id}</b>
-                  <small>{item.unit.skuName}</small>
-                </div>
-              ),
-            },
-            {
-              title: "Phát sinh rút",
-              width: 140,
-              render: (_, item) => (
-                <div className="hu-shift-withdrawal-cell">
-                  {item.packed ? (
-                    <>
-                      <b>Combo đóng sẵn</b>
-                      <small>Chưa kiểm từ ngày trước · {formatHistoryTime(new Date(item.lastWithdrawalAt).toISOString())}</small>
-                    </>
-                  ) : item.withdrawalCount > 0 ? (
-                    <>
-                      <b>-{fmt(item.withdrawnQuantity)} {item.unit.unitName}</b>
-                      <small>{item.withdrawalCount} lần · {formatHistoryTime(new Date(item.lastWithdrawalAt).toISOString())}</small>
-                    </>
-                  ) : (
-                    <>
-                      <b>{shiftCheckFocusCode ? 'Kiểm lại chủ động' : 'Chưa kiểm từ ngày trước'}</b>
-                      <small>Không có phát sinh rút mới{item.lastWithdrawalAt > 0 ? ` · ${formatHistoryTime(new Date(item.lastWithdrawalAt).toISOString())}` : ''}</small>
-                    </>
-                  )}
-                </div>
-              ),
-            },
-            {
-              title: "Tồn dự kiến",
-              width: 105,
-              align: "right" as const,
-              render: (_, item) => (
-                <b>{fmt(item.unit.currentPcs)}</b>
-              ),
-            },
-            {
-              title: "Đếm thực tế",
-              width: 135,
-              render: (_, item) => (
-                <InputNumber
-                  min={0}
-                  max={item.unit.initialPcs}
-                  precision={0}
-                  placeholder="Nhập số đếm"
-                  value={shiftCheckDrafts[item.unit.id]?.actualQuantity}
-                  onChange={(value) =>
-                    updateShiftCheckDraft(item.unit.id, {
-                      actualQuantity: value,
-                      ...(Number(value) === item.unit.currentPcs
-                        ? { reason: "", note: "" }
-                        : {}),
-                    })
-                  }
-                  addonAfter={item.unit.unitName}
-                  style={{ width: "100%" }}
-                />
-              ),
-            },
-            {
-              title: "Chênh lệch",
-              width: 105,
-              align: "center" as const,
-              render: (_, item) => {
-                const actual = shiftCheckDrafts[item.unit.id]?.actualQuantity;
-                if (actual === null || actual === undefined) return <Tag>Chưa nhập</Tag>;
-                const variance = Number(actual) - item.unit.currentPcs;
-                return (
-                  <Tag color={variance === 0 ? "green" : variance > 0 ? "blue" : "red"}>
-                    {variance === 0 ? "Khớp" : fmtSigned(variance)}
-                  </Tag>
-                );
-              },
-            },
-            {
-              title: "Lý do chênh lệch",
-              width: 195,
-              render: (_, item) => {
-                const actual = shiftCheckDrafts[item.unit.id]?.actualQuantity;
-                const hasVariance =
-                  actual !== null &&
-                  actual !== undefined &&
-                  Number(actual) !== item.unit.currentPcs;
-                return (
-                  <Select
-                    allowClear
-                    disabled={!hasVariance}
-                    value={shiftCheckDrafts[item.unit.id]?.reason || undefined}
-                    placeholder={actual === null || actual === undefined ? "Chưa nhập số đếm" : hasVariance ? "Chọn lý do" : "Không cần"}
-                    onChange={(value) =>
-                      updateShiftCheckDraft(item.unit.id, { reason: value || "" })
-                    }
-                    options={SHIFT_CHECK_REASONS.map((reason) => ({
-                      value: reason,
-                      label: reason,
-                    }))}
-                    style={{ width: "100%" }}
-                  />
-                );
-              },
-            },
-            {
-              title: "Ghi chú",
-              width: 190,
-              render: (_, item) => {
-                const actual = shiftCheckDrafts[item.unit.id]?.actualQuantity;
-                const hasVariance =
-                  actual !== null &&
-                  actual !== undefined &&
-                  Number(actual) !== item.unit.currentPcs;
-                return (
-                  <Input
-                    allowClear
-                    disabled={!hasVariance}
-                    value={shiftCheckDrafts[item.unit.id]?.note}
-                    placeholder={
-                      shiftCheckDrafts[item.unit.id]?.reason === "Khác"
-                        ? "Bắt buộc nhập"
-                        : "Ghi chú thêm"
-                    }
-                    onChange={(event) =>
-                      updateShiftCheckDraft(item.unit.id, {
-                        note: event.target.value,
-                      })
-                    }
-                  />
-                );
-              },
-            },
-          ]}
+        <HandlingUnitShiftChecklist
+          items={visibleShiftCheckCandidates}
+          drafts={shiftCheckDrafts}
+          family={shiftCheckFamily}
+          colors={workspace.catalog.filter(item => item.productGroup === shiftCheckFamily).map(item => ({sku: item.sku, label: item.color || item.variantName}))}
+          colorSku={shiftCheckColorSku}
+          entered={shiftCheckEnteredCount}
+          total={shiftCheckBatchCandidates.length}
+          remaining={shiftCheckFocusCode ? 0 : Math.max(0, scopeShiftCandidates(shiftCheckSnapshot, shiftCheckFamily).length - shiftCheckBatchCandidates.length)}
+          date={new Date(`${workspace.shiftCheckPolicy?.date || localDayKey(new Date())}T12:00:00+07:00`).toLocaleDateString("vi-VN")}
+          reasons={SHIFT_CHECK_REASONS}
+          single={!!shiftCheckFocusCode}
+          busy={isSubmittingShiftCheck}
+          onColor={setShiftCheckColorSku}
+          onDraft={updateShiftCheckDraft}
         />
       </Modal>
 

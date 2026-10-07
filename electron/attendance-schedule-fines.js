@@ -1,5 +1,6 @@
 const { addDays, isRestDay } = require('./attendance-rewards');
 const { loadResignedEmployeeCutoffs, isEmployeeResignedOn } = require('./employment-status');
+const { calculateCheckoutFinePlan, isCheckoutFine, readCheckoutDeletedIds, CHECKOUT_POLICY_EFFECTIVE_DATE } = require('./attendance-checkout-fines.cjs');
 
 const MISSING_SCHEDULE_FINE = 100000;
 const PARTIAL_ATTENDANCE_FINE = 50000;
@@ -150,8 +151,10 @@ async function reconcileMissingSeasonalScheduleFinesLegacy(prisma, options = {})
                 'leaveRecords', data->'leaveRecords',
                 'extraFines', data->'extraFines',
                 'fineAuditLog', data->'fineAuditLog',
-                'config', data->'config'
-            )::text AS "value"
+                'config', data->'config',
+                'checkoutLockedRanges', (SELECT json_agg(json_build_object('start', period->'start', 'end', period->'end'))
+                    FROM json_array_elements(CASE WHEN json_typeof(data->'lockedPeriods') = 'array' THEN data->'lockedPeriods' ELSE '[]'::json END) AS period)
+            )::text AS "value", CURRENT_TIMESTAMP AS "checkoutNow"
             FROM source
         `;
         const configRow = configRows[0];
@@ -301,6 +304,10 @@ async function reconcileMissingSeasonalScheduleFinesLegacy(prisma, options = {})
             }
         }
 
+        attendanceData.checkoutDeletedIds = await readCheckoutDeletedIds(tx);
+        const checkoutPlan = calculateCheckoutFinePlan(attendanceData, logs, resignedCutoffs, { ...options, now: configRow.checkoutNow || evaluationNow });
+        created.push(...checkoutPlan.created);
+        removed.push(...checkoutPlan.removed);
         const removedIds = new Set(removed.map((fine) => String(fine.id)));
         const nextFines = [
             ...existingFines.filter((fine) => !removedIds.has(String(fine?.id))),
@@ -353,8 +360,10 @@ async function readScheduleReconcileSnapshot(client, options, evaluationNow) {
                 'leaveRecords', data->'leaveRecords',
                 'extraFines', data->'extraFines',
                 'fineAuditLog', data->'fineAuditLog',
-                'config', data->'config'
-            )::text AS "value"
+                'config', data->'config',
+                'checkoutLockedRanges', (SELECT json_agg(json_build_object('start', period->'start', 'end', period->'end'))
+                    FROM json_array_elements(CASE WHEN json_typeof(data->'lockedPeriods') = 'array' THEN data->'lockedPeriods' ELSE '[]'::json END) AS period)
+            )::text AS "value", CURRENT_TIMESTAMP AS "checkoutNow"
             FROM source
         `,
         loadResignedEmployeeCutoffs(client),
@@ -362,7 +371,7 @@ async function readScheduleReconcileSnapshot(client, options, evaluationNow) {
             where: {
                 date: options.dateKey
                     ? String(options.dateKey)
-                    : { gte: POLICY_EFFECTIVE_DATE, lte: latestLogDate },
+                    : { gte: options.checkoutOnly ? CHECKOUT_POLICY_EFFECTIVE_DATE : POLICY_EFFECTIVE_DATE, lte: latestLogDate },
                 checkType: { in: ['morning_in', 'morning_out', 'afternoon_in', 'evening_out'] },
             },
             select: { faceId: true, userName: true, date: true, timestamp: true, checkType: true },
@@ -372,10 +381,16 @@ async function readScheduleReconcileSnapshot(client, options, evaluationNow) {
     const configRow = configRows?.[0];
     let attendanceData = {};
     try { attendanceData = JSON.parse(configRow?.value || '{}'); } catch { throw new Error('Dữ liệu cấu hình chấm công không hợp lệ'); }
+    attendanceData.checkoutDeletedIds = await readCheckoutDeletedIds(client);
+    attendanceData.checkoutNow = configRow?.checkoutNow || evaluationNow;
     return { attendanceData, resignedCutoffs, logs: logs || [] };
 }
 
 function calculateScheduleReconcileResult(attendanceData, resignedCutoffs, logs, options, evaluationNow) {
+    if (options.checkoutOnly) {
+        const plan = calculateCheckoutFinePlan(attendanceData, logs, resignedCutoffs, { ...options, now: attendanceData.checkoutNow || evaluationNow });
+        return { ...plan, updated: [], checked: logs.length };
+    }
     const employees = Array.isArray(attendanceData.employees) ? attendanceData.employees : [];
     const schedules = Array.isArray(attendanceData.workSchedules) ? attendanceData.workSchedules : [];
     const leaveRecords = Array.isArray(attendanceData.leaveRecords) ? attendanceData.leaveRecords : [];
@@ -491,6 +506,9 @@ function calculateScheduleReconcileResult(attendanceData, resignedCutoffs, logs,
             }
         }
     }
+    const checkoutPlan = calculateCheckoutFinePlan(attendanceData, logs, resignedCutoffs, { ...options, now: attendanceData.checkoutNow || evaluationNow });
+    created.push(...checkoutPlan.created);
+    removed.push(...checkoutPlan.removed);
     return { created, removed, updated, checked: targetDates.length };
 }
 
@@ -510,12 +528,29 @@ async function reconcileMissingSeasonalScheduleFinesFast(prisma, options = {}) {
                 await tx.$executeRaw`SET LOCAL lock_timeout = '700ms'`;
                 await tx.$executeRaw`SET LOCAL statement_timeout = '8000ms'`;
                 const rows = await tx.$queryRaw`
-                    SELECT "value"::json->'extraFines' AS "extraFines",
-                           "value"::json->'fineAuditLog' AS "fineAuditLog"
+                    SELECT CURRENT_TIMESTAMP AS "checkoutNow", "value"::json->'extraFines' AS "extraFines",
+                           "value"::json->'fineAuditLog' AS "fineAuditLog",
+                           (SELECT json_agg(json_build_object('start', period->'start', 'end', period->'end'))
+                            FROM json_array_elements(CASE WHEN json_typeof("value"::json->'lockedPeriods') = 'array' THEN "value"::json->'lockedPeriods' ELSE '[]'::json END) AS period) AS "checkoutLockedRanges"
                     FROM "AppConfig" WHERE "key" = 'attendanceData' FOR UPDATE NOWAIT
                 `;
                 const currentFines = Array.isArray(rows?.[0]?.extraFines) ? rows[0].extraFines : [];
                 const currentAudit = Array.isArray(rows?.[0]?.fineAuditLog) ? rows[0].fineAuditLog : [];
+                // Recheck checkout under the ledger lock: an admin correction
+                // between the initial scan and the write must not create a fine.
+                if (result.created.some(isCheckoutFine) || result.removed.some(isCheckoutFine)) {
+                    const freshLogs = await tx.attendanceLog.findMany({
+                        where: { date: options.dateKey ? String(options.dateKey) : { gte: CHECKOUT_POLICY_EFFECTIVE_DATE, lte: dateKeyFromTimestamp(evaluationNow) },
+                            checkType: { in: ['morning_in', 'morning_out', 'afternoon_in', 'evening_out'] } },
+                        select: { faceId: true, userName: true, date: true, timestamp: true, checkType: true },
+                    });
+                    const checkoutPlan = calculateCheckoutFinePlan({ ...snapshot.attendanceData, extraFines: currentFines,
+                        fineAuditLog: currentAudit, checkoutLockedRanges: rows?.[0]?.checkoutLockedRanges || [],
+                        checkoutDeletedIds: await readCheckoutDeletedIds(tx) },
+                        freshLogs, await loadResignedEmployeeCutoffs(tx), { ...options, now: rows?.[0]?.checkoutNow || evaluationNow });
+                    result.created = [...result.created.filter(fine => !isCheckoutFine(fine)), ...checkoutPlan.created];
+                    result.removed = [...result.removed.filter(fine => !isCheckoutFine(fine)), ...checkoutPlan.removed];
+                }
                 const deletedIds = deletedFineIds(currentAudit);
                 const removedIds = new Set(result.removed.map((fine) => String(fine?.id)));
                 const updatesById = new Map(result.updated.map((fine) => [String(fine?.id), fine]));
@@ -569,6 +604,9 @@ async function reconcileMissingSeasonalScheduleFines(prisma, options = {}) {
 }
 
 module.exports = {
+    // Interactive payroll readiness checks only this policy, not every
+    // historical absence/schedule fine in the background maintenance pass.
+    reconcileMissingCheckoutFines: (prisma, options = {}) => reconcileMissingSeasonalScheduleFinesFast(prisma, { ...options, checkoutOnly: true }),
     CUTOFF_HOUR,
     MISSING_SCHEDULE_FINE,
     PARTIAL_ATTENDANCE_FINE,

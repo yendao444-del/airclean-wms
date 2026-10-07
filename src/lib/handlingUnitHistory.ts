@@ -11,6 +11,8 @@ export type HandlingUnitHistoryEntry = {
   actor?: string;
   reason?: string;
   note?: string;
+  reference?: string;
+  components?: readonly { sku: string; quantity: number }[];
 };
 
 const codeKey = (code?: string) => String(code || "").trim().toUpperCase();
@@ -23,12 +25,13 @@ export function handlingUnitHistory(
   sku: string,
   units: readonly { id: string; skuName: string }[],
   unitCode?: string,
+  includePacked = false,
 ) {
   const codes = new Set(units.filter(unit => unit.skuName === sku).map(unit => codeKey(unit.id)));
   const selectedCode = codeKey(unitCode);
   return entries.filter(entry => {
     const code = codeKey(entry.unitId);
-    if (!code || code.startsWith("PACKED:")) return false;
+    if (!code || (!includePacked && code.startsWith("PACKED:"))) return false;
     if (selectedCode) return code === selectedCode;
     return entry.sku === sku || codes.has(code);
   }).map((entry, index) => {

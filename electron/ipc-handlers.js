@@ -267,6 +267,7 @@ const {
   isPrematureMissingScheduleFine,
   normalizeIdentity: normalizeAttendanceScheduleIdentity,
   reconcileMissingSeasonalScheduleFines,
+  reconcileMissingCheckoutFines,
 } = require("./attendance-schedule-fines");
 const {
   calculateAllAttendanceRewardSummaries,
@@ -32086,6 +32087,12 @@ function sanitizeStockCheckSession(session, isAdmin) {
     items: (session.items || []).map((item) =>
       sanitizeStockCheckItem(item, isAdmin),
     ),
+    ...(session.inspectionTransfers ? {
+      inspectionTransfers: session.inspectionTransfers.map(transfer => ({
+        ...transfer,
+        items: (transfer.items || []).map(item => sanitizeStockCheckItem(item, isAdmin)),
+      })),
+    } : {}),
   };
 }
 
@@ -32182,13 +32189,8 @@ function getStockCheckSessionOrThrow(
     throw new Error("Phiên kiểm hàng đã nộp, không thể sửa số đếm.");
   if (currentSession.role !== "admin" && !isStockCheckAssignee(session))
     throw new Error("Bạn không được phân công cho phiên kiểm hàng này.");
-  if (!isPrivilegedStockCheckSession()) {
-    const openingHour = session.type === "full" ? 16 : 17;
-    if (session.type !== "inspection" && session.type !== "recheck" && getBangkokHour() < openingHour) {
-      throw new Error(
-        `${session.type === "full" ? "Kiểm toàn bộ" : "Kiểm hàng ngày"} chỉ mở từ ${openingHour}:00 đối với non-admin.`,
-      );
-    }
+  if (!isPrivilegedStockCheckSession() && session.type === "full" && getBangkokHour() < 16) {
+    throw new Error("Kiểm toàn bộ chỉ mở từ 16:00 đối với non-admin.");
   }
   return session;
 }
@@ -32199,6 +32201,47 @@ function isStockCheckSessionCompleted(session) {
 
 function isStockCheckSessionCancelled(session) {
   return session?.status === "cancelled";
+}
+
+// A new manual inspection owns unfinished counts for its SKUs. Preserve the
+// displaced counts in the JSON ledger for audit, but never balance stock or
+// infer completion as part of transferring the work.
+function prioritizeStockCheckInspection(sessions, inspection) {
+  const requested = new Set(inspection.items.map(item => String(item.sku)));
+  const supersededCounts = [];
+  const updated = sessions.map(session => {
+    if (session.status === "cancelled" || session.status === "completed") return session;
+    const manual = session.type === "inspection" || session.type === "recheck";
+    const scheduled = ["daily", "weekend", "full"].includes(session.type) && session.date === inspection.date;
+    if (!manual && !scheduled) return session;
+    const moved = (session.items || []).filter(item => !item.balanced && requested.has(String(item.sku)));
+    if (!moved.length) return session;
+    const remaining = (session.items || []).filter(item => item.balanced || !requested.has(String(item.sku)));
+    supersededCounts.push({ sessionId: session.id, skus: moved.map(item => item.sku) });
+    return {
+      ...session,
+      items: remaining,
+      inspectionTransfers: [...(session.inspectionTransfers || []), {
+        targetSessionId: inspection.id,
+        transferredAt: inspection.createdAt,
+        transferredBy: inspection.createdBy,
+        items: moved,
+      }],
+      ...(remaining.length ? {} : {
+        status: "cancelled",
+        cancelledAt: inspection.createdAt,
+        cancelledBy: inspection.createdBy,
+        cancellationReason: `Đã chuyển toàn bộ SKU chưa hoàn tất sang phiếu kiểm ${inspection.id}.`,
+      }),
+    };
+  });
+  return { sessions: updated, supersededCounts };
+}
+
+function getPriorityInspectionSkus(sessions, date) {
+  return new Set(sessions.filter(session =>
+    session.date === date && ["inspection", "recheck"].includes(session.type) && session.status !== "cancelled",
+  ).flatMap(session => (session.items || []).map(item => String(item.sku))));
 }
 
 // A carry-over session transfers the obligation to count, not yesterday's
@@ -32523,8 +32566,9 @@ async function buildDailyStockCheckSelection(tx, sessions, date) {
     row.movements += Number(log._count._all || 0);
     activity.set(log.sku, row);
   }
+  const inspectionSkus = getPriorityInspectionSkus(sessions, date);
   return selectDailyStockCheck({
-    items: products.flatMap(expandProductForStockCheck),
+    items: products.flatMap(expandProductForStockCheck).filter(item => !inspectionSkus.has(String(item.sku))),
     sessions, date, activity: [...activity.values()],
   });
 }
@@ -32534,6 +32578,7 @@ async function topUpTodayDailyStockCheckProducts(sessions, tx) {
   const needsSelection = session =>
     session?.type === "daily" && session.date === today &&
     !["completed", "cancelled"].includes(session.status) &&
+    !session.inspectionTransfers?.length &&
     (session.dailyScopePolicyVersion !== STOCK_CHECK_SELECTION_VERSION || !session.items?.length) &&
     !(session.items || []).some(item => item.actualStock != null || item.balanced);
   if (isStockCheckSaturday() || !sessions.some(needsSelection))
@@ -32824,13 +32869,8 @@ ipcMain.handle("stockCheck:balanceItems", async (event, payload = {}) => {
           if (session.status === "completed") {
             throw new Error("Stock check session has already been submitted.");
           }
-          if (!isPrivilegedStockCheckSession()) {
-            const openingHour = session.type === "full" ? 16 : 17;
-            if (session.type !== "inspection" && session.type !== "recheck" && getBangkokHour() < openingHour) {
-              throw new Error(
-                `${session.type === "full" ? "Kiểm toàn bộ" : "Kiểm hàng ngày"} chỉ mở từ ${openingHour}:00 đối với non-admin.`,
-              );
-            }
+          if (!isPrivilegedStockCheckSession() && session.type === "full" && getBangkokHour() < 16) {
+            throw new Error("Kiểm toàn bộ chỉ mở từ 16:00 đối với non-admin.");
           }
           if (
             currentSession?.role !== "admin" &&
@@ -33120,9 +33160,6 @@ ipcMain.handle("stockCheck:ensureDailySession", async (event, payload = {}) => {
     if (isStockCheckSaturday()) {
       throw new Error("Thứ 7 chỉ mở phiên kiểm toàn bộ cho tất cả kho.");
     }
-    if (!isPrivilegedStockCheckSession() && getBangkokHour() < 17) {
-      throw new Error("Kiểm hàng ngày chỉ mở từ 17:00 đối với non-admin.");
-    }
     const result = await getPrismaDirectTx().$transaction(
       async (tx) => {
         await lockStockCheckSessions(tx);
@@ -33375,6 +33412,11 @@ ipcMain.handle("stockCheck:createFullSession", async (event, payload = {}) => {
         }
 
         const now = new Date();
+        const inspectionSkus = getPriorityInspectionSkus(sessions, today);
+        requestedItems = requestedItems.filter(item => !inspectionSkus.has(String(item.sku)));
+        if (!requestedItems.length) {
+          throw new Error("Các SKU đã được ưu tiên trong phiếu kiểm. Hãy hoàn tất phiếu kiểm đang có.");
+        }
         const session = {
           id: sessionId,
           runId: `full-${crypto.randomUUID?.() || now.getTime()}`,
@@ -33664,24 +33706,6 @@ ipcMain.handle(
             where: { key: "stockCheckSessionsV2" },
           });
           const sessions = parseStockCheckSessionsFromConfig(record);
-          const requestedSkuSet = new Set(selectedSkus);
-          const duplicateSession = sessions.find(
-            (session) =>
-              (session?.type === "inspection" || session?.type === "recheck") &&
-              !isStockCheckSessionCancelled(session) &&
-              !isStockCheckSessionCompleted(session) &&
-              (session.items || []).some((item) =>
-                requestedSkuSet.has(String(item?.sku || "")),
-              ),
-          );
-          if (duplicateSession) {
-            const duplicateSkus = (duplicateSession.items || [])
-              .map((item) => String(item?.sku || ""))
-              .filter((sku) => requestedSkuSet.has(sku));
-            throw new Error(
-              `SKU ${duplicateSkus.join(", ")} đang nằm trong một phiếu kiểm chưa hoàn thành. Hãy hoàn tất hoặc hủy phiếu đó trước.`,
-            );
-          }
 
           const assignee = await tx.user.findUnique({
             where: { username: assignedTo },
@@ -33737,7 +33761,8 @@ ipcMain.handle(
             createdAt: now.toISOString(),
             createdBy: currentSession.username,
           };
-          const updatedSessions = [...sessions, session].slice(-90);
+          const priority = prioritizeStockCheckInspection(sessions, session);
+          const updatedSessions = [...priority.sessions, session].slice(-90);
           await writeStockCheckSessions(updatedSessions, tx);
           await tx.activityLog.create({
             data: {
@@ -33749,6 +33774,7 @@ ipcMain.handle(
                 assignedTo: assignee.username,
                 reason: session.notes,
                 skus: selectedSkus,
+                supersededCounts: priority.supersededCounts,
               }),
               userName: currentSession.username,
               severity: "INFO",
@@ -40834,6 +40860,9 @@ ipcMain.handle("attendance:reconcileLateFines", async () => {
   const startedAt = Date.now();
   try {
     requireRole("admin");
+    // Finish checkout charges before returning the ledger used for live
+    // payroll; delayed maintenance alone can otherwise miss the first paint.
+    await enqueueAttendanceMaintenance("checkout", () => reconcileMissingCheckoutFines(getPrismaDirectTx()));
     const result = await reconcileLateAttendanceFines(getPrismaDirectTx(), {
       useHistoricalRates: true,
       repairReconciledAmounts: true,

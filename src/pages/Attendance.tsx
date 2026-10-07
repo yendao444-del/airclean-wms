@@ -319,7 +319,7 @@ const mergeFinesWithDeletes = (
         const deleted = getFineRecordKeys(fineWithId).some(item => deletedKeys.has(item));
         // Schedule fines are generated and withdrawn by the server. A stale
         // renderer snapshot must not recreate one the reconciliation removed.
-        if (fine.source === 'attendance-schedule' && !merged.has(key)) return;
+        if (['attendance-schedule', 'attendance-missing-checkout'].includes(fine.source || '') && !merged.has(key)) return;
         // A stale renderer must not overwrite a fine that was edited in the DB.
         // A local record wins only when this snapshot also contains a new audit action for it.
         if (key && !deleted && (!merged.has(key) || snapshotHasNewChange(fineWithId))) {
@@ -1819,13 +1819,14 @@ const ShiftPill = ({ label, status, time, outTime }: { label: string; status: 0 
         2: { className: 'is-late', tooltip: 'Đi muộn' },
     };
     const c = config[status];
+    const pendingCheckout = status > 0 && Boolean(time) && !outTime;
     const timeInfo = time ? ` vào ${time}` : '';
-    const outInfo = outTime ? ` → ra ${outTime}` : (status > 0 ? ' → chưa checkout' : '');
+    const outInfo = outTime ? ` → ra ${outTime}` : (pendingCheckout ? ' → chưa checkout' : '');
     const tooltipContent = `${label}: ${c.tooltip}${timeInfo}${outInfo}`;
     return (
         <Tooltip title={tooltipContent}>
-            <div className={`att-shift-pill ${c.className}`}>
-                <span className="att-shift-pill__label">{label}</span>
+            <div className={`att-shift-pill ${pendingCheckout ? 'is-pending-checkout' : c.className}`} aria-label={tooltipContent}>
+                <span className="att-shift-pill__label">{label}{pendingCheckout && <WarningOutlined className="att-shift-pill__warning" aria-hidden="true" />}</span>
                 <span className="att-shift-pill__time">
                     {time || '----'}{outTime ? ` - ${outTime}` : ''}
                 </span>
@@ -4692,7 +4693,7 @@ export default function Attendance() {
                     const reconcileResult = await api.attendance.reconcileLateFines();
                     console.info('[Attendance:load] late-fine reconcile ms:', Math.round(performance.now() - reconcileStartedAt));
                     if (!reconcileResult?.success) {
-                        console.error('Lỗi đối soát phạt đi muộn:', reconcileResult?.error);
+                        console.error('Lỗi đối soát phạt điểm danh:', reconcileResult?.error);
                     } else if (Array.isArray(reconcileResult.data?.ledger?.extraFines)
                         && Array.isArray(reconcileResult.data?.ledger?.fineAuditLog)) {
                         // The ledger is from the committed reconciliation snapshot;
@@ -10733,8 +10734,9 @@ const openConfigModal = () => {
                     </div>
                 )}
                 extra={(
-                    <Space className="att-matrix-legend" size={14}>
+                    <Space className="att-matrix-legend" size={14} wrap>
                         <Badge color="#52c41a" text="Đúng giờ" />
+                        <Badge color="#fadb14" text="Chưa checkout" />
                         <Badge color="#fa8c16" text="Đi muộn" />
                         <Badge color="#d9d9d9" text="Nghỉ" />
                     </Space>
@@ -10751,6 +10753,9 @@ const openConfigModal = () => {
                         bordered
                         scroll={{ x: 'max-content' }}
                     />
+                </div>
+                <div style={{ padding: '10px 16px', fontSize: 12, color: '#64748b' }}>
+                    <InfoCircleOutlined /> Từ 07/10/2026: có check-in nhưng không checkout phạt 50.000đ/ca; xét từ 00:00 ngày kế tiếp.
                 </div>
             </Card>
 
