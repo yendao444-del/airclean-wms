@@ -1,5 +1,6 @@
 const KEY = "handlingUnitLabelNumbersV1";
 const MAX_QUANTITY = 300;
+const MAX_SEQUENCE_NUMBER = 50;
 
 function assertPackageQuantity(quantity) {
   if (!Number.isSafeInteger(Number(quantity)) || Number(quantity) < 1 || Number(quantity) > MAX_QUANTITY) {
@@ -9,16 +10,16 @@ function assertPackageQuantity(quantity) {
 
 async function readLabelNumbers(tx) {
   const row = await tx.appConfig.findUnique({ where: { key: KEY } });
-  const value = JSON.parse(row?.value || '{"counters":{},"units":{}}');
+  const value = JSON.parse(row?.value || '{"counters":{},"cycles":{},"units":{}}');
   if (!value?.counters || !value?.units) throw new Error("Sổ số thứ tự kiện không hợp lệ.");
+  if (!value.cycles || typeof value.cycles !== 'object') value.cycles = {};
   return value;
 }
 
 // Numbers identify physical labels per SKU, independently of FIFO position.
-// A cycle is kept while at
+// Each cycle has numbers 1..50 and remains open while at
 // least one physical unit is still active (including opened/pending-check),
-// then starts again at 1 after the whole cycle is finished or split. This
-// keeps printed labels stable and prevents the counter growing forever.
+// then starts again at 1 after the whole cycle is finished or split.
 async function assignLabelNumbers(tx, rows) {
   if (!rows.length) return {};
   await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${KEY}))`;
@@ -45,33 +46,51 @@ async function assignLabelNumbers(tx, rows) {
   const existingActiveUnits = activeUnits.filter(
     (unit) => !incomingCodes.has(String(unit.code || "").trim().toUpperCase()),
   );
-  const existingActiveSkuSet = new Set(
-    existingActiveUnits.map((unit) => String(unit.sku || "").trim().toUpperCase()),
-  );
-
-  // Start a fresh FIFO cycle only after every old physical unit for the SKU
-  // is finished/split. This deliberately does not renumber units that still
-  // exist, because their printed labels must remain valid on the warehouse
-  // floor.
-  for (const sku of new Set(skuByRow.map((row) => row.sku))) {
-    if (existingActiveSkuSet.has(sku)) continue;
-    // Receiving an already-issued label must keep its number. Historical
-    // identities also stay in the ledger after a new cycle starts.
-    if (skuByRow.some(row => row.sku === sku && ledger.units[row.code])) continue;
-    ledger.counters[sku] = 0;
-  }
-
   const occupiedBySku = new Map();
+  const cycleBySku = new Map();
+  const historicalEntriesBySku = new Map();
+  for (const [code, entry] of Object.entries(ledger.units)) {
+    const sku = String(entry?.sku || '').trim().toUpperCase();
+    const number = Number(entry?.number);
+    if (!sku || !Number.isSafeInteger(number) || number < 1 || number > MAX_SEQUENCE_NUMBER) continue;
+    const list = historicalEntriesBySku.get(sku) || [];
+    list.push({ code, entry, number, cycle: Number.isSafeInteger(Number(entry.cycle)) && Number(entry.cycle) > 0 ? Number(entry.cycle) : 1 });
+    historicalEntriesBySku.set(sku, list);
+  }
+  for (const sku of new Set(skuByRow.map((row) => row.sku))) {
+    const history = historicalEntriesBySku.get(sku) || [];
+    const latestCycle = Math.max(Number(ledger.cycles[sku] || 0), ...history.map(item => item.cycle), 0);
+    const existing = existingActiveUnits.filter(unit => String(unit.sku || '').trim().toUpperCase() === sku);
+    const incomingKnown = skuByRow
+      .filter(row => row.sku === sku && ledger.units[row.code])
+      .map(row => ({ code: row.code, sku, status: 'received' }));
+    const cycleSources = [...existing, ...incomingKnown];
+    const activeCycles = existing.map(unit => {
+      const code = String(unit.code || '').trim().toUpperCase();
+      const entry = ledger.units[code];
+      return Number.isSafeInteger(Number(entry?.cycle)) && Number(entry.cycle) > 0 ? Number(entry.cycle) : latestCycle || 1;
+    });
+    const knownIncomingCycles = incomingKnown.map(unit => Number(ledger.units[unit.code]?.cycle) || latestCycle || 1);
+    const cycle = cycleSources.length ? Math.max(...activeCycles, ...knownIncomingCycles, latestCycle || 1) : (latestCycle ? latestCycle + 1 : 1);
+    cycleBySku.set(sku, cycle);
+    ledger.cycles[sku] = cycle;
+    ledger.counters[sku] = 0;
+    const occupied = new Set(history.filter(item => item.cycle === cycle).map(item => item.number));
+    occupiedBySku.set(sku, occupied);
+  }
   activeUnits.forEach((unit) => {
     const code = String(unit.code || "").trim().toUpperCase();
     const sku = String(unit.sku || "").trim().toUpperCase();
     const storedNumber = Number(ledger.units[code]?.number);
     const legacySuffix = Number(code.match(/-(\d+)$/)?.[1]);
     const number = Number.isSafeInteger(storedNumber) && storedNumber > 0 ? storedNumber : legacySuffix;
-    if (!sku || !Number.isSafeInteger(number) || number < 1) return;
+    const cycle = cycleBySku.get(sku);
+    if (!sku || cycle === undefined || !Number.isSafeInteger(number) || number < 1 || number > MAX_SEQUENCE_NUMBER) return;
     const occupied = occupiedBySku.get(sku) || new Set();
-    occupied.add(number);
+    const entryCycle = Number(ledger.units[code]?.cycle) || cycle;
+    if (entryCycle === cycle) occupied.add(number);
     occupiedBySku.set(sku, occupied);
+    if (entryCycle === cycle) ledger.counters[sku] = Math.max(Number(ledger.counters[sku] || 0), number);
   });
 
   for (const row of skuByRow) {
@@ -82,17 +101,16 @@ async function assignLabelNumbers(tx, rows) {
       continue;
     }
     const occupied = occupiedBySku.get(sku) || new Set();
-    // Do not reuse the number of a depleted package while this cycle is active.
-    let number = Math.max(Number(ledger.counters[sku] || 0), ...occupied, 0) + 1;
-    if (!Number.isSafeInteger(number) || number < 1) throw new Error("Số thứ tự kiện không hợp lệ.");
+    const number = Math.max(Number(ledger.counters[sku] || 0), ...occupied, 0) + 1;
+    if (!Number.isSafeInteger(number) || number < 1 || number > MAX_SEQUENCE_NUMBER) throw new Error(`SKU ${sku} đã đủ ${MAX_SEQUENCE_NUMBER} kiện trong đợt hiện tại. Hãy hoàn tất/kiểm hết kiện trước khi mở đợt mới.`);
     occupied.add(number);
     occupiedBySku.set(sku, occupied);
     ledger.counters[sku] = Math.max(Number(ledger.counters[sku] || 0), number);
-    ledger.units[code] = { sku, number };
+    ledger.units[code] = { sku, number, cycle: cycleBySku.get(sku) };
   }
   const value = JSON.stringify(ledger);
   await tx.appConfig.upsert({ where: { key: KEY }, create: { key: KEY, value }, update: { value } });
   return ledger.units;
 }
 
-module.exports = { MAX_QUANTITY, assertPackageQuantity, readLabelNumbers, assignLabelNumbers };
+module.exports = { MAX_QUANTITY, MAX_SEQUENCE_NUMBER, assertPackageQuantity, readLabelNumbers, assignLabelNumbers };

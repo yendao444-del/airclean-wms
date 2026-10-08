@@ -7799,6 +7799,7 @@ ipcMain.handle("handlingUnits:getWorkspace", async (_event, options = {}) => {
         const fallbackNumber = Number(legacySuffix);
         return Number.isSafeInteger(fallbackNumber) && fallbackNumber > 0 ? fallbackNumber : undefined;
       })(),
+      sequenceCycle: labelNumbers.units[String(label?.code || "").toUpperCase()]?.cycle,
     }));
     register = register.map((unit) => {
       const storedNumber = labelNumbers.units[String(unit.id).toUpperCase()]?.number;
@@ -7811,6 +7812,7 @@ ipcMain.handle("handlingUnits:getWorkspace", async (_event, options = {}) => {
         sequenceNumber: Number.isSafeInteger(Number(storedNumber)) && Number(storedNumber) > 0
           ? Number(storedNumber)
           : Number.isSafeInteger(legacySuffix) && legacySuffix > 0 ? legacySuffix : undefined,
+        sequenceCycle: labelNumbers.units[String(unit.id).toUpperCase()]?.cycle,
       };
     });
 
@@ -8142,7 +8144,7 @@ ipcMain.handle("handlingUnits:createUnits", async (_event, records = []) => {
       });
     }
     const numbers = await readLabelNumbers(prisma);
-    return { success: true, data: records.map((item) => ({ ...item, sequenceNumber: numbers.units[String(item.id || item.code).toUpperCase()]?.number })), duplicate: createResult.duplicate };
+    return { success: true, data: records.map((item) => ({ ...item, sequenceNumber: numbers.units[String(item.id || item.code).toUpperCase()]?.number, sequenceCycle: numbers.units[String(item.id || item.code).toUpperCase()]?.cycle })), duplicate: createResult.duplicate };
   } catch (error) {
     console.error("Create handling units error:", error);
     return {
@@ -8532,7 +8534,10 @@ ipcMain.handle("handlingUnits:issueQrLabels", async (_event, payload = {}) => {
         });
       }
       const labelNumbers = await assignLabelNumbers(tx, labels);
-      labels.forEach((label) => { label.sequenceNumber = labelNumbers[label.code].number; });
+      labels.forEach((label) => {
+        label.sequenceNumber = labelNumbers[label.code].number;
+        label.sequenceCycle = labelNumbers[label.code].cycle;
+      });
       registry.push(...labels);
       await writeHandlingConfigArray(tx, HANDLING_PACKAGING_SPECS_KEY, specs);
       await writeHandlingConfigArray(tx, HANDLING_QR_LABELS_KEY, registry);
@@ -8859,7 +8864,7 @@ ipcMain.handle("handlingUnits:quickReceive", async (_event, payload = {}) => {
           const operationResult = {
             purchases: purchases.map((purchase) => ({ id: purchase.id, poNumber: purchase.poNumber, supplierName: supplierNameById.get(purchase.supplierId) })),
             unitCodes: unitRows.map((unit) => unit.code),
-            units: unitRows.map((unit) => ({ ...unit, sequenceNumber: receivedNumbers[unit.code]?.number })),
+            units: unitRows.map((unit) => ({ ...unit, sequenceNumber: receivedNumbers[unit.code]?.number, sequenceCycle: receivedNumbers[unit.code]?.cycle })),
           };
           await tx.appConfig.update({
             where: { key: operationKey },
@@ -9501,7 +9506,7 @@ ipcMain.handle("handlingUnits:splitUnit", async (_event, payload = {}) => {
         });
         return {
           parent: updatedParent,
-          children: createdChildren.map((child) => ({ ...child, sequenceNumber: childNumbers[child.code].number })),
+          children: createdChildren.map((child) => ({ ...child, sequenceNumber: childNumbers[child.code].number, sequenceCycle: childNumbers[child.code].cycle })),
           childCodes,
           duplicate: false,
         };

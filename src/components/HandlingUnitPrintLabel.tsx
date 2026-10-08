@@ -3,6 +3,7 @@ import { QRCode } from "antd";
 type PrintLabelUnit = {
   id: string;
   sequenceNumber?: number;
+  sequenceCycle?: number;
   skuName: string;
   color?: string;
   qrPayload?: string;

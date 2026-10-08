@@ -85,6 +85,7 @@ type CatalogItem = {
 type UnitRow = {
   id: string;
   sequenceNumber?: number;
+  sequenceCycle?: number;
   productId?: number;
   purchaseOrderId?: number;
   purchaseItemId?: number;
@@ -3470,7 +3471,7 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
                     >
                       <header>
                         <div className="hu-card-heading">
-                          <span className="hu-sequence-badge" title="Số kiện cố định theo tem">{displaySequenceByUnitId.get(unit.id) || "—"}</span>
+                          <span className="hu-sequence-badge" title={unit.sequenceCycle && unit.sequenceCycle > 1 ? `Số kiện cố định theo tem · Đợt ${unit.sequenceCycle}` : "Số kiện cố định theo tem"}>{displaySequenceByUnitId.get(unit.id) || "—"}</span>
                           <div className="hu-card-title-group">
                             <b className="hu-unit-code">{unit.id}</b>
                             <span className="hu-unit-spec-tag">

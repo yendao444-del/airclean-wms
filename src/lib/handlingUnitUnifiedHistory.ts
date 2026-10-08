@@ -18,7 +18,7 @@ export type UnifiedHistoryRow = {
 const finite = (value: unknown) => typeof value === "number" && Number.isFinite(value) ? value : null;
 const ref = (value?: string) => String(value || "").trim();
 const codeKey = (value?: string) => ref(value).toUpperCase();
-type HistoryUnit = { id: string; skuName: string; sequenceNumber?: number; unitName?: string };
+type HistoryUnit = { id: string; skuName: string; sequenceNumber?: number; sequenceCycle?: number; unitName?: string };
 
 export function historyPackageIdentity(code: string | undefined, units: readonly HistoryUnit[], _currentNumbers: ReadonlyMap<string, number>) {
   const unit = units.find(item => codeKey(item.id) === codeKey(code));
@@ -28,7 +28,8 @@ export function historyPackageIdentity(code: string | undefined, units: readonly
   const legacy = Number(String(unit?.id || code || '').match(/-(\d+)$/)?.[1]);
   const number = sequence && Number.isSafeInteger(sequence) && sequence > 0 ? sequence
     : Number.isSafeInteger(legacy) && legacy > 0 ? legacy : undefined;
-  return { label: number ? `Kiện số ${number}` : (code || "Không rõ kiện"), unitName: unit?.unitName || "đơn vị" };
+  const cycle = Number(unit?.sequenceCycle);
+  return { label: number ? `Kiện số ${number}${Number.isSafeInteger(cycle) && cycle > 1 ? ` · Đợt ${cycle}` : ""}` : (code || "Không rõ kiện"), unitName: unit?.unitName || "đơn vị" };
 }
 
 /** Joins the physical package stream and SKU stock card without inventing links. */
