@@ -51,7 +51,7 @@ import {
 import { Warehouse2DMap } from "../components/Warehouse2DMap";
 import Modal from "../components/HandlingUnitModal";
 import HandlingUnitPrintLabel from "../components/HandlingUnitPrintLabel";
-import { prepareHandlingUnitPrintUnits } from "../lib/handlingUnitPrintNumbers";
+import { buildHandlingUnitSequenceMap, prepareHandlingUnitPrintUnits } from "../lib/handlingUnitPrintNumbers";
 import { packedStockForSku, summarizeHandlingUnitAllocation, summarizePackedInventory, suggestHandlingUnitAllocation } from "../lib/handlingUnitAllocation";
 import HandlingUnitPackedStock from "../components/HandlingUnitPackedStock";
 import HandlingUnitShiftChecklist, { ShiftFamilySearch } from "../components/HandlingUnitShiftChecklist";
@@ -891,7 +891,7 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
   ) => {
     if (!units.length || isExportingLabelPdf) return;
     updatePrintLabelSize(size);
-    setPrintUnits(prepareHandlingUnitPrintUnits(units, displaySequenceByUnitId));
+    setPrintUnits(prepareHandlingUnitPrintUnits(units));
     setIsExportingLabelPdf(true);
     setShowPrintModal(true);
   };
@@ -1117,6 +1117,8 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
   const [showAddLocationModal, setShowAddLocationModal] = useState(false);
   const [addLocationForm] = Form.useForm();
   const [movingUnit, setMovingUnit] = useState<UnitRow | null>(null);
+  const [isMovingUnit, setIsMovingUnit] = useState(false);
+  const movingUnitRequestRef = useRef(false);
   const [moveLocationForm] = Form.useForm();
   // Kept for backwards-compatible data repair access; no action button exposes this in the new workflow.
   const [editingUnit, setEditingUnit] = useState<UnitRow | null>(null);
@@ -1730,38 +1732,21 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
   };
 
   const handleMoveUnitSubmit = async () => {
+    if (!movingUnit || movingUnitRequestRef.current) return;
+    movingUnitRequestRef.current = true;
+    setIsMovingUnit(true);
     try {
       const values = await moveLocationForm.validateFields();
-      if (!movingUnit) return;
       const targetZone = values.targetZone;
       const targetRack = values.targetRack || "";
-      const prevZone = movingUnit.location?.zone || "Chưa phân khu";
-
-      setWorkspace((prev) => ({
-        ...prev,
-        register: prev.register.map((unit) =>
-          unit.id === movingUnit.id
-            ? {
-                ...unit,
-                location: {
-                  zone: targetZone,
-                  rack: targetRack || unit.location?.rack,
-                },
-              }
-            : unit,
-        ),
-        recentTransactions: [
-          {
-            id: `TR-${Date.now()}`,
-            unitId: movingUnit.id,
-            createdAt: new Date().toISOString(),
-            type: "Chuyển vị trí",
-            quantity: 0,
-            note: `Điều chuyển từ khu vực ${prevZone} sang ${targetZone}${targetRack ? ` (${targetRack})` : ""}`,
-          },
-          ...prev.recentTransactions,
-        ],
-      }));
+      const moveUnit = window.electronAPI?.handlingUnits?.moveUnit;
+      if (!moveUnit) throw new Error("Phiên bản ứng dụng chưa hỗ trợ lưu vị trí kiện.");
+      const result = await moveUnit({
+        code: movingUnit.id,
+        location: { zone: targetZone, rack: targetRack },
+      });
+      if (!result?.success) throw new Error(result?.error || "Không thể lưu vị trí kiện.");
+      await loadWorkspace(true);
 
       message.success(
         `Đã chuyển kiện ${movingUnit.id} sang khu vực ${targetZone}!`,
@@ -1772,6 +1757,9 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
       if (!err?.errorFields) {
         message.error(err?.message || "Không thể chuyển vị trí kiện.");
       }
+    } finally {
+      movingUnitRequestRef.current = false;
+      setIsMovingUnit(false);
     }
   };
 
@@ -2034,10 +2022,10 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
     [orderedSelectedUnits],
   );
   const displaySequenceByUnitId = useMemo(() => {
-    // Show a compact pick queue; completed or split history must not leave
-    // gaps such as 1, 3 in the active warehouse view.
-    return new Map(activeSelectedUnits.map((unit, index) => [unit.id, index + 1] as const));
-  }, [activeSelectedUnits]);
+    // Keep physical identities across depletion, filters and pick reordering.
+    // Include completed packages so their history keeps the same label number.
+    return buildHandlingUnitSequenceMap(workspace.register);
+  }, [workspace.register]);
   const selectedStats = useMemo(
     () =>
       selectedUnits.reduce(
@@ -2130,12 +2118,17 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
             (isPendingCheck || localDayKey(item.createdAt) === todayKey)
           );
         });
+        const transferAfterCheck = history.some(item =>
+          /^(gộp kiện - chuyển đi|gộp hàng hoàn - chuyển đi|nhận gộp kiện|nhận gộp hàng hoàn)/i.test(String(item.type || ""))
+          && new Date(item.createdAt || 0).getTime() > latestCompletedCheck
+          && localDayKey(item.createdAt) === todayKey,
+        );
         // Only an opened physical package or an explicit pending final count
         // belongs here. Historic duties never bring sealed/empty rows back.
         // An opened package is counted once today even without a new movement.
         // A later withdrawal reopens the check; pending counts always remain.
         if (!isPendingCheck && latestCompletedCheck > 0 && localDayKey(latestCompletedCheck) === todayKey
-            && !obligationRequiredToday && withdrawals.length === 0) return null;
+            && !obligationRequiredToday && withdrawals.length === 0 && !transferAfterCheck) return null;
         return {
           unit,
           withdrawalCount: withdrawals.length,
@@ -3477,7 +3470,7 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
                     >
                       <header>
                         <div className="hu-card-heading">
-                          <span className="hu-sequence-badge" title="Thứ tự lấy hàng hiện tại">{String(displaySequenceByUnitId.get(unit.id) || 0)}</span>
+                          <span className="hu-sequence-badge" title="Số kiện cố định theo tem">{displaySequenceByUnitId.get(unit.id) || "—"}</span>
                           <div className="hu-card-title-group">
                             <b className="hu-unit-code">{unit.id}</b>
                             <span className="hu-unit-spec-tag">
@@ -4569,10 +4562,14 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
         }
         open={!!movingUnit}
         onCancel={() => {
+          if (isMovingUnit) return;
           setMovingUnit(null);
           moveLocationForm.resetFields();
         }}
         onOk={handleMoveUnitSubmit}
+        confirmLoading={isMovingUnit}
+        maskClosable={!isMovingUnit}
+        closable={!isMovingUnit}
         okText="Xác nhận chuyển"
         destroyOnHidden
       >

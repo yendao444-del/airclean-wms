@@ -14,7 +14,8 @@ async function readLabelNumbers(tx) {
   return value;
 }
 
-// Numbers are an operational FIFO position per SKU. A cycle is kept while at
+// Numbers identify physical labels per SKU, independently of FIFO position.
+// A cycle is kept while at
 // least one physical unit is still active (including opened/pending-check),
 // then starts again at 1 after the whole cycle is finished or split. This
 // keeps printed labels stable and prevents the counter growing forever.
@@ -54,9 +55,9 @@ async function assignLabelNumbers(tx, rows) {
   // floor.
   for (const sku of new Set(skuByRow.map((row) => row.sku))) {
     if (existingActiveSkuSet.has(sku)) continue;
-    for (const [code, entry] of Object.entries(ledger.units)) {
-      if (String(entry?.sku || "").trim().toUpperCase() === sku) delete ledger.units[code];
-    }
+    // Receiving an already-issued label must keep its number. Historical
+    // identities also stay in the ledger after a new cycle starts.
+    if (skuByRow.some(row => row.sku === sku && ledger.units[row.code])) continue;
     ledger.counters[sku] = 0;
   }
 
@@ -64,7 +65,9 @@ async function assignLabelNumbers(tx, rows) {
   activeUnits.forEach((unit) => {
     const code = String(unit.code || "").trim().toUpperCase();
     const sku = String(unit.sku || "").trim().toUpperCase();
-    const number = Number(ledger.units[code]?.number);
+    const storedNumber = Number(ledger.units[code]?.number);
+    const legacySuffix = Number(code.match(/-(\d+)$/)?.[1]);
+    const number = Number.isSafeInteger(storedNumber) && storedNumber > 0 ? storedNumber : legacySuffix;
     if (!sku || !Number.isSafeInteger(number) || number < 1) return;
     const occupied = occupiedBySku.get(sku) || new Set();
     occupied.add(number);
@@ -79,7 +82,8 @@ async function assignLabelNumbers(tx, rows) {
       continue;
     }
     const occupied = occupiedBySku.get(sku) || new Set();
-    let number = Math.max(...occupied, 0) + 1;
+    // Do not reuse the number of a depleted package while this cycle is active.
+    let number = Math.max(Number(ledger.counters[sku] || 0), ...occupied, 0) + 1;
     if (!Number.isSafeInteger(number) || number < 1) throw new Error("Số thứ tự kiện không hợp lệ.");
     occupied.add(number);
     occupiedBySku.set(sku, occupied);

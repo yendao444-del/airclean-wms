@@ -141,8 +141,8 @@ const DATA_SAFETY_ALLOWED_CHANNELS = new Set([
   // these channels never mutate inventory or legacy prepack tasks.
   "packagePacking:create",
   "packagePacking:update",
-  // Stock-check unit reconciliation is role-gated, transactional and uses an
-  // expected-balance guard so a stale screen cannot overwrite a newer count.
+  // Legacy metadata edits and matching final counts remain available; quantity
+  // variances must use finalizeShiftCheck so SKU stock and audit commit together.
   "handlingUnits:updateUnit",
   "handlingUnits:finalizePick",
   // Daily package operations are serialized by package code and persist an
@@ -151,6 +151,7 @@ const DATA_SAFETY_ALLOWED_CHANNELS = new Set([
   "handlingUnits:pickUnit",
   "handlingUnits:mergeReturnUnit",
   "handlingUnits:requestFinalCheck",
+  "handlingUnits:move",
   "handlingUnits:finalizeShiftCheck",
   "handlingUnits:confirmReconciliation",
   // Purchase creation claims an idempotency key and commits the receipt,
@@ -763,6 +764,16 @@ async function withStockLock(fn) {
 // another.
 async function lockGlobalInventoryMutation(tx) {
   await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('inventory-global-stock-mutation'))`;
+}
+
+// Always acquire the stock lock before code/row locks: TMDT, packing and
+// physical counts share this same serialization point across desktops.
+async function lockHandlingUnitMutation(tx, codes) {
+  await lockGlobalInventoryMutation(tx);
+  for (const code of [...new Set(codes)].sort()) {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`handling-unit-code:${code}`}))`;
+    await tx.$queryRaw`SELECT "id" FROM "HandlingUnit" WHERE "code" = ${code} FOR UPDATE`;
+  }
 }
 
 // ⚡ LAZY LOADING — Module nặng chỉ load khi cần, không block startup
@@ -5201,6 +5212,7 @@ ipcMain.handle("refunds:completeAndRestore", async (event, data = {}) => {
     const response = await withStockLock(() =>
       getPrismaDirectTx().$transaction(
         async (tx) => {
+          await lockGlobalInventoryMutation(tx);
           const lockedRows = await tx.$queryRaw`
             SELECT id FROM "Refund" WHERE id = ${refundId} FOR UPDATE
           `;
@@ -5251,11 +5263,23 @@ ipcMain.handle("refunds:completeAndRestore", async (event, data = {}) => {
           if (normalizedItems.length === 0)
             throw new Error("Phiếu hoàn không có SKU hợp lệ để cộng kho.");
 
+          const reference = String(
+            refund.orderNumber || refund.refundCode || `P.Hoan ${refund.id}`,
+          ).trim();
+          const allocationKey = tmdtPhysicalStock.allocationKey(reference);
+          const allocationRecord = await tx.appConfig.findUnique({ where: { key: allocationKey } });
+          const allocationState = allocationRecord ? JSON.parse(allocationRecord.value) : { version: 1, items: {} };
+          if (allocationState.hasCustomRefund && !data.isCustom) throw new Error('Đơn đã nhận hoàn theo hàng thực tế. Hãy tiếp tục xác nhận theo SKU thực nhận, không hoàn tự động theo combo.');
+          const packedInventory = allocationRecord && !data.isCustom
+            ? packagePackingModule.decodeInventory(await tx.appConfig.findUnique({ where: { key: packagePackingModule.INVENTORY_KEY } }))
+            : null;
           const physicalReturnBySku = new Map();
           for (const item of normalizedItems) {
-            const combo = await tx.comboProduct.findUnique({ where: { sku: item.sku } });
+            const source = data.isCustom ? null : allocationState?.items?.[item.sku];
+            const combo = source ? null : await tx.comboProduct.findUnique({ where: { sku: item.sku } });
+            if (!source && combo && !data.isCustom) throw new Error(`Đơn cũ thiếu thành phần xuất gốc của ${item.sku}. Hãy xác nhận theo SKU và số lượng hàng thực nhận, không hoàn theo combo hiện tại.`);
             const components = combo ? parseJsonArray(combo.items) : [];
-            const physicalItems = components.length > 0
+            const physicalItems = source ? tmdtPhysicalStock.refundStockChanges(source, item.quantity, packedInventory) : components.length > 0
               ? components.map((component) => ({
                   sku: String(component?.sku || "").trim(),
                   quantity: Number(component?.quantity || 0) * item.quantity,
@@ -5268,20 +5292,18 @@ ipcMain.handle("refunds:completeAndRestore", async (event, data = {}) => {
                 Number(physicalReturnBySku.get(physicalItem.sku) || 0) + physicalItem.quantity,
               );
             }
+            if (source) source.refundedQuantity = Number(source.refundedQuantity || 0) + item.quantity;
           }
           const physicalReturnItems = [...physicalReturnBySku.entries()].map(([sku, quantity]) => ({ sku, quantity }));
           if (physicalReturnItems.length === 0)
             throw new Error("Không xác định được SKU vật lý của hàng hoàn.");
 
-          const reference = String(
-            refund.orderNumber || refund.refundCode || `P.Hoan ${refund.id}`,
-          ).trim();
           const note = data.isCustom
             ? `Xác nhận hàng hoàn lệch/custom (${refund.customerName})`
             : `Xác nhận nhận hàng hoàn/trả về kho (${refund.customerName})`;
 
-          for (const item of normalizedItems) {
-            await deductItemOrCombo(tx, item.sku, item.quantity, {
+          for (const item of physicalReturnItems) {
+            await updateProductStockInTx(tx, item.sku, item.quantity, {
               type: "refund",
               referenceType: "HOAN",
               reference,
@@ -5289,14 +5311,18 @@ ipcMain.handle("refunds:completeAndRestore", async (event, data = {}) => {
               createdBy: currentSession.username,
             });
           }
+          allocationState.receivedRefund = true;
+          if (data.isCustom) allocationState.hasCustomRefund = true;
+          const allocationValue = JSON.stringify(allocationState);
+          await tx.appConfig.upsert({ where: { key: allocationKey }, create: { key: allocationKey, value: allocationValue }, update: { value: allocationValue } });
 
           const returnUnits = [];
           for (let index = 0; index < physicalReturnItems.length; index += 1) {
             const item = physicalReturnItems[index];
             const product = await resolveProductForHandlingSku(tx, item.sku);
-            const code = newRefundHandlingUnitCode(refund.id, item.sku, index + 1);
-            const unit = await tx.handlingUnit.create({
-              data: {
+            for (const quantity of refundPackageQuantities(item.quantity)) {
+              const code = newRefundHandlingUnitCode(refund.id, item.sku, returnUnits.length + 1);
+              const unit = await tx.handlingUnit.create({ data: {
                 code,
                 productId: product.productId,
                 sku: item.sku,
@@ -5304,14 +5330,15 @@ ipcMain.handle("refunds:completeAndRestore", async (event, data = {}) => {
                 packagingName: "Hàng hoàn",
                 baseUnit: product.baseUnit,
                 conversionFactor: 1,
-                initialQuantity: item.quantity,
-                remainingQuantity: item.quantity,
+                initialQuantity: quantity,
+                remainingQuantity: quantity,
                 status: "opened",
                 zone: JSON.stringify({ zone: "Hàng hoàn", rack: "Chờ gộp" }),
-              },
-            });
-            returnUnits.push(unit);
+              } });
+              returnUnits.push(unit);
+            }
           }
+          await assignLabelNumbers(tx, returnUnits);
           await appendHandlingUnitsTransactions(
             tx,
             returnUnits.map((unit) => ({
@@ -5453,7 +5480,7 @@ async function batchStockUpdate(tx, skuChanges, logContext, options = {}) {
       logContext?.createdBy || currentSession?.username || 'System',
       appendHandlingUnitsTransactions,
     );
-    await tmdtPhysicalStock.allocate(tx, skuChanges, comboMap, logContext, appendHandlingUnitsTransactions, { softwareAuthoritative: true });
+    await tmdtPhysicalStock.allocate(tx, skuChanges, comboMap, logContext, appendHandlingUnitsTransactions, { softwareAuthoritative: true, stockBySku });
   }
 
   // Bước 1: Resolve combo → flat list of actual SKU changes
@@ -5588,12 +5615,18 @@ async function deductItemOrCombo(
 ) {
   if (quantity > 0 && String(logContext?.referenceType || '').toUpperCase().startsWith('TMDT')) {
     await lockGlobalInventoryMutation(tx);
-    await tmdtPhysicalStock.restore(tx, variantSku, quantity, logContext.reference, logContext.createdBy || 'System', appendHandlingUnitsTransactions);
+    const restored = await tmdtPhysicalStock.restore(
+      tx, variantSku, quantity, logContext.reference,
+      logContext.createdBy || 'System', appendHandlingUnitsTransactions,
+      { updateStock: (transaction, sku, amount) => updateProductStockInTx(transaction, sku, amount, logContext, options) },
+    );
+    if (restored) return;
   }
   const combo = await tx.comboProduct.findUnique({
     where: { sku: variantSku },
   });
   if (combo) {
+    if (quantity > 0 && String(logContext?.referenceType || '').toUpperCase().startsWith('TMDT')) throw new Error('Đơn cũ thiếu nguồn xuất gốc của combo; cần đối soát tồn trước khi hủy, không hoàn theo cấu hình hiện tại.');
     let comboItems = [];
     try {
       comboItems =
@@ -5609,6 +5642,19 @@ async function deductItemOrCombo(
   } else {
     await updateProductStockInTx(tx, variantSku, quantity, logContext, options);
   }
+}
+
+function groupTmdtRestorationItems(items) {
+  const grouped = new Map();
+  for (const item of items || []) {
+    const sku = String(item.variantSku || item.sku || '').trim();
+    if (!sku) continue;
+    const quantity = Number(item.quantity);
+    const total = (grouped.get(sku) || 0) + quantity;
+    if (!Number.isSafeInteger(quantity) || quantity <= 0 || !Number.isSafeInteger(total)) throw new Error('Số lượng hoàn đơn TMDT không hợp lệ.');
+    grouped.set(sku, total);
+  }
+  return [...grouped].map(([sku, quantity]) => ({ sku, quantity }));
 }
 
 async function assertSaleStockAvailable(tx, sku, quantity, options = {}) {
@@ -7754,7 +7800,19 @@ ipcMain.handle("handlingUnits:getWorkspace", async (_event, options = {}) => {
         return Number.isSafeInteger(fallbackNumber) && fallbackNumber > 0 ? fallbackNumber : undefined;
       })(),
     }));
-    register = register.map((unit) => ({ ...unit, sequenceNumber: labelNumbers.units[String(unit.id).toUpperCase()]?.number }));
+    register = register.map((unit) => {
+      const storedNumber = labelNumbers.units[String(unit.id).toUpperCase()]?.number;
+      const legacySuffix = Number(String(unit.id || "").match(/-(\d+)$/)?.[1]);
+      return {
+        ...unit,
+        // Older received labels were persisted without a ledger entry. Their
+        // issued code suffix is still the physical label identity; never use
+        // the current FIFO position as a replacement.
+        sequenceNumber: Number.isSafeInteger(Number(storedNumber)) && Number(storedNumber) > 0
+          ? Number(storedNumber)
+          : Number.isSafeInteger(legacySuffix) && legacySuffix > 0 ? legacySuffix : undefined,
+      };
+    });
 
     if (blindStockCheck) {
       // The stock-check workspace needs package identity and location, but not
@@ -8204,6 +8262,13 @@ function newRefundHandlingUnitCode(refundId, sku, position) {
       .slice(-16)
       .toUpperCase() || "SKU";
   return `HH-${refundId}-${compactSku}-${String(position).padStart(2, "0")}`;
+}
+
+function refundPackageQuantities(quantity) {
+  if (!Number.isSafeInteger(quantity) || quantity <= 0) throw new Error('Số lượng hàng hoàn phải là số nguyên dương.');
+  const result = [];
+  for (let remaining = quantity; remaining > 0; remaining -= HANDLING_UNIT_MAX_QUANTITY) result.push(Math.min(remaining, HANDLING_UNIT_MAX_QUANTITY));
+  return result;
 }
 
 function newHandlingUnitCode(sku, position) {
@@ -9086,6 +9151,7 @@ ipcMain.handle("handlingUnits:move", async (_event, payload = {}) => {
     const location = normalizeHandlingLocation(payload.location);
     if (!code) throw new Error("Thiếu mã kiện cần chuyển.");
     const updated = await prisma.$transaction(async (tx) => {
+      await lockHandlingUnitMutation(tx, [code]);
       const existing = await tx.handlingUnit.findUnique({ where: { code } });
       if (!existing) throw new Error("Không tìm thấy kiện hàng.");
       if (existing.status === "split") {
@@ -9120,6 +9186,11 @@ ipcMain.handle("handlingUnits:move", async (_event, payload = {}) => {
           after: JSON.stringify(location),
           actorId: currentSession?.id || null,
         },
+      });
+      await appendHandlingUnitsTransaction(tx, {
+        unitId: code, sku: moved.sku, type: "Chuyển vị trí", quantity: 0,
+        remaining: moved.remainingQuantity, actor: currentSession?.username,
+        note: `Điều chuyển ${before || "Chưa phân khu"} → ${JSON.stringify(location)}`,
       });
       return moved;
     });
@@ -9156,6 +9227,7 @@ ipcMain.handle("handlingUnits:updateUnit", async (_event, payload = {}) => {
       throw new Error("Số lượng còn lại không thể lớn hơn số lượng ban đầu.");
 
     const result = await prisma.$transaction(async (tx) => {
+      await lockHandlingUnitMutation(tx, [code]);
       const before = await tx.handlingUnit.findUnique({ where: { code } });
       if (!before) throw new Error(`Không tìm thấy kiện [${code}].`);
       if (initialQuantity !== Number(before.initialQuantity)) assertPackageQuantity(initialQuantity);
@@ -9170,20 +9242,19 @@ ipcMain.handle("handlingUnits:updateUnit", async (_event, payload = {}) => {
           `Tồn kiện [${code}] vừa thay đổi từ ${expectedRemainingQuantity} thành ${before.remainingQuantity}. Vui lòng tải lại trước khi xác nhận.`,
         );
       }
-      if (
-        before.status === "pending_check" &&
-        remainingQuantity !== Number(before.remainingQuantity)
-      ) {
+      if (remainingQuantity !== Number(before.remainingQuantity)) {
         throw new Error(
-          `Kiện [${code}] đang chờ kiểm thực tế. Không được sửa số lượng để bỏ qua bước kiểm; hãy dùng nút Kiểm thực tế và nhập số lượng thực tế của kiện.`,
+          `Không được sửa tồn kiện [${code}] qua thông tin kiện. Hãy dùng Kiểm thực tế để cập nhật cả tồn SKU và lịch sử chênh lệch.`,
         );
       }
 
       let status = before.status;
       if (remainingQuantity === 0 && status !== "pending_check") status = "empty";
+      // Editing a name, location or legacy capacity does not break the seal.
+      // The balance was already required to stay unchanged above.
       if (
         remainingQuantity > 0 &&
-        (remainingQuantity < initialQuantity || status === "empty") &&
+        status === "empty" &&
         status !== "pending_check"
       )
         status = "opened";
@@ -9263,7 +9334,7 @@ ipcMain.handle("handlingUnits:splitUnit", async (_event, payload = {}) => {
 
     const result = await prisma.$transaction(
       async (tx) => {
-        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`handling-unit-code:${code}`}))`;
+        await lockHandlingUnitMutation(tx, [code]);
 
         const completed = await tx.appConfig.findUnique({
           where: { key: operationKey },
@@ -10266,7 +10337,7 @@ async function executeKhuiKien(
   if (prisma) {
     try {
       const res = await prisma.$transaction(async (tx) => {
-        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`handling-unit-code:${normalizedCode}`}))`;
+        await lockHandlingUnitMutation(tx, [normalizedCode]);
         if (operationKey) {
           const completed = await tx.appConfig.findUnique({
             where: { key: operationKey },
@@ -10617,7 +10688,7 @@ async function executeRutHang(
   if (prisma) {
     try {
       const res = await prisma.$transaction(async (tx) => {
-        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`handling-unit-code:${normalizedCode}`}))`;
+        await lockHandlingUnitMutation(tx, [normalizedCode]);
         if (operationKey) {
           const completed = await tx.appConfig.findUnique({
             where: { key: operationKey },
@@ -12376,7 +12447,7 @@ ipcMain.handle("handlingUnits:sealUnit", async (_event, payload = {}) => {
       .toUpperCase();
     if (!code) throw new Error("Mã kiện không hợp lệ.");
     const updated = await getPrismaDirectTx().$transaction(async (tx) => {
-      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`handling-unit-code:${code}`}))`;
+      await lockHandlingUnitMutation(tx, [code]);
       const current = await tx.handlingUnit.findUnique({ where: { code } });
       if (!current) throw new Error(`Không tìm thấy kiện [${code}].`);
       if (current.status === "pending_check") {
@@ -12422,6 +12493,7 @@ ipcMain.handle("handlingUnits:deleteUnit", async (_event, payload = {}) => {
     if (!code) throw new Error("Mã kiện không hợp lệ.");
 
     const deleted = await prisma.$transaction(async (tx) => {
+      await lockHandlingUnitMutation(tx, [code]);
       const unit = await tx.handlingUnit.findUnique({ where: { code } });
       if (!unit) throw new Error(`Không tìm thấy kiện [${code}].`);
       if (unit.status === "split") {
@@ -12591,9 +12663,7 @@ ipcMain.handle("handlingUnits:mergeReturnUnit", async (_event, payload = {}) => 
     if (!operationKey) throw new Error("Mã chống gộp kiện trùng không hợp lệ.");
 
     const result = await prisma.$transaction(async (tx) => {
-      for (const code of [sourceCode, targetCode].sort()) {
-        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`handling-unit-code:${code}`}))`;
-      }
+      await lockHandlingUnitMutation(tx, [sourceCode, targetCode]);
       const completed = await tx.appConfig.findUnique({ where: { key: operationKey } });
       if (completed) {
         const [source, target] = await Promise.all([
@@ -12629,7 +12699,7 @@ ipcMain.handle("handlingUnits:mergeReturnUnit", async (_event, payload = {}) => 
           where: { code: sourceCode },
           data: {
             remainingQuantity: nextSourceQuantity,
-            status: nextSourceQuantity === 0 ? "empty" : "opened",
+            status: nextSourceQuantity === 0 ? "pending_check" : "opened",
             updatedAt: new Date(),
           },
         }),
@@ -12705,7 +12775,7 @@ ipcMain.handle("handlingUnits:requestFinalCheck", async (_event, payload = {}) =
     if (!operationKey) throw new Error("Mã chống gửi chờ kiểm trùng không hợp lệ.");
     if (prisma) {
       const result = await prisma.$transaction(async (tx) => {
-        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`handling-unit-code:${code}`}))`;
+        await lockHandlingUnitMutation(tx, [code]);
         const completed = await tx.appConfig.findUnique({ where: { key: operationKey } });
         if (completed) {
           const unit = await tx.handlingUnit.findUnique({ where: { code } });
@@ -12777,8 +12847,8 @@ ipcMain.handle("handlingUnits:requestFinalCheck", async (_event, payload = {}) =
   }
 });
 
-// The withdrawal has already reduced the package balance to zero. Final check
-// either confirms zero or restores the physical remainder found in the package.
+// Legacy final counts can confirm a matching balance. Variances go through the
+// unified physical-count channel, which updates package and SKU totals together.
 ipcMain.handle("handlingUnits:finalizePick", async (_event, payload = {}) => {
   const idempotencyKey = String(payload.idempotencyKey || "").trim();
   const requestKey = idempotencyKey ? `final-pick:${idempotencyKey}` : null;
@@ -12789,12 +12859,14 @@ ipcMain.handle("handlingUnits:finalizePick", async (_event, payload = {}) => {
   try {
     requireRole("admin", "manager");
     const code = String(payload.code || "").trim().toUpperCase();
-    const actualQuantity = Math.max(0, Math.floor(Number(payload.actualQuantity)));
+    const actualQuantity = Number(payload.actualQuantity);
     const expectedQuantity = payload.expectedQuantity === undefined
       ? null
-      : Math.max(0, Math.floor(Number(payload.expectedQuantity)));
+      : Number(payload.expectedQuantity);
     const note = String(payload.note || "").trim();
-    if (!code || !Number.isFinite(actualQuantity)) {
+    if (!code || payload.actualQuantity === null || payload.actualQuantity === ''
+        || !Number.isSafeInteger(actualQuantity) || actualQuantity < 0
+        || (expectedQuantity !== null && (!Number.isSafeInteger(expectedQuantity) || expectedQuantity < 0))) {
       throw new Error("Số lượng thực tế không hợp lệ.");
     }
     const operationKey = buildRendererHandlingOperationKey(
@@ -12828,13 +12900,16 @@ ipcMain.handle("handlingUnits:finalizePick", async (_event, payload = {}) => {
           `Số lượng thực tế (${actualQuantity}) không thể lớn hơn sức chứa ban đầu (${maximumQuantity}).`,
         );
       }
+      if (actualQuantity !== Number(unit.remainingQuantity ?? unit.currentPcs ?? 0)) {
+        throw new Error(`Kiện [${code}] có chênh lệch thực tế. Hãy dùng Kiểm thực tế để cập nhật cả tồn SKU và lý do chênh lệch.`);
+      }
       await appendHandlingUnitsTransaction(tx, {
         unitId: code,
         type:
           actualQuantity === 0
             ? "Kiểm khớp - chốt hết kiện"
-            : "Kiểm lệch - cập nhật tồn thực tế",
-        quantity: actualQuantity,
+            : "Kiểm cuối ca - khớp",
+        quantity: 0,
         remaining: actualQuantity,
         actor: currentSession?.username || "Renderer",
         note:
@@ -12846,7 +12921,7 @@ ipcMain.handle("handlingUnits:finalizePick", async (_event, payload = {}) => {
 
     if (prisma) {
       const result = await prisma.$transaction(async (tx) => {
-        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`handling-unit-code:${code}`}))`;
+        await lockHandlingUnitMutation(tx, [code]);
         const completed = await tx.appConfig.findUnique({ where: { key: operationKey } });
         if (completed) {
           const unit = await tx.handlingUnit.findUnique({ where: { code } });
@@ -22552,8 +22627,9 @@ ipcMain.handle("combos:create", async (event, data) => {
       cost: validated.cost,
       status: "active",
     };
-    const combo = await prisma.comboProduct.create({
-      data: { sku, ...comboData },
+    const combo = await prisma.$transaction(async (tx) => {
+      await lockGlobalInventoryMutation(tx);
+      return tx.comboProduct.create({ data: { sku, ...comboData } });
     });
     void logActivity({
       module: "products",
@@ -22602,9 +22678,9 @@ ipcMain.handle("combos:update", async (event, id, data) => {
         ? { items: JSON.stringify(validated.items), cost: validated.cost }
         : {}),
     };
-    const combo = await prisma.comboProduct.update({
-      where: { id: comboId },
-      data: updateData,
+    const combo = await prisma.$transaction(async (tx) => {
+      await lockGlobalInventoryMutation(tx);
+      return tx.comboProduct.update({ where: { id: comboId }, data: updateData });
     });
     void logActivity({
       module: "combos",
@@ -22638,7 +22714,10 @@ ipcMain.handle("combos:delete", async (event, id) => {
       where: { id: comboId },
     });
     if (!before) throw new Error("Combo not found.");
-    await prisma.comboProduct.delete({ where: { id: comboId } });
+    await prisma.$transaction(async (tx) => {
+      await lockGlobalInventoryMutation(tx);
+      await tx.comboProduct.delete({ where: { id: comboId } });
+    });
     void logActivity({
       module: "combos",
       action: "DELETE",
@@ -26603,9 +26682,9 @@ ipcMain.handle("marketplaceOrders:delete", async (event, { id, userName }) => {
 
           if (linkedExport && linkedExport.status === "completed") {
             const exportItems = JSON.parse(linkedExport.items || "[]");
-            for (const item of exportItems) {
-              if (item.variantSku) {
-                await deductItemOrCombo(tx, item.variantSku, item.quantity, {
+            for (const item of groupTmdtRestorationItems(exportItems)) {
+              if (item.sku) {
+                await deductItemOrCombo(tx, item.sku, item.quantity, {
                   type: "adjustment",
                   referenceType: "TMDT_CANCEL",
                   reference:
@@ -26618,7 +26697,7 @@ ipcMain.handle("marketplaceOrders:delete", async (event, { id, userName }) => {
               }
             }
           } else if (order.status === "completed") {
-            for (const item of order.items) {
+            for (const item of groupTmdtRestorationItems(order.items)) {
               if (item.sku) {
                 await deductItemOrCombo(tx, item.sku, item.quantity, {
                   type: "adjustment",

@@ -20,14 +20,15 @@ const ref = (value?: string) => String(value || "").trim();
 const codeKey = (value?: string) => ref(value).toUpperCase();
 type HistoryUnit = { id: string; skuName: string; sequenceNumber?: number; unitName?: string };
 
-export function historyPackageIdentity(code: string | undefined, units: readonly HistoryUnit[], currentNumbers: ReadonlyMap<string, number>) {
+export function historyPackageIdentity(code: string | undefined, units: readonly HistoryUnit[], _currentNumbers: ReadonlyMap<string, number>) {
   const unit = units.find(item => codeKey(item.id) === codeKey(code));
-  const currentNumber = unit && currentNumbers.get(unit.id);
   if (codeKey(code).startsWith("PACKED:")) return { label: "Nguồn đóng gói sẵn", unitName: "đơn vị SKU" };
   if (codeKey(code).startsWith("UNALLOCATED:")) return { label: "Tồn chưa phân kiện", unitName: unit?.unitName || "đơn vị" };
-  if (currentNumber && Number.isInteger(currentNumber) && currentNumber > 0) return { label: `Kiện số ${currentNumber}`, unitName: unit?.unitName || "đơn vị" };
   const sequence = unit?.sequenceNumber;
-  return { label: sequence && Number.isInteger(sequence) && sequence > 0 ? `Kiện · tem số ${sequence}` : (code || "Không rõ kiện"), unitName: unit?.unitName || "đơn vị" };
+  const legacy = Number(String(unit?.id || code || '').match(/-(\d+)$/)?.[1]);
+  const number = sequence && Number.isSafeInteger(sequence) && sequence > 0 ? sequence
+    : Number.isSafeInteger(legacy) && legacy > 0 ? legacy : undefined;
+  return { label: number ? `Kiện số ${number}` : (code || "Không rõ kiện"), unitName: unit?.unitName || "đơn vị" };
 }
 
 /** Joins the physical package stream and SKU stock card without inventing links. */

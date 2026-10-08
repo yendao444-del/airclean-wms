@@ -378,6 +378,7 @@ function watchElectronBackend({ devServerUrl, useBuiltRenderer = false }) {
     'tmdt-physical-stock.cjs',
     'package-packing.cjs',
     'handling-unit-reconciliation.cjs',
+    'handling-unit-shift-policy.cjs',
     'handling-unit-pick-order.mjs',
   ];
   for (const filename of watchedFiles) {

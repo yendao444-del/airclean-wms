@@ -1,6 +1,8 @@
 const { createHash } = require('node:crypto');
 const { Prisma } = require('@prisma/client');
 const packing = require('./package-packing.cjs');
+const isReturnPackage = unit => String(unit.packagingName || '').normalize('NFD')
+  .replace(/[\u0300-\u036f]/g, '').replace(/đ/g, 'd').toLowerCase().includes('hang hoan');
 
 const fingerprint = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const baselineKey = sku => `handlingUnitOpeningBalance:${fingerprint(sku)}`;
@@ -63,7 +65,9 @@ function planPacked(lots, requestedSkus, stockBySku) {
 function planPackages(units, sku, target) {
   const packages = packageView(units, sku);
   for (const item of packages) if (!isCount(item.quantity) || !isCount(item.capacity)) throw new Error('Số dư kiện không hợp lệ.');
-  const balances = packages.map(item => item.status === 'empty' ? 0 : Math.min(item.quantity, item.capacity, 300));
+  // Returns are aggregated by SKU at receipt, not physical 300-piece cartons.
+  // Preserve old large return balances until they are merged into normal units.
+  const balances = packages.map(item => item.status === 'empty' ? 0 : Math.min(item.quantity, item.capacity, item.isReturn ? item.capacity : 300));
   let remaining = availableStock(target) - balances.reduce((sum, quantity) => sum + quantity, 0);
   // Retain the existing oldest-stock priority when removing excess containment.
   for (let i = packages.length - 1; i >= 0 && remaining < 0; i--) {
@@ -73,7 +77,11 @@ function planPackages(units, sku, target) {
   }
   return {
     packages: packages.map((item, i) => ({ ...item, synchronizedQuantity: balances[i],
-      synchronizedStatus: !balances[i] ? 'empty' : item.status === 'sealed' && balances[i] === item.capacity ? 'sealed' : 'opened' })),
+      synchronizedStatus: item.status === 'pending_check' ? 'pending_check'
+        // A software cap is not evidence that the physical seal was broken.
+        // Keep sealed packages sealed even with a partial/legacy balance;
+        // only an explicit opening or actual source movement opens them.
+        : !balances[i] ? 'empty' : item.status === 'sealed' ? 'sealed' : 'opened' })),
     unallocatedQuantity: remaining,
   };
 }
@@ -94,6 +102,7 @@ function packageView(units, sku) {
     quantity: Number(unit.remainingQuantity || 0),
     capacity: Number(unit.initialQuantity || 0),
     status: unit.status,
+    isReturn: isReturnPackage(unit),
     updatedAt: unit.updatedAt ? new Date(unit.updatedAt).toISOString() : '',
   }));
 }
@@ -136,7 +145,7 @@ function synchronizePackages(units, sku, stock, lots, actor, history, changes) {
   changes.push(...packageChanges);
   for (const unit of packageChanges) {
       const next = unit.synchronizedQuantity;
-      history.push({ unitId: unit.code, sku, type: 'Đồng bộ kiện theo tồn phần mềm', quantity: next - unit.quantity, expectedQuantity: unit.quantity, actualQuantity: next, remaining: next, actor, note: `Tồn phần mềm=${stock}; chỉ điều chỉnh phần chênh lệch, ưu tiên giữ tồn kiện cũ; ${packed} gói đóng sẵn. Đây là đồng bộ sổ, không phải kiểm thực tế.` });
+      history.push({ unitId: unit.code, sku, type: 'Đồng bộ kiện theo tồn phần mềm', quantity: next - unit.quantity, expectedQuantity: unit.quantity, actualQuantity: next, remaining: next, status: unit.synchronizedStatus, actor, note: `Tồn phần mềm=${stock}; chỉ điều chỉnh phần chênh lệch, ưu tiên giữ tồn kiện cũ; ${packed} gói đóng sẵn. Đây là đồng bộ sổ, không phải kiểm thực tế.` });
   }
   return { sku, stock, packedQuantity: packed, packages: plan.packages, unallocatedQuantity: plan.unallocatedQuantity };
 }

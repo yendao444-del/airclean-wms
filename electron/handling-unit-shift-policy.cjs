@@ -57,7 +57,7 @@ const isRequired = (entry) => {
   if (/^chuyển chờ xuất kho TMDT/i.test(type)
       && !String(entry?.unitId || "").toUpperCase().startsWith("PACKED:")
       && Number(entry?.remaining) <= 0) return false;
-  return /^(hoàn xuất TMDT|hoàn từ đóng gói sẵn|chuyển đóng gói sẵn|chuyển khu đóng gói|chuyển hàng lẻ|chuyển chờ xuất kho|chuyển khu kiểm hàng|lấy hàng|rút hàng|chờ kiểm chốt hết kiện)/i.test(type);
+  return /^(hoàn xuất TMDT|hoàn từ đóng gói sẵn|chuyển đóng gói sẵn|chuyển khu đóng gói|chuyển hàng lẻ|chuyển chờ xuất kho|chuyển khu kiểm hàng|lấy hàng|rút hàng|chờ kiểm chốt hết kiện|gộp kiện - chuyển đi|gộp hàng hoàn - chuyển đi|nhận gộp kiện|nhận gộp hàng hoàn)/i.test(type);
 };
 const isCompleted = (entry) => /^(kiểm cuối ca|kiểm khớp - chốt hết kiện|kiểm lệch - cập nhật tồn thực tế)/i.test(String(entry?.type || ""));
 
@@ -74,7 +74,7 @@ function applyEvents(ledger, entries) {
       && !String(entry?.unitId || "").toUpperCase().startsWith("PACKED:")
       && Number(entry?.remaining) <= 0;
     const isSoftwareSyncEmpty = /^đồng bộ (kiện|đóng sẵn) theo tồn phần mềm/i.test(String(entry?.type || ""))
-      && Number(entry?.remaining) === 0;
+      && Number(entry?.remaining) === 0 && entry.status !== 'pending_check';
     if (isAutoEmptyTmdt || isSoftwareSyncEmpty) {
       // Resolve any duty created by an older build when the later FIFO export
       // proves that the package reached zero. This is a migration-safe,

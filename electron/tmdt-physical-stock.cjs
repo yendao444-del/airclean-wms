@@ -4,6 +4,8 @@ let compareHandlingUnitPickOrderPromise;
 const getPickOrder = () => compareHandlingUnitPickOrderPromise ||= import('./handling-unit-pick-order.mjs');
 
 const allocationKey = reference => 'tmdt-physical:v1:' + createHash('sha256').update(String(reference)).digest('hex');
+const isReturnSource = unit => String(unit?.packagingName || '')
+  .normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/đ/g, 'd').toLowerCase().includes('hang hoan');
 const parse = record => record ? JSON.parse(record.value) : { version: 1, items: {} };
 async function save(tx, key, state) {
   const value = JSON.stringify(state);
@@ -16,6 +18,10 @@ async function allocate(tx, items, comboMap, context, recordTransfers, options =
   const { compareHandlingUnitPickOrder } = await getPickOrder();
   // Same lock order as restore/prepacking: stock (caller), packed ledger, units.
   await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${packing.INVENTORY_KEY}))`;
+  const unallocatedBySku = new Map();
+  const restrictedBySku = new Map();
+  const originalInventory = options.stockBySku
+    ? packing.decodeInventory(await tx.appConfig.findUnique({ where: { key: packing.INVENTORY_KEY } })) : null;
   const grouped = new Map();
   for (const item of items) {
     if (!item.sku || !Number.isSafeInteger(item.quantity) || item.quantity >= 0) continue;
@@ -26,6 +32,26 @@ async function allocate(tx, items, comboMap, context, recordTransfers, options =
     group.quantity += -item.quantity;
     if (!Number.isSafeInteger(group.quantity)) throw new Error('Số lượng xuất TMDT vượt giới hạn.');
     grouped.set(key, group);
+  }
+  if (originalInventory) {
+    // Snapshot every affected SKU before any group changes its containment.
+    // Computing this lazily would count goods issued by a previous group as
+    // unallocated stock, even though the software stock snapshot is unchanged.
+    const skus = [...new Set([...grouped.values()].flatMap(item =>
+      (comboMap.get(item.sku)?.items || [{ sku: item.sku }]).map(c => c.sku)))];
+    const registered = skus.length ? await tx.handlingUnit.findMany({ where: { sku: { in: skus } } }) : [];
+    for (const sku of skus) {
+      const containedUnits = registered.filter(unit => unit.sku === sku && unit.status !== 'split');
+      const contained = containedUnits.reduce((sum, unit) => sum + Number(unit.remainingQuantity || 0), 0);
+      const packedQuantity = originalInventory.lots.reduce((sum, lot) => sum
+        + Math.max(0, lot.packedQty - (lot.issuedQty || 0))
+        * (lot.components || []).filter(c => c.sku === sku).reduce((count, c) => count + c.quantity, 0), 0);
+      const restricted = containedUnits.filter(unit => !['opened', 'sealed'].includes(unit.status) || isReturnSource(unit))
+        .reduce((sum, unit) => sum + Number(unit.remainingQuantity || 0), 0) + packedQuantity;
+      if (![contained, packedQuantity, restricted].every(value => Number.isSafeInteger(value) && value >= 0)) throw new Error('Số dư nguồn xuất TMDT không hợp lệ.');
+      unallocatedBySku.set(sku, Math.max(0, Number(options.stockBySku.get(sku) || 0) - contained - packedQuantity));
+      restrictedBySku.set(sku, restricted);
+    }
   }
   for (const item of grouped.values()) {
     const key = allocationKey(item.reference);
@@ -51,7 +77,10 @@ async function allocate(tx, items, comboMap, context, recordTransfers, options =
       registered.sort((left, right) => compareHandlingUnitPickOrder(
         { ...left, quantity: left.remainingQuantity }, { ...right, quantity: right.remainingQuantity },
       ));
-      const eligible = registered.filter(unit => ['opened', 'sealed'].includes(unit.status) && Number(unit.remainingQuantity) > 0);
+      // Returned goods must be merged into a normal opened package before
+      // commerce allocation. They are a quarantine source, not sellable FIFO.
+      const eligible = registered.filter(unit => ['opened', 'sealed'].includes(unit.status)
+        && !isReturnSource(unit) && Number(unit.remainingQuantity) > 0);
       const available = eligible.reduce((sum, unit) => sum + Number(unit.remainingQuantity), 0);
       if (!Number.isSafeInteger(available)) throw new Error('Số dư kiện TMDT không hợp lệ.');
       sourceComboCount = Math.min(sourceComboCount, Math.floor(available / componentQuantity));
@@ -65,7 +94,7 @@ async function allocate(tx, items, comboMap, context, recordTransfers, options =
       for (const candidate of registered) {
         await tx.$queryRaw`SELECT "id" FROM "HandlingUnit" WHERE "code" = ${candidate.code} FOR UPDATE`;
         const unit = await tx.handlingUnit.findUnique({ where: { code: candidate.code } });
-        if (!unit || unit.sku !== sku || !['opened', 'sealed'].includes(unit.status) || unit.remainingQuantity <= 0) continue;
+        if (!unit || unit.sku !== sku || isReturnSource(unit) || !['opened', 'sealed'].includes(unit.status) || unit.remainingQuantity <= 0) continue;
         if (!Number.isSafeInteger(unit.remainingQuantity)) throw new Error('Số dư kiện TMDT không hợp lệ.');
         const take = Math.min(needed, unit.remainingQuantity);
         const balance = unit.remainingQuantity - take;
@@ -86,6 +115,10 @@ async function allocate(tx, items, comboMap, context, recordTransfers, options =
     // to fill one missing component or deduct its original source a second time.
     const packed = remaining ? await packing.consumePackedInventoryInTx(tx, [{ sku: item.sku, quantity: -remaining }], context.createdBy) : { consumed: [] };
     const packedCount = packed.consumed.reduce((sum, lot) => sum + lot.quantity, 0);
+    for (const lot of packed.consumed) for (const component of lot.components) {
+      if (restrictedBySku.has(component.sku)) restrictedBySku.set(component.sku,
+        Math.max(0, restrictedBySku.get(component.sku) - lot.quantity * component.quantity));
+    }
     history.push(...packed.consumed.map(lot => ({ unitId: `PACKED:${lot.assignmentId}`.toUpperCase(), sku: item.sku, components: lot.components, type: 'Chuyển chờ xuất kho TMDT', quantity: -lot.quantity, actor: context.createdBy || 'System', reference: item.reference, note: 'Kiện không còn đủ thành phần đáp ứng đơn; phần còn thiếu lấy từ combo đóng sẵn, không trừ lại kiện nguồn.' })));
     const untrackedCombos = remaining - packedCount;
     const totals = new Map();
@@ -99,25 +132,79 @@ async function allocate(tx, items, comboMap, context, recordTransfers, options =
       const needed = await consumeUnits(sku, wanted);
       if (!needed) continue;
       if (!options.softwareAuthoritative) throw new Error(`SKU ${sku} thiếu ${needed} gói trong kiện hợp lệ hoặc hàng đóng sẵn để xuất đơn ${item.reference}. Hãy kiểm lại tồn kiện.`);
+      if (restrictedBySku.get(sku) > 0 && needed > unallocatedBySku.get(sku)) throw new Error(`SKU ${sku} chưa đủ hàng được phép xuất; còn hàng hoàn chờ gộp, kiện chờ kiểm hoặc combo chưa thể dùng. Hãy xử lý nguồn đó trước khi xuất.`);
+      if (unallocatedBySku.has(sku)) unallocatedBySku.set(sku, Math.max(0, unallocatedBySku.get(sku) - needed));
       units.push({ sku, quantity: needed, untracked: true });
       history.push({ unitId: `UNALLOCATED:${sku}`, sku, type: 'Xuất TMDT - chưa phân kiện', quantity: -needed, reference: item.reference, actor: context.createdBy || 'System', note: 'Kiện hợp lệ và combo đóng sẵn không đủ; xuất phần còn thiếu theo tồn phần mềm chưa gắn kiện.' });
     }
     if (history.length) await recordTransfers(tx, history);
-    state.items[item.sku] = { quantity: item.quantity, packed: packed.consumed, units, restored: false, at: new Date().toISOString() };
+    state.items[item.sku] = {
+      quantity: item.quantity,
+      components,
+      packed: packed.consumed,
+      units,
+      restored: false,
+      at: new Date().toISOString(),
+    };
     await save(tx, key, state);
   }
 }
 
-async function restore(tx, sku, quantity, reference, actor, recordTransfers) {
+// Recorded sources, including unallocated stock, are the immutable composition
+// of the shipment. Legacy records can derive it from their exact source totals.
+function restoredStockChanges(allocation, inventory) {
+  const totals = new Map();
+  const add = (sku, quantity) => {
+    if (!sku || !Number.isSafeInteger(quantity) || quantity <= 0) throw new Error('Nguồn hoàn TMDT không hợp lệ.');
+    const next = (totals.get(sku) || 0) + quantity;
+    if (!Number.isSafeInteger(next)) throw new Error('Số lượng hoàn TMDT vượt giới hạn.');
+    totals.set(sku, next);
+  };
+  for (const entry of allocation.units || []) add(entry.sku, entry.quantity);
+  for (const entry of allocation.packed || []) {
+    const components = entry.components || inventory.lots.find(lot => lot.assignmentId === entry.assignmentId)?.components;
+    if (!Array.isArray(components) || !components.length) throw new Error('Thiếu thành phần gốc của combo đã xuất; không được hoàn theo cấu hình hiện tại.');
+    for (const component of components) add(component.sku, component.quantity * entry.quantity);
+  }
+  if (!totals.size) throw new Error('Không xác định được thành phần gốc của đơn TMDT.');
+  if (Array.isArray(allocation.components)) {
+    const snapshot = new Map();
+    for (const component of allocation.components) {
+      const quantity = component.quantity * allocation.quantity;
+      if (!component.sku || !Number.isSafeInteger(quantity) || quantity <= 0) throw new Error('Thành phần gốc của đơn TMDT không hợp lệ.');
+      snapshot.set(component.sku, (snapshot.get(component.sku) || 0) + quantity);
+    }
+    if (snapshot.size !== totals.size || [...snapshot].some(([sku, quantity]) => totals.get(sku) !== quantity)) throw new Error('Nguồn xuất TMDT không khớp thành phần gốc.');
+  }
+  return [...totals].sort(([a], [b]) => a.localeCompare(b)).map(([sku, quantity]) => ({ sku, quantity }));
+}
+
+function refundStockChanges(allocation, quantity, inventory) {
+  if (allocation.restored) throw new Error('Đơn đã hủy và hoàn tồn; không được nhận hoàn lần nữa.');
+  const returned = Number(allocation.refundedQuantity || 0);
+  if (!Number.isSafeInteger(quantity) || quantity <= 0 || !Number.isSafeInteger(returned)
+      || returned < 0 || !Number.isSafeInteger(allocation.quantity) || allocation.quantity <= 0
+      || quantity > allocation.quantity - returned) throw new Error('Số lượng hàng hoàn vượt nguồn xuất còn lại.');
+  return restoredStockChanges(allocation, inventory).map(change => {
+    const amount = change.quantity / allocation.quantity * quantity;
+    if (!Number.isSafeInteger(amount) || amount <= 0) throw new Error('Thành phần hàng hoàn không khớp nguồn xuất gốc.');
+    return { sku: change.sku, quantity: amount };
+  });
+}
+
+async function restore(tx, sku, quantity, reference, actor, recordTransfers, options = {}) {
   const key = allocationKey(reference);
   const state = parse(await tx.appConfig.findUnique({ where: { key } }));
+  if (state.receivedRefund) throw new Error('Đơn đã nhận hàng hoàn; không được hủy để cộng tồn lần nữa.');
   const allocation = state.items[sku];
   // Historical shipments made before this feature have no source allocation.
   if (!allocation) return false;
   if (allocation.restored) throw new Error(`Đơn ${reference} đã hoàn tồn ${sku}.`);
+  if (Number(allocation.refundedQuantity || 0) > 0) throw new Error('Đơn đã nhận hàng hoàn; không được hủy để cộng tồn lần nữa.');
   if (allocation.quantity !== quantity) throw new Error('Số lượng hoàn không khớp nguồn xuất đã ghi nhận.');
   await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${packing.INVENTORY_KEY}))`;
   const inventory = packing.decodeInventory(await tx.appConfig.findUnique({ where: { key: packing.INVENTORY_KEY } }));
+  const stockChanges = restoredStockChanges(allocation, inventory);
   for (const entry of allocation.packed) {
     const lot = inventory.lots.find(item => item.assignmentId === entry.assignmentId);
     if (!lot || lot.issuedQty < entry.quantity) throw new Error('Tồn combo đã thay đổi, không thể hoàn tự động.');
@@ -137,10 +224,11 @@ async function restore(tx, sku, quantity, reference, actor, recordTransfers) {
   }
   if (history.length) await recordTransfers(tx, history);
   if (allocation.packed.length) await save(tx, packing.INVENTORY_KEY, inventory);
+  if (options.updateStock) for (const change of stockChanges) await options.updateStock(tx, change.sku, change.quantity);
   allocation.restored = true;
   allocation.restoredAt = new Date().toISOString();
   await save(tx, key, state);
   return true;
 }
 
-module.exports = { allocate, restore, allocationKey };
+module.exports = { allocate, restore, allocationKey, restoredStockChanges, refundStockChanges };

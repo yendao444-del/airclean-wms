@@ -149,7 +149,7 @@ async function transferToPacked(tx, row, nextQuantity, inventory, actor, recordT
     const source = await tx.handlingUnit.findUnique({ where: { code: plan.code } });
     if (!source || source.sku !== plan.component.sku || source.baseUnit !== plan.component.unit) throw new Error('Kiện nguồn đã thay đổi SKU hoặc đơn vị. Vui lòng tải lại.');
     if (plan.moved > 0 && (source.status !== 'opened' || isReturnSource(source))) throw new Error(`Kiện ${source.code} chưa khui hoặc đang chờ kiểm/gộp.`);
-    if (plan.moved < 0 && !['opened', 'pending_check'].includes(source.status)) throw new Error(`Không thể hoàn hàng về kiện ${source.code} đã đóng hoặc tách.`);
+    if (plan.moved < 0 && !['opened', 'pending_check', 'empty'].includes(source.status)) throw new Error(`Không thể hoàn hàng về kiện ${source.code} đã đóng hoặc tách.`);
     const remaining = Number(source.remainingQuantity) - plan.moved;
     if (remaining < 0) throw new Error(`Kiện ${source.code} không đủ hàng để đóng ${nextQuantity} combo.`);
     if (plan.moved < 0 && remaining > Math.min(300, source.initialQuantity)) throw new Error(`Hoàn hàng vượt sức chứa ban đầu của kiện ${source.code}.`);

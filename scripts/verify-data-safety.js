@@ -366,7 +366,17 @@ if (!mapMatch) {
 
 rejectText(ipc, 'startTelegramWmsPolling', 'Retired warehouse Telegram polling must not restart');
 requireText(ipc, 'const TELEGRAM_WMS_BOT_TOKEN = "";', 'Retired warehouse Telegram must not load a runtime token');
-requireText(ipc, 'handling-unit-code:${normalizedCode}', 'Telegram handling-unit mutations must serialize by unit code');
+const handlingMutationLock = normalizedIpc.match(/async function lockHandlingUnitMutation\(tx, codes\) \{[\s\S]*?\n\}/)?.[0] || '';
+requireText(handlingMutationLock, 'await lockGlobalInventoryMutation(tx)', 'Handling-unit mutations must hold the shared stock lock');
+requireText(handlingMutationLock, '[...new Set(codes)].sort()', 'Handling-unit code locks must use stable order');
+requireText(handlingMutationLock, 'pg_advisory_xact_lock(hashtext(${`handling-unit-code:${code}`}))', 'Handling-unit mutations must serialize by unit code');
+requireText(handlingMutationLock, 'WHERE "code" = ${code} FOR UPDATE', 'Handling-unit mutations must lock the stored row');
+for (const name of ['executeKhuiKien', 'executeRutHang']) {
+  const body = normalizedIpc.match(new RegExp(`async function ${name}\\([\\s\\S]*?\\n\\}`))?.[0] || '';
+  const lock = body.indexOf('await lockHandlingUnitMutation(tx, [normalizedCode])');
+  const read = body.indexOf('tx.handlingUnit.findUnique');
+  if (lock < 0 || read < 0 || lock > read) failures.push(`${name} must lock before reading its handling unit`);
+}
 requireText(ipc, 'lockHandlingConfigKeys(tx, [HANDLING_QR_LABELS_KEY])', 'QR registry updates must hold the shared registry lock');
 requireText(ipc, 'Skipped automatic log/export cleanup', 'Automatic log cleanup guard is missing');
 requireText(ipc, 'Skipped automatic evidence deletion', 'Automatic evidence cleanup guard is missing');
