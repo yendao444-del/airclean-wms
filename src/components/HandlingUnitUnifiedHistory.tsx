@@ -28,6 +28,7 @@ export default function HandlingUnitUnifiedHistory({ sku, unitCode, entries, uni
   const [toDate, setToDate] = useState("");
   const [expanded, setExpanded] = useState<React.Key[]>([]);
   const rows = useMemo(() => buildUnifiedHistory(entries, stockRows, sku, units, packedLots), [entries, stockRows, sku, units, packedLots]);
+  const sourceError = stockRows.find(row => row.handlingUnitSourceError)?.handlingUnitSourceError;
   const identity = (code?: string) => historyPackageIdentity(code, units, currentNumbers);
   const selectedLabel = identity(unitCode).label;
   const types = [...new Set(rows.map(row => row.type))].sort();
@@ -45,11 +46,10 @@ export default function HandlingUnitUnifiedHistory({ sku, unitCode, entries, uni
     const numbers = row.packageLines.map(line => {
       if (codeKey(line.code).startsWith("PACKED:")) return "Nguồn đóng gói sẵn";
       if (codeKey(line.code).startsWith("UNALLOCATED:")) return "Chưa phân kiện";
-      const unit = units.find(item => codeKey(item.id) === codeKey(line.code));
-      const value = unit && currentNumbers.get(unit.id);
-      return value && Number.isInteger(value) && value > 0 ? String(value) : "—";
+      const label = identity(line.code).label;
+      return label.startsWith("Kiện số ") ? label.slice("Kiện số ".length) : label;
     });
-    return [...new Set(numbers)].join(", ") || "—";
+    return [...new Set(numbers)].join(", ") || "Chưa có bản ghi nguồn";
   };
   const sources = (row: UnifiedHistoryRow) => <div className="hu-history-unit-source">
     {row.packageLines.length ? row.packageLines.map((line, index) => {
@@ -66,11 +66,12 @@ export default function HandlingUnitUnifiedHistory({ sku, unitCode, entries, uni
       <header className="hu-unit-stock-history-header">
         <div>
           <h3><HistoryOutlined /> Lịch sử · {sku}</h3>
-          <p>Tồn đầu / cuối là tồn toàn SKU. Kiện nguồn theo thứ tự hiện tại; “—” khi chưa xác định. Bấm Xem ghi chú để đối chiếu từng kiện.</p>
+          <p>Lịch sử mới nhất ở trên. Tồn đầu / cuối là tồn toàn SKU; kiện nguồn là số tem đã trừ. Xem ghi chú để đối chiếu mã kiện và số lượng.</p>
         </div>
         <Button icon={<ReloadOutlined />} size="small" onClick={() => { reload(); void onReloadSources?.(); }} loading={loading}>Tải lại</Button>
       </header>
       {error && <Alert type="warning" showIcon message={error} description="Phần thẻ kho chưa tải đầy đủ. Vẫn hiển thị thao tác kiện đã có; bấm Tải lại để thử lại." style={{ marginBottom: 10 }} />}
+      {sourceError && <Alert type="warning" showIcon message={sourceError} style={{ marginBottom: 10 }} />}
       <div className="hu-movement-history-filters">
         <Input allowClear prefix={<SearchOutlined />} placeholder="Tìm kiện số, mã kiện, chứng từ, nhân viên..." value={search} onChange={event => setSearch(event.target.value)} />
         <Select aria-label="Loại giao dịch" value={typeFilter} onChange={setTypeFilter} options={[{ value: "all", label: "Tất cả thao tác" }, ...types.map(type => ({ value: type, label: type }))]} style={{ width: 185 }} />
@@ -96,7 +97,7 @@ export default function HandlingUnitUnifiedHistory({ sku, unitCode, entries, uni
             <span>{row.note || "Không có ghi chú"}</span>
             {sources(row)}
             {row.packageLines.map((line, index) => <span key={index}>{identity(line.code).label} · {line.code} · {line.type || "Thao tác kiện"}{line.note && ` · ${line.note}`}</span>)}
-            {row.kind === "stock" && !row.packageLines.length && <span>Lịch sử kiện gần đây chưa có bản ghi khớp chắc chắn với giao dịch này.</span>}
+            {row.kind === "stock" && !row.packageLines.length && <span>Chưa có bản ghi nguồn khớp chắc chắn với giao dịch này. Không suy đoán nguồn từ tồn kiện hiện tại.</span>}
           </div>,
         }}
         columns={[

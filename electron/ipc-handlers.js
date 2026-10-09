@@ -5462,8 +5462,21 @@ async function batchStockUpdate(tx, skuChanges, logContext, options = {}) {
   const lockedSkuCache = await buildSkuCache(tx);
   const { productMap, comboMap } = lockedSkuCache;
   if (String(logContext?.referenceType || '').toUpperCase().startsWith('TMDT')) {
-    const affectedSkus = skuChanges
-      .filter((item) => Number(item.quantity) < 0)
+    // Mismatch pickup can skip a retired direct SKU in the sales ledger.
+    // Skip the same item before containment sync/allocation too: a missing
+    // software balance must not erase its old packages or invent a shipment
+    // source for goods whose stock was never deducted. A partly missing combo
+    // cannot be represented safely as an immutable physical allocation.
+    const physicalChanges = skuChanges.filter((item) => {
+      if (Number(item.quantity) >= 0) return false;
+      const combo = comboMap.get(item.sku);
+      const missing = (combo?.items || [{ sku: item.sku }])
+        .find((component) => !productMap.has(component.sku));
+      if (!missing) return true;
+      if (options.allowMissingSkus && !combo) return false;
+      throw new Error(`SKU TMDT không tồn tại trong kho: ${missing.sku}`);
+    });
+    const affectedSkus = physicalChanges
       .flatMap((item) => (comboMap.get(item.sku)?.items || [{ sku: item.sku }]).map((component) => component.sku));
     const stockBySku = new Map(
       [...productMap].map(([sku, info]) => [
@@ -5473,14 +5486,16 @@ async function batchStockUpdate(tx, skuChanges, logContext, options = {}) {
           : info.product.stock || 0),
       ]),
     );
-    await reconciliation.synchronize(
-      tx,
-      affectedSkus,
-      stockBySku,
-      logContext?.createdBy || currentSession?.username || 'System',
-      appendHandlingUnitsTransactions,
-    );
-    await tmdtPhysicalStock.allocate(tx, skuChanges, comboMap, logContext, appendHandlingUnitsTransactions, { softwareAuthoritative: true, stockBySku });
+    if (physicalChanges.length) {
+      await reconciliation.synchronize(
+        tx,
+        affectedSkus,
+        stockBySku,
+        logContext?.createdBy || currentSession?.username || 'System',
+        appendHandlingUnitsTransactions,
+      );
+      await tmdtPhysicalStock.allocate(tx, physicalChanges, comboMap, logContext, appendHandlingUnitsTransactions, { softwareAuthoritative: true, stockBySku });
+    }
   }
 
   // Bước 1: Resolve combo → flat list of actual SKU changes
@@ -29884,13 +29899,21 @@ ipcMain.handle(
       const logs = await prisma.inventoryLog.findMany({
         where: { sku },
         orderBy: { createdAt: "desc" },
-        take: limit,
+        take: Math.min(500, Math.max(1, Number(limit) || 100)),
         include: {
           user: { select: { username: true, fullName: true } },
         },
       });
 
-      const formatted = logs.map((l) => ({
+      let withSources;
+      try {
+        withSources = await require('./handling-unit-stock-sources.cjs').attachStockSources(prisma, logs);
+      } catch (sourceError) {
+        console.warn('[HandlingUnits] Stock-card source lookup failed:', sourceError.message);
+        // A source lookup failure must not hide the stock card already read.
+        withSources = logs.map(log => ({ ...log, handlingUnitSourceError: 'Chưa tải được nguồn kiện theo đơn. Bấm Tải lại để thử lại.' }));
+      }
+      const formatted = withSources.map((l) => ({
         ...l,
         createdAt: l.createdAt.toISOString(),
         userName: l.user?.username || null,
@@ -31404,55 +31427,99 @@ ipcMain.handle("attendance:createFine", async (event, payload = {}) => {
       item?.date && !Number.isNaN(new Date(item.date).getTime()) ? getBangkokDateKey(item.date) : "",
     ].join("|");
 
-    const result = await enqueueAttendanceDataWrite(async () => getPrismaDirectTx().$transaction(async (tx) => {
-      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('attendanceData'))`;
-      const row = await tx.appConfig.findUnique({ where: { key: "attendanceData" } });
-      let attendanceData = {};
-      try { attendanceData = JSON.parse(row?.value || "{}"); } catch {}
-      const targetEmployee = (Array.isArray(attendanceData.employees) ? attendanceData.employees : [])
-        .find((employee) => Number(employee?.id) === empId);
-      const targetUser = targetEmployee?.username
-        ? await tx.user.findUnique({ where: { username: String(targetEmployee.username) }, select: { id: true, status: true } })
-        : null;
-      if (targetUser?.status === USER_STATUS_RESIGNED) {
-        const employmentRow = await tx.appConfig.findUnique({ where: { key: USER_EMPLOYMENT_CONFIG_KEY } });
-        const employmentConfig = parseEmploymentStatusConfig(employmentRow?.value);
-        const resignationDate = String(employmentConfig[String(targetUser.id)]?.effectiveDate || '').slice(0, 10);
-        if (resignationDate && getBangkokDateKey(date) >= resignationDate) {
-          throw new Error('Nhân viên đã nghỉ việc: không thể ghi nhận phạt từ ngày nghỉ trở đi.');
+    // A maintenance pass may already be holding the shared attendance row.
+    // Give a nearly-finished pass a short head start outside the interactive
+    // transaction; never let a long historical scan consume the write timeout.
+    const activeAttendanceMaintenance = attendanceMaintenanceInFlight;
+    if (activeAttendanceMaintenance) {
+      await Promise.race([
+        activeAttendanceMaintenance.catch((maintenanceError) => {
+          console.warn('[Attendance createFine] maintenance wait failed:', maintenanceError?.message || maintenanceError);
+        }),
+        new Promise((resolve) => setTimeout(resolve, 2500)),
+      ]);
+    }
+    let transactionStartedAt = 0;
+    const result = await enqueueAttendanceDataWrite(async () => {
+      let lastConflict = null;
+      // Manual fines are interactive. Do not wait on the long historical
+      // reconciliation advisory lock; take the AppConfig row briefly and
+      // retry a fresh transaction if another writer currently owns it.
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        transactionStartedAt = Date.now();
+        try {
+          return await getPrismaDirectTx().$transaction(async (tx) => {
+            await tx.$executeRaw`SET LOCAL lock_timeout = '1200ms'`;
+            await tx.$executeRaw`SET LOCAL statement_timeout = '8000ms'`;
+            const rows = await tx.$queryRaw`
+              SELECT "value"
+              FROM "AppConfig"
+              WHERE "key" = 'attendanceData'
+              FOR UPDATE NOWAIT
+            `;
+            const row = rows?.[0];
+            let attendanceData = {};
+            try { attendanceData = JSON.parse(row?.value || "{}"); } catch {}
+            const targetEmployee = (Array.isArray(attendanceData.employees) ? attendanceData.employees : [])
+              .find((employee) => Number(employee?.id) === empId);
+            const targetUser = targetEmployee?.username
+              ? await tx.user.findUnique({ where: { username: String(targetEmployee.username) }, select: { id: true, status: true } })
+              : null;
+            if (targetUser?.status === USER_STATUS_RESIGNED) {
+              const employmentRow = await tx.appConfig.findUnique({ where: { key: USER_EMPLOYMENT_CONFIG_KEY } });
+              const employmentConfig = parseEmploymentStatusConfig(employmentRow?.value);
+              const resignationDate = String(employmentConfig[String(targetUser.id)]?.effectiveDate || '').slice(0, 10);
+              if (resignationDate && getBangkokDateKey(date) >= resignationDate) {
+                throw new Error('Nhân viên đã nghỉ việc: không thể ghi nhận phạt từ ngày nghỉ trở đi.');
+              }
+            }
+            const extraFines = Array.isArray(attendanceData.extraFines) ? [...attendanceData.extraFines] : [];
+            const fineOverrides = attendanceData.fineOverrides && typeof attendanceData.fineOverrides === "object"
+              ? { ...attendanceData.fineOverrides }
+              : {};
+            const fineAuditLog = Array.isArray(attendanceData.fineAuditLog) ? [...attendanceData.fineAuditLog] : [];
+            if (extraFines.some((item) => String(item?.id || "") === fine.id)) {
+              throw new Error("Khoản phạt này đã tồn tại.");
+            }
+            if (extraFines.some((item) => fingerprint(item) === fingerprint(fine))) {
+              throw new Error("Khoản phạt này đã tồn tại. Hệ thống đã chặn ghi nhận trùng lặp.");
+            }
+
+            extraFines.push(fine);
+            fineAuditLog.push({
+              id: `flog-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+              action: "create",
+              timestamp: new Date().toLocaleString("vi-VN", { timeZone: "Asia/Bangkok" }),
+              changedBy: currentSession.username,
+              changedByName: currentSession.fullName || currentSession.username,
+              after: fine,
+              note: String(payload?.audit?.note || `Thêm khoản phạt: ${fine.type} — ${fine.amount}`).slice(0, 2000),
+            });
+
+            const nextAttendanceData = { ...attendanceData, extraFines, fineOverrides, fineAuditLog };
+            await tx.appConfig.update({
+              where: { key: "attendanceData" },
+              data: { value: JSON.stringify(nextAttendanceData) },
+            });
+            return { extraFines, fineOverrides, fineAuditLog };
+          }, { isolationLevel: "Serializable", timeout: 10000, maxWait: 5000 });
+        } catch (error) {
+          if (!isAttendanceFineDeleteRetryableError(error) || attempt === 2) throw error;
+          lastConflict = error;
+          // If the known in-process maintenance pass still owns the row,
+          // finish it outside this transaction and retry with a fresh one.
+          if (activeAttendanceMaintenance && attempt === 0) {
+            await activeAttendanceMaintenance.catch((maintenanceError) => {
+              console.warn('[Attendance createFine] maintenance retry wait failed:', maintenanceError?.message || maintenanceError);
+            });
+          }
+          console.warn(`[Attendance createFine] retry=${attempt + 1} code=${error?.meta?.code || error?.code || "lock_busy"} transaction=${Date.now() - transactionStartedAt}ms`);
+          await waitForRetry(attempt);
         }
       }
-      const extraFines = Array.isArray(attendanceData.extraFines) ? [...attendanceData.extraFines] : [];
-      const fineOverrides = attendanceData.fineOverrides && typeof attendanceData.fineOverrides === "object"
-        ? { ...attendanceData.fineOverrides }
-        : {};
-      const fineAuditLog = Array.isArray(attendanceData.fineAuditLog) ? [...attendanceData.fineAuditLog] : [];
-      if (extraFines.some((item) => String(item?.id || "") === fine.id)) {
-        throw new Error("Khoản phạt này đã tồn tại.");
-      }
-      if (extraFines.some((item) => fingerprint(item) === fingerprint(fine))) {
-        throw new Error("Khoản phạt này đã tồn tại. Hệ thống đã chặn ghi nhận trùng lặp.");
-      }
-
-      extraFines.push(fine);
-      fineAuditLog.push({
-        id: `flog-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-        action: "create",
-        timestamp: new Date().toLocaleString("vi-VN", { timeZone: "Asia/Bangkok" }),
-        changedBy: currentSession.username,
-        changedByName: currentSession.fullName || currentSession.username,
-        after: fine,
-        note: String(payload?.audit?.note || `Thêm khoản phạt: ${fine.type} — ${fine.amount}`).slice(0, 2000),
-      });
-
-      const nextAttendanceData = { ...attendanceData, extraFines, fineOverrides, fineAuditLog };
-      await tx.appConfig.upsert({
-        where: { key: "attendanceData" },
-        update: { value: JSON.stringify(nextAttendanceData) },
-        create: { key: "attendanceData", value: JSON.stringify(nextAttendanceData) },
-      });
-      return { extraFines, fineOverrides, fineAuditLog };
-    }, { isolationLevel: "Serializable", timeout: 15000, maxWait: 10000 }));
+      throw lastConflict || new Error("Bảng công đang được cập nhật ở máy khác. Hãy thử lại.");
+    }, { maxQueueWaitMs: 3000, priority: true });
+    console.info(`[Attendance createFine] transaction=${Date.now() - transactionStartedAt}ms`);
 
     void logActivity({
       module: "attendance",
@@ -31465,6 +31532,11 @@ ipcMain.handle("attendance:createFine", async (event, payload = {}) => {
     return { success: true, data: result };
   } catch (error) {
     console.error("❌ attendance:createFine error:", error);
+    if (isAttendanceFineDeleteRetryableError(error)
+      || /statement timeout|transaction already closed|expired transaction/i.test(String(error?.message || ""))
+      || error?.code === "P2028") {
+      return { success: false, error: "Database Bảng công đang bận đối soát. Chưa ghi nhận khoản phạt; vui lòng bấm xác nhận lại sau ít giây." };
+    }
     return { success: false, error: error.message };
   }
 });
@@ -40947,6 +41019,12 @@ ipcMain.handle("attendance:reconcileLateFines", async () => {
     // Finish checkout charges before returning the ledger used for live
     // payroll; delayed maintenance alone can otherwise miss the first paint.
     await enqueueAttendanceMaintenance("checkout", () => reconcileMissingCheckoutFines(getPrismaDirectTx()));
+    // Ecommerce overdue/mismatch fines are written by the maintenance loop as
+    // well, but that loop intentionally starts after the first paint. Run the
+    // small idempotent reconciliation in this explicit ledger refresh too so
+    // the Fines tab receives the new TMDT rows in the same response instead of
+    // requiring a second app reload.
+    await enqueueAttendanceMaintenance("ecommerce", () => reconcileEcommerceOrderFines(getPrismaDirectTx(), { now: new Date() }));
     const result = await reconcileLateAttendanceFines(getPrismaDirectTx(), {
       useHistoricalRates: true,
       repairReconciledAmounts: true,

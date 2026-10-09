@@ -227,6 +227,26 @@ interface FineRecord {
     rejectionReason?: string;
 }
 
+// Payroll periods follow the business date of a penalty. Automatic TMDT
+// fines also carry `date` (when the system discovered them) for audit/history,
+// but that timestamp must never pull a September SLA violation into October.
+const finePeriodDate = (fine: Partial<FineRecord> | undefined) => {
+    const attendanceDate = String(fine?.attendanceDate || '').trim();
+    return /^\d{4}-\d{2}-\d{2}$/.test(attendanceDate) ? attendanceDate : fine?.date;
+};
+
+// Project legacy policy-start wording from the stored business date. This is
+// display-only: IDs, override keys, audit entries and persisted fines remain
+// unchanged, including frozen payroll statements.
+const fineDisplayDetail = (fine: Partial<FineRecord> | undefined) => {
+    const detail = String(fine?.detail || '');
+    if (!['ecommerce_overdue', 'ecommerce_mismatch'].includes(fine?.source || '')) return detail;
+    const violationDate = String(fine?.attendanceDate || '').trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(violationDate)) return detail;
+    const label = violationDate.split('-').reverse().join('/');
+    return detail.replace(/((?:trễ SLA từ ngày|trong ngày)\s+)23\/09\/2026/i, `$1${label}`);
+};
+
 const ensureFineId = (fine: FineRecord, index = 0): FineRecord => ({
     ...fine,
     id: fine.id || `fine-${fine.source || 'manual'}-${fine.empId}-${fine.date || 'nodate'}-${fine.amount || 0}-${index}`,
@@ -1002,7 +1022,7 @@ const AUGUST_2026_FINE_AMNESTY_START = dayjs('2026-08-01').startOf('day');
 const AUGUST_2026_FINE_AMNESTY_END = dayjs('2026-08-31').endOf('day');
 
 const isAugust2026WaivedFine = (fine: FineRecord) => {
-    const fineDate = dayjs(fine.date || '');
+    const fineDate = dayjs(finePeriodDate(fine) || '');
     if (!fineDate.isValid()) return false;
     const isInAugust = !fineDate.isBefore(AUGUST_2026_FINE_AMNESTY_START, 'day')
         && !fineDate.isAfter(AUGUST_2026_FINE_AMNESTY_END, 'day');
@@ -1744,8 +1764,8 @@ function calculatePayroll(
 
         const autoPackIncome = packIncome;
 
-        const isAccruedDuringEmployment = (record: { date?: string }) => {
-            const date = dayjs(record.date || '');
+        const isAccruedDuringEmployment = (record: { date?: string; attendanceDate?: string }) => {
+            const date = dayjs(finePeriodDate(record) || '');
             return !employmentEnd || !record.date || !date.isValid() || isWithinEmployment(date);
         };
         const myFines = activeFines.filter(f => f.empId === emp.id && isAccruedDuringEmployment(f)).reduce((sum, f) => sum + f.amount, 0);
@@ -6364,7 +6384,7 @@ export default function Attendance() {
 
     // August 2026 policy: keep history intact, but deduct only late-arrival fines.
     const liveOverviewFines = useMemo(
-        () => allFines.filter(f => inOverviewRange(f.date) && !isAugust2026WaivedFine(f)),
+        () => allFines.filter(f => inOverviewRange(finePeriodDate(f)) && !isAugust2026WaivedFine(f)),
         [allFines, overviewDateRange]
     );
     const liveOverviewBonuses = useMemo(() => extraBonuses.filter(b => inOverviewRange(b.date)), [extraBonuses, overviewDateRange]);
@@ -8142,7 +8162,7 @@ const openConfigModal = () => {
                     positive: false,
                     ready: isFineAmountReady,
                     items: employeeFines.map(fine => ({
-                        label: `${fine.date ? dayjs(fine.date).format('DD/MM') : 'Không ngày'} · ${fine.type || 'Phạt'}${fine.detail ? ` · ${fine.detail}` : ''}`,
+                        label: `${(isCurrentPeriodLocked ? fine.date : finePeriodDate(fine)) ? dayjs(isCurrentPeriodLocked ? fine.date : finePeriodDate(fine)).format('DD/MM') : 'Không ngày'} · ${fine.type || 'Phạt'}${fine.detail ? ` · ${isCurrentPeriodLocked ? fine.detail : fineDisplayDetail(fine)}` : ''}`,
                         amount: fine.amount || 0,
                     })),
                 },
@@ -9503,12 +9523,12 @@ const openConfigModal = () => {
                 }))
             : [
             ...finesData
-                .filter(f => inOverviewRange(f.date))
+                .filter(f => inOverviewRange(finePeriodDate(f)))
                 .map((f, i) => systemFineRow(f, `base-${i}`))
                 .filter(Boolean),
             ...extraFines
                 .map((f, i) => ({ fine: f, manualIndex: i }))
-                .filter(({ fine }) => inOverviewRange(fine.date))
+                .filter(({ fine }) => inOverviewRange(finePeriodDate(fine)))
                 .map(({ fine, manualIndex }) => {
                     const waiver = findFineWaiver(fine);
                     return waiver
@@ -9517,23 +9537,23 @@ const openConfigModal = () => {
                 })
                 .filter(Boolean),
             ...autoVatOverdueFines
-                .filter(f => inOverviewRange(f.date))
+                .filter(f => inOverviewRange(finePeriodDate(f)))
                 .map((f, i) => systemFineRow(f, `vat-${i}`))
                 .filter(Boolean),
             ...autoDeadlineOverdueFines
-                .filter(f => inOverviewRange(f.date))
+                .filter(f => inOverviewRange(finePeriodDate(f)))
                 .map((f, i) => systemFineRow(f, `deadline-${i}`))
                 .filter(Boolean),
             ...autoEvidenceOverdueFines
-                .filter(f => inOverviewRange(f.date))
+                .filter(f => inOverviewRange(finePeriodDate(f)))
                 .map((f, i) => systemFineRow(f, `evidence-${i}`))
                 .filter(Boolean),
             ...autoStockCheckMissingFines
-                .filter(f => inOverviewRange(f.date))
+                .filter(f => inOverviewRange(finePeriodDate(f)))
                 .map((f, i) => systemFineRow(f, `stock-check-${i}`))
                 .filter(Boolean),
             ...fineWaivers
-                .filter(waiver => inOverviewRange(waiver.fine?.date)
+                .filter(waiver => inOverviewRange(finePeriodDate(waiver.fine))
                     && (waiver.fine?.id
                         ? !liveSystemFineIds.has(String(waiver.fine.id))
                         : !liveSystemFineContentKeys.has(getFineContentKey(waiver.fine)))
@@ -9587,7 +9607,7 @@ const openConfigModal = () => {
             if (index >= 0) combinedFines[index] = fine;
         });
         const getFineSortTime = (fine: any) => {
-            const parsed = dayjs(fine?.date);
+            const parsed = dayjs(finePeriodDate(fine));
             return parsed.isValid() ? parsed.valueOf() : 0;
         };
         // Never return NaN from the comparator: one legacy malformed date
@@ -9633,7 +9653,7 @@ const openConfigModal = () => {
                         empName: fine.empName,
                         type: kind === 'overdue' ? 'Đơn TMDT trễ hẹn' : 'Đơn TMDT cần kiểm tra quá ngày',
                         source: fine.source,
-                        date: fine.date,
+                        date: isCurrentPeriodLocked ? fine.date : finePeriodDate(fine),
                         amount: 0,
                         isEcommerceGroup: true,
                         ecommerceKind: kind,
@@ -9643,7 +9663,8 @@ const openConfigModal = () => {
                     rows.push(group);
                 }
                 group.amount += fine.isWaived ? 0 : Number(fine.amount || 0);
-                group.date = dayjs(fine.date).isAfter(dayjs(group.date)) ? fine.date : group.date;
+                const fineDate = isCurrentPeriodLocked ? fine.date : finePeriodDate(fine);
+                group.date = dayjs(fineDate).isAfter(dayjs(group.date)) ? fineDate : group.date;
                 group.ecommerceDetails.push(fine);
             });
             return rows;
@@ -9786,12 +9807,12 @@ const openConfigModal = () => {
                                         Chi tiết {record.ecommerceDetails.length} đơn TMDT {record.ecommerceKind === 'overdue' ? 'trễ hẹn' : 'cần kiểm tra quá ngày'}:
                                     </Text>
                                     {record.ecommerceDetails.map((fine: any) => (
-                                        <div key={fine.id || `${fine.orderNumber}-${fine.date}`} style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'center', fontSize: 12 }}>
-                                            <Text style={{ minWidth: 0, overflowWrap: 'anywhere' }}>
+                                        <div key={fine.id || `${fine.orderNumber}-${fine.date}`} style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'flex-start', fontSize: 12 }}>
+                                            <Text style={{ flex: '1 1 0', minWidth: 0, whiteSpace: 'normal', overflowWrap: 'anywhere' }}>
                                                 {fine.orderNumber || fine.ecommerceExportId || 'Đơn không rõ mã'}
-                                                <Text type="secondary"> · {fine.detail}</Text>
+                                                <Text type="secondary"> · {isCurrentPeriodLocked ? fine.detail : fineDisplayDetail(fine)}</Text>
                                             </Text>
-                                            <Text strong style={{ color: fine.isWaived ? '#389e0d' : '#ff4d4f', whiteSpace: 'nowrap' }}>
+                                            <Text strong style={{ flex: '0 0 auto', color: fine.isWaived ? '#389e0d' : '#ff4d4f', whiteSpace: 'nowrap' }}>
                                                 {fine.isWaived ? '0 đ' : `- ${fmt(fine.amount)}`}
                                             </Text>
                                         </div>
@@ -11249,8 +11270,9 @@ const openConfigModal = () => {
                         .filter(bonus => isSameEmployeeId(bonus.empId, p.id))
                         .sort((a, b) => dayjs(a.date || 0).valueOf() - dayjs(b.date || 0).valueOf());
                     const fineDescription = (f: FineRecord) => {
-                        const fineDate = f.date ? dayjs(f.date) : null;
-                        let text = (f.detail || f.type || 'Phạt').trim();
+                        const periodDate = isCurrentPeriodLocked ? f.date : finePeriodDate(f);
+                        const fineDate = periodDate ? dayjs(periodDate) : null;
+                        let text = ((isCurrentPeriodLocked ? f.detail : fineDisplayDetail(f)) || f.type || 'Phạt').trim();
                         if (fineDate?.isValid()) {
                             const datePatterns = [
                                 fineDate.format('D/M/YYYY'),
@@ -11266,7 +11288,10 @@ const openConfigModal = () => {
                         }
                         return text.replace(/\s{2,}/g, ' ').replace(/\s*[—-]\s*$/, '').trim();
                     };
-                    const fineTime = (f: FineRecord) => f.date ? dayjs(f.date).format('DD/MM HH:mm') : '';
+                    const fineTime = (f: FineRecord) => {
+                        const periodDate = isCurrentPeriodLocked ? f.date : finePeriodDate(f);
+                        return periodDate ? dayjs(periodDate).format('DD/MM HH:mm') : '';
+                    };
                     const displayEmpFines = groupPayslipFines(empFines).map(group => {
                         const latest = group.members.reduce((current, item) => dayjs(item.date || 0).isAfter(dayjs(current.date || 0)) ? item : current, group.members[0]);
                         return {

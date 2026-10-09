@@ -75,7 +75,14 @@ export function buildUnifiedHistory(
     quantity: finite(row.quantity),
     before: finite(row.oldStock),
     after: finite(row.newStock),
-    packageLines: [],
+    packageLines: (row.handlingUnitSources || []).filter(source => Boolean(source.code) && finite(source.quantity) != null).map(source => ({
+      code: source.code,
+      quantity: finite(source.quantity),
+      before: null,
+      after: null,
+      type: row.referenceType || row.type,
+      note: row.note,
+    })),
     note: row.note,
   }));
 
@@ -100,6 +107,28 @@ export function buildUnifiedHistory(
   }));
   const used = new Set<string>();
   const merged = stockRows.map((stockRow, index) => {
+    if (stockRow.packageLines.length) {
+      // Durable order sources survive eviction of the 500-entry movement
+      // buffer. Hide matching movement details without guessing missing ones.
+      for (const source of stockRow.packageLines) {
+        if (stockRows.some(other => other.key !== stockRow.key
+          && ref(other.reference) === ref(stockRow.reference)
+          && Math.abs(Date.parse(other.createdAt) - Date.parse(stockRow.createdAt)) <= 240_000
+          && other.packageLines.some(line => codeKey(line.code) === codeKey(source.code)))) continue;
+        const matches = packageRows.filter(pkg => ref(pkg.reference) === ref(stockRow.reference)
+          && Math.abs(Date.parse(pkg.createdAt) - Date.parse(stockRow.createdAt)) <= 120_000
+          && /^(Chuyển chờ xuất kho TMDT|Xuất TMDT - chưa phân kiện)$/i.test(pkg.type)
+          && codeKey(pkg.packageLines[0]?.code) === codeKey(source.code));
+        if (matches.length && matches.reduce((sum, pkg) => sum + (pkg.quantity || 0), 0) === source.quantity) {
+          matches.forEach(pkg => used.add(pkg.key));
+          if (matches.length === 1) Object.assign(source, {
+            before: matches[0].before, after: matches[0].after,
+            type: matches[0].type, note: matches[0].note,
+          });
+        }
+      }
+      return stockRow;
+    }
     const candidates = possible[index];
     // Require a unique link in both directions; reused order numbers must not
     // attach a package operation to an arbitrary ledger row.

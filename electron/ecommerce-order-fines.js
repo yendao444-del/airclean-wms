@@ -3,7 +3,7 @@ const ECOMMERCE_OFFICIAL_RECIPIENTS = 2;
 // The policy starts on 23/09/2026; violations dated before that day are
 // grandfathered out and must not be recreated by reconciliation.
 const ECOMMERCE_FINE_EFFECTIVE_DATE = "2026-09-23";
-// The amount changes from 24/09/2026. Existing ledger rows are never rewritten.
+// The amount changes from 24/09/2026. Existing fine amounts are never rewritten.
 const ECOMMERCE_FINE_RATE_EFFECTIVE_DATE = "2026-09-24";
 const { loadResignedEmployeeCutoffs, isEmployeeResignedOn } = require('./employment-status');
 
@@ -101,18 +101,102 @@ async function reconcileEcommerceOrderFines(prisma, options = {}) {
     const existingIds = new Set(existingFines.map((fine) => String(fine?.id || "")));
     const deletedIds = deletedFineIds(attendanceData.fineAuditLog);
     const created = [];
+    const repaired = [];
     const auditEntries = [];
+    const lockedPeriods = Array.isArray(attendanceData.lockedPeriods) ? attendanceData.lockedPeriods : [];
+    const periodDateKey = (value) => /^\d{4}-\d{2}-\d{2}$/.test(String(value || ''))
+      ? String(value) : bangkokDateKey(value);
+    const dateIsInPeriod = (value, period) => {
+      const dateKey = bangkokDateKey(value);
+      const start = periodDateKey(period?.start);
+      const end = periodDateKey(period?.end);
+      return Boolean(dateKey && start && end && dateKey >= start && dateKey <= end);
+    };
+    const isLockedDate = (value) => {
+      return lockedPeriods.some((period) => dateIsInPeriod(value, period));
+    };
+    const fineAuditLog = Array.isArray(attendanceData.fineAuditLog) ? attendanceData.fineAuditLog : [];
+    const legacyCreatedAtById = new Map(
+      fineAuditLog
+        .filter((entry) => entry?.action === "create" && entry?.after?.id && entry?.timestamp
+          && entry?.changedBy === "system"
+          && entry.after.date === bangkokStartOfDay(ECOMMERCE_FINE_EFFECTIVE_DATE).toISOString())
+        .map((entry) => [String(entry.after.id), entry.timestamp]),
+    );
+    const editedIds = new Set(fineAuditLog
+      .filter((entry) => entry?.action !== "create"
+        && !(entry?.action === "update" && entry?.changedBy === "system"
+          && entry?.note === "Sửa ngày ghi nhận phạt TMDT cũ bị gán nhầm về ngày bắt đầu chính sách"))
+      .flatMap((entry) => [entry?.before?.id, entry?.after?.id].filter(Boolean).map(String)));
     const fineTotal = bangkokDateKey(now) >= ECOMMERCE_FINE_RATE_EFFECTIVE_DATE
       ? ECOMMERCE_ORDER_FINE_TOTAL
       : ECOMMERCE_ORDER_FINE_TOTAL / 2;
-    const addViolation = (order, kind, date, detail, eligibilityDate = date) => {
+    const addViolation = (order, kind, date, detail, eligibilityDate = date, attendanceDate = null) => {
       const id = `fine-ecommerce-${kind}-${order.id}-${ECOMMERCE_FINE_EFFECTIVE_DATE}`;
       const hasFine = (fineId) => existingIds.has(fineId)
         || deletedIds.has(fineId)
         || Array.from(deletedIds).some((deletedId) => deletedId.startsWith(`${fineId}-`))
         || existingFines.some((fine) => String(fine?.id || "").startsWith(`${fineId}-`))
         || created.some((fine) => String(fine?.id || "").startsWith(`${fineId}-`));
-      if (!date || hasFine(id)) return;
+      if (!date) return;
+      const existingForOrder = existingFines.filter((fine) => {
+        const fineId = String(fine?.id || "");
+        return fineId === id || fineId.startsWith(`${id}-`);
+      });
+      // Older builds stored every active overdue fine at the policy start
+      // (23/09). Restore the original creation timestamp for audit/history
+      // and the actual SLA day for payroll filtering. Only deterministic
+      // system rows with sufficient evidence can be repaired.
+      const legacyDate = bangkokStartOfDay(ECOMMERCE_FINE_EFFECTIVE_DATE).toISOString();
+      existingForOrder.forEach((fine) => {
+        if (fine?.source !== `ecommerce_${kind}` || editedIds.has(String(fine.id))
+          || deletedIds.has(String(fine.id)) || deletedIds.has(id)) return;
+        const hasLegacyDate = fine.date === legacyDate && !fine.attendanceDate;
+        const hasStalePolicyDetail = Boolean(fine.attendanceDate)
+          && /(?:trễ SLA từ ngày|trong ngày)\s+23\/09\/2026/i.test(String(fine.detail || ''));
+        if (!hasLegacyDate && !hasStalePolicyDetail) return;
+        if (hasStalePolicyDetail && (isLockedDate(fine.attendanceDate)
+          || lockedPeriods.some(period => Array.isArray(period?.payrollSnapshot?.fines)
+            && period.payrollSnapshot.fines.some(row => String(row?.id || '') === String(fine.id))))) return;
+        let repairedDate = fine.date;
+        if (hasLegacyDate) {
+          const createdAt = legacyCreatedAtById.get(String(fine.id));
+          // Never guess a payroll month from today's time if audit evidence is
+          // missing. Never move a charge out of a frozen statement (which would
+          // double-charge it in another month), or into a closed payroll period.
+          if (!createdAt || Number.isNaN(new Date(createdAt).getTime())
+            || bangkokDateKey(createdAt) < ECOMMERCE_FINE_EFFECTIVE_DATE) return;
+          repairedDate = new Date(createdAt).toISOString();
+          // The legacy date can fall inside an already-locked month simply
+          // because the old build hard-coded 23/09. What matters is whether
+          // this exact fine was included in that period's frozen snapshot; a
+          // late-created row absent from the snapshot must still be repaired.
+          if (isLockedDate(repairedDate) || (attendanceDate && isLockedDate(attendanceDate)) || lockedPeriods.some((period) => {
+            const snapshotFines = period?.payrollSnapshot?.fines;
+            if (Array.isArray(snapshotFines) && snapshotFines.some((row) => String(row?.id || '') === String(fine.id))) return true;
+            if (!dateIsInPeriod(fine.date, period)) return false;
+            const lockedAt = new Date(period?.lockedAt || '').getTime();
+            // Missing snapshots/lock timestamps cannot prove it wasn't paid.
+            return !Array.isArray(snapshotFines) || !Number.isFinite(lockedAt)
+              || new Date(createdAt).getTime() <= lockedAt;
+          })) return;
+        }
+        const before = { ...fine };
+        fine.date = repairedDate;
+        if (hasLegacyDate && attendanceDate) fine.attendanceDate = bangkokDateKey(attendanceDate);
+        const violationLabel = String(fine.attendanceDate || '').split('-').reverse().join('/');
+        if (kind === "overdue" && attendanceDate && /trễ SLA từ ngày 23\/09\/2026/i.test(String(fine.detail || ''))) {
+          fine.detail = fine.detail.replace(/(trễ SLA từ ngày\s+)23\/09\/2026/i, `$1${violationLabel}`);
+        }
+        if (kind === "mismatch" && attendanceDate && /trong ngày 23\/09\/2026/i.test(String(fine.detail || ''))) {
+          fine.detail = fine.detail.replace(/(trong ngày\s+)23\/09\/2026/i, `$1${violationLabel}`);
+        }
+        if (JSON.stringify(before) === JSON.stringify(fine)) return;
+        repaired.push({ before, after: { ...fine } });
+      });
+      // Filtering/payroll use the violation day, not the discovery timestamp.
+      // A backlog discovered this month must not add a charge to a closed month.
+      if (hasFine(id) || isLockedDate(date) || (attendanceDate && isLockedDate(attendanceDate))) return;
       const dateKey = bangkokDateKey(eligibilityDate);
       const eligibleEmployees = officialEmployees.filter((employee) => !isEmployeeResignedOn(employee, dateKey, resignedCutoffs));
       if (!eligibleEmployees.length) return;
@@ -124,6 +208,7 @@ async function reconcileEcommerceOrderFines(prisma, options = {}) {
           detail: `${detail} — chia đều 2 nhân viên chính thức`,
           amount,
           date: date.toISOString(),
+          attendanceDate: attendanceDate ? bangkokDateKey(attendanceDate) : undefined,
           source: `ecommerce_${kind}`,
           ecommerceExportId: order.id,
           orderNumber: orderLabel(order),
@@ -161,28 +246,50 @@ async function reconcileEcommerceOrderFines(prisma, options = {}) {
           && deadlineAfterPolicyStart
           && bangkokDateKey(now) >= ECOMMERCE_FINE_EFFECTIVE_DATE;
         if (!completedAfterPolicyStart && !activeOverdueAfterPolicyStart) continue;
+        const lateDateKey = bangkokDateKey(deadline || now);
+        // Keep discovery time for audit; payroll/filtering use attendanceDate
+        // (the SLA day), so September backlog cannot enter October totals.
+        const fineDate = order.status === "completed" && completedAt > deadline ? completedAt : now;
         addViolation(
           order,
           "overdue",
-          order.status === "completed" && completedAt > deadline ? completedAt : bangkokStartOfDay(ECOMMERCE_FINE_EFFECTIVE_DATE),
-          `Đơn ${label}${order.customerName ? ` (${order.customerName})` : ""} trễ SLA từ ngày ${ECOMMERCE_FINE_EFFECTIVE_DATE.split("-").reverse().join("/")}`,
-          order.status === "completed" && completedAt > deadline ? completedAt : now,
+          fineDate,
+          `Đơn ${label}${order.customerName ? ` (${order.customerName})` : ""} trễ SLA từ ngày ${lateDateKey.split("-").reverse().join("/")}`,
+          fineDate,
+          deadline,
         );
       }
 
       const mismatchAt = order.mismatchAt ? new Date(order.mismatchAt) : null;
       const nextDay = mismatchAt ? dateAtBangkokNextDay(mismatchAt) : null;
       if (order.status === "mismatch" && nextDay && now >= nextDay && bangkokDateKey(nextDay) >= ECOMMERCE_FINE_EFFECTIVE_DATE) {
+        const mismatchDateKey = bangkokDateKey(mismatchAt);
         addViolation(
           order,
           "mismatch",
-          bangkokStartOfDay(ECOMMERCE_FINE_EFFECTIVE_DATE),
-          `Đơn ${label}${order.customerName ? ` (${order.customerName})` : ""} ở tab Cần kiểm tra nhưng chưa xử lý trong ngày ${ECOMMERCE_FINE_EFFECTIVE_DATE.split("-").reverse().join("/")}`,
+          now,
+          `Đơn ${label}${order.customerName ? ` (${order.customerName})` : ""} ở tab Cần kiểm tra nhưng chưa xử lý trong ngày ${mismatchDateKey.split("-").reverse().join("/")}`,
+          now,
+          mismatchAt,
         );
       }
     }
 
-    if (created.length > 0) {
+    if (repaired.length > 0) {
+      repaired.forEach(({ before, after }) => {
+        auditEntries.push({
+          id: `flog-repair-${after.id}-${now.getTime()}`,
+          action: "update",
+          timestamp: now.toISOString(),
+          changedBy: "system",
+          changedByName: "Hệ thống",
+          before,
+          after,
+          note: "Sửa ngày ghi nhận phạt TMDT cũ bị gán nhầm về ngày bắt đầu chính sách",
+        });
+      });
+    }
+    if (created.length > 0 || repaired.length > 0) {
       const nextData = {
         ...attendanceData,
         extraFines: [...existingFines, ...created],
@@ -196,7 +303,7 @@ async function reconcileEcommerceOrderFines(prisma, options = {}) {
         data: { value: JSON.stringify(nextData) },
       });
     }
-    return { created, checked: orders.length };
+    return { created, repaired: repaired.map(({ after }) => after), checked: orders.length };
   }, { isolationLevel: "Serializable", timeout: 30000, maxWait: 10000 });
 }
 

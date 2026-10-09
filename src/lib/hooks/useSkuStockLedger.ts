@@ -13,6 +13,8 @@ export type StockLedgerRow = {
   userName?: string | null;
   actor?: string;
   note?: string;
+  handlingUnitSources?: Array<{ code: string; quantity: number }>;
+  handlingUnitSourceError?: string;
 };
 
 // Both the SKU history tab and the package detail read the actual stock card.
