@@ -9,9 +9,10 @@ const DEFAULT_ATTENDANCE_CONFIG = {
     morningStart: '08:00',
     afternoonStart: '13:30',
 };
-const { calculateAttendanceRewardSummary, resolveEmployeeId } = require('./attendance-rewards');
+const { calculateAttendanceRewardSummary, resolveEmployeeId, normalizeConfig } = require('./attendance-rewards');
 const { validScheduleForSession } = require('./attendance-schedule-fines');
 const { readLateFineSnapshot } = require('./attendance-fine-snapshot');
+const { attendanceLogDateWhere, attendanceRewardLogRange } = require('./attendance-log-scope.cjs');
 const { loadResignedEmployeeCutoffs, isEmployeeResignedOn } = require('./employment-status');
 
 let reconcileQueue = Promise.resolve();
@@ -132,8 +133,13 @@ async function reconcileLateAttendanceFinesNow(prisma, options = {}) {
     // and caused the safety guard to disable automatic fine creation. Keep the
     // same JSON format, but serialize the read/merge/write under one lock.
     return prisma.$transaction(async (tx) => {
-        await tx.$executeRaw`SET LOCAL lock_timeout = '7000ms'`;
-        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${'attendanceData'}))`;
+        await tx.$executeRaw`SET LOCAL statement_timeout = '8000ms'`;
+        if (typeof tx.$queryRaw === 'function') {
+            const lockRows = await tx.$queryRaw`SELECT pg_try_advisory_xact_lock(hashtext(${'attendanceData'})) AS "locked"`;
+            if (lockRows?.[0] && lockRows[0].locked === false) {
+                return { created: [], updated: [], waived: [], skippedDeleted: 0, unmatched: [], checked: 0, skipped: 'lock_busy' };
+            }
+        }
 
         // Payroll snapshots can make attendanceData several megabytes. Late-fine
         // reconciliation never reads them, so keep them in PostgreSQL instead of
@@ -165,8 +171,12 @@ async function reconcileLateAttendanceFinesNow(prisma, options = {}) {
             throw new Error('Dữ liệu cấu hình chấm công không hợp lệ');
         }
 
+        const scopedDate = options.month
+            ? attendanceRewardLogRange(options.month, normalizeConfig(attendanceData.config).historyDays)
+            : attendanceLogDateWhere(options);
         const logs = await tx.attendanceLog.findMany({
             where: {
+                ...(scopedDate ? { date: scopedDate } : {}),
                 checkType: { in: ['morning_in', 'afternoon_in'] },
                 ...(Array.isArray(options.logIds) && options.logIds.length > 0
                     ? { id: { in: options.logIds.map(Number).filter(Number.isInteger) } }
@@ -213,14 +223,23 @@ function cutoffRevision(cutoffs) {
 
 async function applyLateFinePatchOptimistic(prisma, snapshotUpdatedAt, patch, result, resignedCutoffs) {
     return prisma.$transaction(async (tx) => {
-        // This path already has an MVCC revision guard below.  Do not take the
-        // shared attendanceData advisory lock here: the historical scan ran
-        // outside the transaction, so holding that lock only makes an
-        // interactive fine delete wait behind the reconciliation writer.
-        // The row update remains conditional on updatedAt and therefore
-        // safely aborts/recomputes when another writer commits first.
-        await tx.$executeRaw`SET LOCAL lock_timeout = '800ms'`;
+        // The historical scan ran outside this transaction.  Acquire the
+        // current row with SKIP LOCKED so a manual correction on another
+        // workstation makes this best-effort background patch yield
+        // immediately instead of producing a Prisma 55P03 error.
         await tx.$executeRaw`SET LOCAL statement_timeout = '8000ms'`;
+        const lockedRows = await tx.$queryRaw`
+            SELECT "updatedAt"
+            FROM "AppConfig"
+            WHERE "key" = 'attendanceData' AND "updatedAt" = ${new Date(snapshotUpdatedAt)}
+            FOR UPDATE SKIP LOCKED
+        `;
+        if (!lockedRows?.length) {
+            // The plan/ledger has NOT committed. Returning it as success can
+            // display salary deductions or waivers that never reached DB.
+            // Reread outside the transaction on the bounded conflict retry.
+            throw Object.assign(new Error('Dữ liệu Bảng công vừa thay đổi hoặc đang được cập nhật.'), { code: 'P2034' });
+        }
         // Employment data lives outside attendanceData. Validate it too so a
         // resignation during the scan cannot create new fines for that user.
         const currentCutoffs = await loadResignedEmployeeCutoffs(tx);
@@ -253,7 +272,7 @@ function calculateLateAttendanceFinePlan(attendanceData, logs, options = {}) {
         const existingFines = Array.isArray(attendanceData.extraFines) ? attendanceData.extraFines : [];
         const fineAuditLog = Array.isArray(attendanceData.fineAuditLog) ? attendanceData.fineAuditLog : [];
         const fineWaivers = Array.isArray(attendanceData.fineWaivers) ? attendanceData.fineWaivers : [];
-        let ledger = { extraFines: existingFines, fineAuditLog };
+        let ledger = { extraFines: existingFines, fineWaivers, fineAuditLog };
         let patch = null;
         const deletedFines = fineAuditLog
             .filter(entry => entry?.action === 'delete' && entry?.before)
@@ -262,9 +281,12 @@ function calculateLateAttendanceFinePlan(attendanceData, logs, options = {}) {
         // Dữ liệu cũ từng cho phép nhiều log cùng ca. Chỉ lần vào đầu tiên mới dùng để tính phạt.
         const firstLogs = new Map();
         const rewardLogsByEmployee = new Map();
+        const targetMonth = options.month ? String(options.month) : '';
         for (const log of logs) {
             const key = `${normalizeIdentity(log.faceId)}|${log.date}|${log.checkType}`;
-            if (!firstLogs.has(key)) firstLogs.set(key, log);
+            // Earlier logs are reward context only. Never generate, edit, or
+            // consume fines outside the requested payroll month.
+            if ((!targetMonth || String(log.date || '').startsWith(`${targetMonth}-`)) && !firstLogs.has(key)) firstLogs.set(key, log);
             const employeeId = resolveEmployeeId(log, employees);
             if (!rewardLogsByEmployee.has(employeeId)) rewardLogsByEmployee.set(employeeId, []);
             rewardLogsByEmployee.get(employeeId).push(log);
@@ -445,7 +467,7 @@ function calculateLateAttendanceFinePlan(attendanceData, logs, options = {}) {
                     })),
                 ];
             patch = { extraFines: nextExtraFines, fineWaivers: nextFineWaivers, fineAuditLog: nextFineAuditLog };
-            ledger = { extraFines: nextExtraFines, fineAuditLog: nextFineAuditLog };
+            ledger = { extraFines: nextExtraFines, fineWaivers: nextFineWaivers, fineAuditLog: nextFineAuditLog };
         }
 
         return { patch, result: { created, updated, waived, skippedDeleted, unmatched, checked: firstLogs.size,

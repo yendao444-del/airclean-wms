@@ -22,20 +22,21 @@ import {
     Collapse,
     Alert,
 } from 'antd';
-import { PlusOutlined, EditOutlined, DeleteOutlined, ReloadOutlined, FormOutlined, FileExcelOutlined, ScanOutlined, MoreOutlined, DownloadOutlined, BarcodeOutlined, FolderOpenOutlined, CheckCircleOutlined, WarningOutlined, SearchOutlined, StopOutlined, DollarOutlined } from '@ant-design/icons';
+import { PlusOutlined, EditOutlined, DeleteOutlined, ReloadOutlined, FormOutlined, FileExcelOutlined, ScanOutlined, MoreOutlined, DownloadOutlined, BarcodeOutlined, FolderOpenOutlined, CheckCircleOutlined, WarningOutlined, SearchOutlined, StopOutlined, DollarOutlined, InboxOutlined, FileTextOutlined } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
 import dayjs from 'dayjs';
+import { ensureRefundReceiptDraft } from '../lib/refundReceipt';
 import './Refunds.css';
 
 const { Title, Text } = Typography;
 const { TextArea } = Input;
 
-const getRefundsPopupContainer = (triggerNode: HTMLElement) => {
-    return triggerNode.parentElement || document.body;
-};
+// Table scroll containers in the Electron shell clip locally mounted popups.
+const getRefundsPopupContainer = () => document.body;
 
 // Kiểu dữ liệu cho hàng thực nhận
 interface ReturnItem {
+    rowKey?: string;
     sku: string;
     name: string;
     qty: number;
@@ -149,8 +150,38 @@ export default function RefundsPage() {
 
     // 📦 State cho xác nhận hoàn - chọn SKU & SL thực nhận
     const [returnItemsMap, setReturnItemsMap] = useState<Record<number, ReturnItem[]>>({});
+    const [expandedRowKeys, setExpandedRowKeys] = useState<number[]>([]);
     const [mismatchOpen, setMismatchOpen] = useState<Set<number>>(new Set());
     const [stockLog, setStockLog] = useState<StockLogEntry[]>([]);
+    const receiptInFlightRef = useRef(new Set<number>());
+    const [confirmingIds, setConfirmingIds] = useState<Set<number>>(new Set());
+    const receivedSkuOptions = useMemo(() => products.flatMap(product => {
+        let variants: any[] = [];
+        try { variants = JSON.parse(product.variants || '[]'); } catch { /* legacy catalog */ }
+        if (!Array.isArray(variants)) variants = [];
+        const entries = variants.length ? variants : [{ sku: product.sku }];
+        return entries.filter(variant => variant.sku).map(variant => ({
+            value: String(variant.sku),
+            name: `${product.name}${variant.color ? ` — ${variant.color}` : ''}`,
+            label: `${variant.sku} — ${product.name}${variant.color ? ` — ${variant.color}` : ''}`,
+        }));
+    }), [products]);
+    const receiptDraft = (existing: ReturnItem[] | undefined, originals: RefundItem[]): ReturnItem[] =>
+        ensureRefundReceiptDraft(existing, originals, products).map(item => ({
+            ...item,
+            rowKey: (item as ReturnItem).rowKey || crypto.randomUUID(),
+        }));
+
+    const beginReceipt = (id: number) => {
+        if (receiptInFlightRef.current.has(id)) return false;
+        receiptInFlightRef.current.add(id);
+        setConfirmingIds(prev => new Set(prev).add(id));
+        return true;
+    };
+    const endReceipt = (id: number) => {
+        receiptInFlightRef.current.delete(id);
+        setConfirmingIds(prev => { const next = new Set(prev); next.delete(id); return next; });
+    };
 
     // 🎥 State cho danh sách đơn cần quay video (lưu localStorage)
     const [videoIds, setVideoIds] = useState<{ id: string; done: boolean }[]>(() => {
@@ -355,18 +386,12 @@ export default function RefundsPage() {
                     );
                     setRefunds(updatedRefunds);
 
-                    // Tự populate returnItemsMap từ items gốc
-                    try {
-                        const origItems: RefundItem[] = JSON.parse(refundToReceive.items);
-                        setReturnItemsMap(prev => ({
-                            ...prev,
-                            [refundToReceive.id]: origItems.map(i => ({
-                                sku: i.variantSku || '',
-                                name: i.productName || '',
-                                qty: i.quantity,
-                            })),
-                        }));
-                    } catch { /* ignore */ }
+                    setReturnItemsMap(prev => ({
+                        ...prev,
+                        [refundToReceive.id]: receiptDraft(
+                            prev[refundToReceive.id], getRefundItemsForDisplay(refundToReceive.items),
+                        ),
+                    }));
 
                     playSuccess();
                     setScanStatus({
@@ -457,6 +482,7 @@ export default function RefundsPage() {
 
     // ✅ Xác nhận hoàn ĐẦY ĐỦ → Cộng kho theo hàng gốc
     const confirmFull = async (refundRecord: Refund) => {
+        if (!beginReceipt(refundRecord.id)) return;
         try {
             const result = await window.electronAPI.refunds.completeAndRestore({ refundId: refundRecord.id });
             if (!result?.success) throw new Error(result?.error || 'Khong the cong lai ton kho.');
@@ -474,24 +500,29 @@ export default function RefundsPage() {
         } catch (error: any) {
             console.error('Confirm full error:', error);
             message.error(error?.message || 'Loi khi xac nhan hoan. Don van giu trang thai dang xu ly.');
+        } finally {
+            endReceipt(refundRecord.id);
         }
     };
 
     // ⚠️ Xác nhận hoàn KHÔNG KHỚP → Cộng kho theo SKU/SL custom
     const confirmCustom = async (refundRecord: Refund) => {
         const returnItems = returnItemsMap[refundRecord.id] || [];
-        const validItems = returnItems.filter(item => item.sku && item.qty > 0);
-        if (validItems.length === 0) {
-            message.warning('Chua nhap hang thuc nhan.');
+        if (returnItems.length === 0 || returnItems.some(item =>
+            !receivedSkuOptions.some(option => option.value === item.sku) || !Number.isInteger(item.qty) || item.qty <= 0 || item.qty > 100000,
+        )) {
+            message.warning('Hãy chọn SKU lẻ và nhập số lượng thực nhận cho từng dòng.');
             return;
         }
+        if (!beginReceipt(refundRecord.id)) return;
+        const validItems = returnItems.filter(item => item.sku && item.qty > 0);
 
         try {
             let originalItems: RefundItem[] = [];
             try { originalItems = JSON.parse(refundRecord.items); } catch { originalItems = []; }
             const originalTotal = originalItems.reduce((sum, item) => sum + item.quantity, 0);
             const receivedTotal = validItems.reduce((sum, item) => sum + item.qty, 0);
-            const notes = `${refundRecord.notes || ''} | [KHONG KHOP] Gui ${originalTotal} combo -> Nhan ${receivedTotal} SP. Xac nhan: ${dayjs().format('DD/MM HH:mm')}`;
+            const notes = `${refundRecord.notes || ''} | [KHÔNG KHỚP] Gửi ${originalTotal} dòng hàng/combo → Nhận ${receivedTotal} đơn vị SKU lẻ: ${validItems.map(item => `${item.sku} x${item.qty}`).join(', ')}. Xác nhận: ${dayjs().format('DD/MM HH:mm')}`;
             const result = await window.electronAPI.refunds.completeAndRestore({
                 refundId: refundRecord.id,
                 items: validItems.map(item => ({ sku: item.sku, quantity: item.qty, name: item.name })),
@@ -514,11 +545,21 @@ export default function RefundsPage() {
         } catch (error: any) {
             console.error('Confirm custom error:', error);
             message.error(error?.message || 'Loi khi xac nhan hoan. Don van giu trang thai dang xu ly.');
+        } finally {
+            endReceipt(refundRecord.id);
         }
     };
 
     // Toggle mismatch section
     const toggleMismatch = (id: number) => {
+        if (receiptInFlightRef.current.has(id)) return;
+        if (!mismatchOpen.has(id)) {
+            const record = refunds.find(refund => refund.id === id);
+            setReturnItemsMap(prev => ({
+                ...prev,
+                [id]: receiptDraft(prev[id], getRefundItemsForDisplay(record?.items || '[]')),
+            }));
+        }
         setMismatchOpen(prev => {
             const n = new Set(prev);
             if (n.has(id)) n.delete(id); else n.add(id);
@@ -528,6 +569,7 @@ export default function RefundsPage() {
 
     // Update return item sku
     const updateReturnItem = (refundId: number, index: number, field: keyof ReturnItem, value: any) => {
+        if (receiptInFlightRef.current.has(refundId)) return;
         setReturnItemsMap(prev => {
             const items = [...(prev[refundId] || [])];
             items[index] = { ...items[index], [field]: value };
@@ -536,13 +578,15 @@ export default function RefundsPage() {
     };
 
     const addReturnItem = (refundId: number) => {
+        if (receiptInFlightRef.current.has(refundId)) return;
         setReturnItemsMap(prev => ({
             ...prev,
-            [refundId]: [...(prev[refundId] || []), { sku: '', name: '', qty: 0 }],
+            [refundId]: [...(prev[refundId] || []), { rowKey: crypto.randomUUID(), sku: '', name: '', qty: 0 }],
         }));
     };
 
     const removeReturnItem = (refundId: number, index: number) => {
+        if (receiptInFlightRef.current.has(refundId)) return;
         setReturnItemsMap(prev => {
             const items = [...(prev[refundId] || [])];
             items.splice(index, 1);
@@ -996,104 +1040,31 @@ export default function RefundsPage() {
 
     const columns: ColumnsType<Refund> = [
         {
-            title: 'Nguồn đơn hàng',
-            dataIndex: 'customerName',
-            key: 'customerName',
-            width: 150,
-            className: 'refunds-cell refunds-cell--source',
-            render: (name) => <Tag color="cyan">{name}</Tag>,
-        },
-        {
-            title: 'Order ID',
-            dataIndex: 'orderNumber',
-            key: 'orderNumber',
-            width: 200,
+            title: 'Đơn hàng / Vận chuyển', key: 'order', width: 250,
             className: 'refunds-cell refunds-cell--order',
-            render: (num: string, record: Refund) => {
-                const trackingMatch = record.notes?.match(/Tracking: ([^|]+)/);
-                const tid = trackingMatch ? trackingMatch[1].trim() : '';
-                const needsVideo = videoIds.some(v => !v.done && (v.id === num || v.id === tid));
-                return (
-                    <span>
-                        {num ? <Tag color="blue">{num}</Tag> : <span style={{ color: '#bfbfbf' }}>—</span>}
-                        {needsVideo && (
-                            <Tag color="red" style={{
-                                fontWeight: 700, fontSize: 11, border: 'none',
-                                background: 'linear-gradient(135deg, #ff4d4f, #cf1322)',
-                                color: '#fff', marginLeft: 4
-                            }}>🎥 VIDEO</Tag>
-                        )}
-                    </span>
-                );
+            render: (_, record) => {
+                const tracking = record.notes?.match(/Tracking: ([^|]+)/)?.[1]?.trim();
+                const shipping = record.notes?.match(/Shipping: ([^|]+)/)?.[1]?.trim();
+                const needsVideo = videoIds.some(v => !v.done && (v.id === record.orderNumber || v.id === tracking));
+                return <div className="refunds-order-summary">
+                    <strong className="refunds-order-id">{record.orderNumber || record.refundCode || '—'}</strong>
+                    <span className="refunds-order-meta">Tracking: {tracking || '—'}</span>
+                    <span className="refunds-order-tags"><Tag color="cyan">{record.customerName || '—'}</Tag><Tag color="green">{shipping || '—'}</Tag>{needsVideo && <Tag color="red">Cần quay video</Tag>}</span>
+                    <span className="refunds-order-meta">{record.refundReason || '—'} · {dayjs(record.refundDate).format('DD/MM/YYYY')}</span>
+                </div>;
             },
         },
         {
-            title: 'Tracking ID',
-            dataIndex: 'notes',
-            key: 'trackingId',
-            width: 150,
-            className: 'refunds-cell refunds-cell--tracking',
-            render: (notes) => {
-                if (!notes) return <span style={{ color: '#bfbfbf' }}>—</span>;
-                const trackingMatch = notes.match(/Tracking: ([^|]+)/);
-                const tracking = trackingMatch ? trackingMatch[1].trim() : 'N/A';
-                if (tracking === 'N/A') {
-                    return <span style={{ color: '#bfbfbf' }}>—</span>;
-                }
-                return <Tag color="orange">{tracking}</Tag>;
+            title: <div className="refunds-product-grid-heading"><span>Sản phẩm / SKU</span><span>SL gửi</span></div>, key: 'products',
+            className: 'refunds-cell refunds-cell--products',
+            render: (_, record) => {
+                const items = getRefundItemsForDisplay(record.items);
+                return items.length ? <div className="refunds-product-summary">{items.map((item, index) => <div className="refunds-product-line" key={`${record.id}-${index}`}><div><strong>{item.productName || 'Sản phẩm chưa có tên'}</strong><span>SKU: {item.variantSku || '—'}</span></div><strong className="refunds-sent-qty" aria-label={`Số lượng gửi: ${item.quantity}`}>{item.quantity}</strong></div>)}</div> : <span className="refunds-order-meta">Chưa có sản phẩm</span>;
             },
         },
         {
-            title: 'Số SP',
-            dataIndex: 'items',
-            key: 'itemCount',
-            width: 80,
-            align: 'center',
-            className: 'refunds-cell refunds-cell--count',
-            render: (items) => {
-                const count = getRefundItemsForDisplay(items).length;
-                if (count > 1) {
-                    return <Tag color="red" style={{ fontWeight: 600 }}>{count} SKU</Tag>;
-                }
-                return <Tag color="default">{count}</Tag>;
-            },
-        },
-        {
-            title: 'Lý do hoàn',
-            dataIndex: 'refundReason',
-            key: 'refundReason',
-            width: 130,
-            className: 'refunds-cell refunds-cell--reason',
-        },
-        {
-            title: 'Cancelled Time',
-            dataIndex: 'refundDate',
-            key: 'refundDate',
-            width: 130,
-            className: 'refunds-cell refunds-cell--date',
-            render: (date) => dayjs(date).format('DD/MM/YYYY'),
-        },
-        {
-            title: 'Shipping Provider',
-            dataIndex: 'notes',
-            key: 'shippingProvider',
-            width: 130,
-            className: 'refunds-cell refunds-cell--shipping',
-            render: (notes) => {
-                if (!notes) return <span style={{ color: '#bfbfbf' }}>—</span>;
-                const shippingMatch = notes.match(/Shipping: ([^|]+)/);
-                const shipping = shippingMatch ? shippingMatch[1].trim() : 'N/A';
-                return <Tag color="green">{shipping}</Tag>;
-            },
-        },
-        {
-            title: 'Tổng tiền',
-            dataIndex: 'totalAmount',
-            key: 'totalAmount',
-            width: 150,
-            align: 'right',
-            className: 'refunds-cell refunds-cell--amount',
-            render: (amount) => <span style={{ fontWeight: 600 }}>{amount.toLocaleString('vi-VN')} đ</span>,
+            title: 'Thực nhận', key: 'receivedQty', width: 105, align: 'center', className: 'refunds-cell refunds-cell--received-summary',
+            render: (_, record) => record.status === 'completed' ? <span className="refunds-received-summary">{record.notes?.includes('[KHÔNG KHỚP]') ? 'Đã chỉnh SKU / SL' : 'Đủ theo đơn'}</span> : record.status === 'received' ? <span className="refunds-awaiting-qty">Chưa kiểm</span> : <span className="refunds-order-meta">—</span>,
         },
         {
             title: 'Trạng thái',
@@ -1109,9 +1080,9 @@ export default function RefundsPage() {
 
                 const statusMap: Record<string, { color: string; label: string }> = {
                     'pending': { color: 'processing', label: 'Chưa hoàn' },
-                    'received': { color: 'blue', label: '📋 Đã nhận' },
-                    'completed': { color: 'success', label: '✅ Đã hoàn' },
-                    'lost': { color: 'error', label: '🚫 Mất hàng' },
+                    'received': { color: 'blue', label: 'Đã nhận' },
+                    'completed': { color: 'success', label: 'Đã hoàn' },
+                    'lost': { color: 'error', label: 'Mất hàng' },
                 };
                 const st = statusMap[status] || statusMap['pending'];
 
@@ -1135,9 +1106,9 @@ export default function RefundsPage() {
             },
         },
         {
-            title: '',
+            title: 'Hành động',
             key: 'actions',
-            width: 100,
+            width: 190,
             fixed: 'right',
             className: 'refunds-cell refunds-cell--actions',
             render: (_, record) => {
@@ -1174,13 +1145,20 @@ export default function RefundsPage() {
                     );
                 }
 
-                return (
-                    <Dropdown getPopupContainer={getRefundsPopupContainer} menu={{ items: menuItems }} trigger={['click']}>
-                        <Button size="small">
-                            Xem thêm <MoreOutlined />
-                        </Button>
-                    </Dropdown>
-                );
+                const canReceive = record.status === 'received' && getRefundItemsForDisplay(record.items).length > 0;
+                const isExpanded = expandedRowKeys.includes(record.id);
+                return <div className="refunds-inline-actions">
+                    {canReceive && <>
+                        <button type="button" className="refunds-inline-full" disabled={confirmingIds.has(record.id)} aria-busy={confirmingIds.has(record.id)} onClick={() => confirmFull(record)}><CheckCircleOutlined /> Nhận đủ hàng</button>
+                        <button type="button" className={`refunds-inline-custom${mismatchOpen.has(record.id) ? ' is-active' : ''}`} disabled={confirmingIds.has(record.id)} aria-expanded={mismatchOpen.has(record.id)} aria-controls={`refund-receipt-${record.id}`} onClick={() => { if (!mismatchOpen.has(record.id)) setExpandedRowKeys(prev => prev.filter(id => id !== record.id)); toggleMismatch(record.id); }}><EditOutlined /> Chỉnh SKU / SL</button>
+                    </>}
+                    <div className="refunds-inline-secondary">
+                        <Button size="small" type="text" aria-expanded={isExpanded} onClick={() => setExpandedRowKeys(prev => isExpanded ? prev.filter(id => id !== record.id) : [...prev, record.id])}>{isExpanded ? 'Thu gọn' : 'Chi tiết'}</Button>
+                        <Dropdown getPopupContainer={getRefundsPopupContainer} overlayClassName="refunds-actions-dropdown" overlayStyle={{ zIndex: 10050 }} placement="bottomRight" menu={{ items: menuItems }} trigger={['click']}>
+                            <Button className="refunds-more-button" size="small" type="text" aria-label="Thao tác khác" title="Thao tác khác"><MoreOutlined /></Button>
+                        </Dropdown>
+                    </div>
+                </div>;
             },
         },
     ];
@@ -1389,9 +1367,9 @@ export default function RefundsPage() {
                     </Button>
                 )}
                 <Button
+                    className="refunds-import-button"
                     type="primary"
                     icon={<DownloadOutlined />}
-                    style={{ background: '#722ed1', borderColor: '#722ed1' }}
                     onClick={handleImportFromFolder}
                 >
                     Nhập từ thư mục
@@ -1404,20 +1382,397 @@ export default function RefundsPage() {
     return (
         <Spin spinning={importLoading} tip="⏳ Đang import dữ liệu..." size="large">
             <div className="refunds-page">
+                {/* 🔍 SCAN INPUT - Ngay ngoài màn hình chính! */}
+                <Card
+                    className="refunds-scan-card"
+                >
+                    <div className="refunds-scan-row">
+                        <BarcodeOutlined className="refunds-scan-icon" />
+                        <Input
+                            className="refunds-scan-input"
+                            ref={scanInputRef}
+                            value={scanInput}
+                            onChange={handleScanInputChange}
+                            onKeyDown={handleScanKeyDown}
+                            placeholder="Quét hoặc nhập Tracking ID / Order ID để nhận hàng hoàn"
+                            aria-label="Mã vận đơn hoặc mã đơn hàng để nhận hàng hoàn"
+                            size="large"
+                            autoFocus
+                            style={{
+                                flex: 1,
+                                fontSize: 16,
+                                fontWeight: 500,
+                                borderColor: '#722ed1',
+                                borderWidth: 2
+                            }}
+                            prefix={<ScanOutlined style={{ color: '#722ed1', fontSize: 18 }} />}
+                        />
+                        <Button
+                            className="refunds-scan-button"
+                            type="primary"
+                            size="large"
+                            icon={<ScanOutlined />}
+                            onClick={() => handleScan(scanInput)}
+                            style={{
+                                background: '#722ed1',
+                                borderColor: '#722ed1',
+                                minWidth: 100
+                            }}
+                        >
+                            Quét
+                        </Button>
+                    </div>
+
+                    {/* Status indicator */}
+                    {scanStatus.type !== 'idle' && (
+                        <div
+                            style={{
+                                marginTop: 12,
+                                padding: '8px 16px',
+                                borderRadius: 6,
+                                background:
+                                    scanStatus.type === 'success' ? '#f6ffed' :
+                                        scanStatus.type === 'error' ? '#fff1f0' :
+                                            scanStatus.type === 'warning' ? '#fffbe6' : '#f5f5f5',
+                                border: `1px solid ${scanStatus.type === 'success' ? '#b7eb8f' :
+                                    scanStatus.type === 'error' ? '#ffccc7' :
+                                        scanStatus.type === 'warning' ? '#ffe58f' : '#d9d9d9'
+                                    }`,
+                                color:
+                                    scanStatus.type === 'success' ? '#52c41a' :
+                                        scanStatus.type === 'error' ? '#ff4d4f' :
+                                            scanStatus.type === 'warning' ? '#faad14' : '#8c8c8c',
+                                fontWeight: 600,
+                                fontSize: 14,
+                            }}
+                        >
+                            {scanStatus.message}
+                        </div>
+                    )}
+                </Card>
+
+                {/* 🔍 Bộ lọc trạng thái, tìm kiếm và xuất dữ liệu */}
+                <div className="refunds-toolbar">
+                    <Radio.Group
+                        className="refunds-status-tabs"
+                        value={statusFilter}
+                        onChange={(e) => setStatusFilter(e.target.value)}
+                        buttonStyle="solid"
+                        size="large"
+                    >
+                        <Radio.Button value="pending"><InboxOutlined /> Chưa hoàn ({statusCounts.pending})</Radio.Button>
+                        <Radio.Button value="received"><FileTextOutlined /> Đã nhận ({statusCounts.received})</Radio.Button>
+                        <Radio.Button value="overdue"><WarningOutlined /> Khiếu nại ({statusCounts.overdue})</Radio.Button>
+                        <Radio.Button value="completed"><CheckCircleOutlined /> Đã hoàn ({statusCounts.completed})</Radio.Button>
+                        <Radio.Button value="lost" className="refunds-status-tab--lost"><StopOutlined /> Mất hàng ({lostRefunds.length})</Radio.Button>
+                        <Radio.Button value="all"><FileTextOutlined /> Tất cả ({refunds.length})</Radio.Button>
+                    </Radio.Group>
+
+                    <div className="refunds-toolbar-actions">
+                        <Input.Search
+                            className="refunds-search"
+                            placeholder="Tìm Order ID, Tracking ID..."
+                            allowClear
+                            value={searchText}
+                            onChange={(e) => setSearchText(e.target.value)}
+                            size="large"
+                        />
+                        <Dropdown
+                            getPopupContainer={getRefundsPopupContainer}
+                            overlayClassName="refunds-actions-dropdown"
+                            overlayStyle={{ zIndex: 10050 }}
+                            menu={{
+                                items: [
+                                    { key: 'all', label: '📋 Xuất tất cả', onClick: () => handleExportExcel('all') },
+                                    { key: 'completed', label: '✅ Chỉ xuất đã hoàn', onClick: () => handleExportExcel('completed') },
+                                    { key: 'processing', label: '⏳ Chỉ xuất đang xử lý', onClick: () => handleExportExcel('processing') },
+                                ],
+                            }}
+                            trigger={['click']}
+                        >
+                            <Button className="refunds-export-button" aria-label="Xuất Excel" title="Xuất Excel" icon={<DownloadOutlined />} size="large">
+                                Xuất Excel
+                            </Button>
+                        </Dropdown>
+                    </div>
+                </div>
+
+                {/* 📊 Summary cards cho tab Mất hàng */}
+                {statusFilter === 'lost' && lostRefunds.length > 0 && (
+                    <div className="refunds-lost-summary">
+                        <Card className="refunds-lost-stat refunds-lost-stat--danger" style={{ borderColor: '#ffa39e', background: 'linear-gradient(135deg, #fff1f0 0%, #fff 100%)' }}>
+                            <div style={{ fontSize: 28, fontWeight: 700, color: '#a8071a' }}>{lostRefunds.length}</div>
+                            <div style={{ fontSize: 13, color: '#8c8c8c', marginTop: 4 }}>Tổng đơn mất hàng</div>
+                            <div style={{ fontSize: 15, fontWeight: 600, color: '#a8071a', marginTop: 4 }}>Thiệt hại: {lostTotal.toLocaleString('vi-VN')} đ</div>
+                        </Card>
+                        <Card className="refunds-lost-stat refunds-lost-stat--warning" style={{ borderColor: '#ffd591', background: 'linear-gradient(135deg, #fff7e6 0%, #fff 100%)' }}>
+                            <div style={{ fontSize: 28, fontWeight: 700, color: '#d46b08' }}>{lostNotCompensated.length}</div>
+                            <div style={{ fontSize: 13, color: '#8c8c8c', marginTop: 4 }}>Chưa đền bù</div>
+                            <div style={{ fontSize: 15, fontWeight: 600, color: '#d46b08', marginTop: 4 }}>Còn nợ: {notCompensatedTotal.toLocaleString('vi-VN')} đ</div>
+                        </Card>
+                        <Card className="refunds-lost-stat refunds-lost-stat--success" style={{ borderColor: '#b7eb8f', background: 'linear-gradient(135deg, #f6ffed 0%, #fff 100%)' }}>
+                            <div style={{ fontSize: 28, fontWeight: 700, color: '#389e0d' }}>{lostCompensated.length}</div>
+                            <div style={{ fontSize: 13, color: '#8c8c8c', marginTop: 4 }}>Đã đền bù</div>
+                            <div style={{ fontSize: 15, fontWeight: 600, color: '#389e0d', marginTop: 4 }}>Thu hồi: {compensatedTotal.toLocaleString('vi-VN')} đ</div>
+                        </Card>
+                    </div>
+                )}
+
+                <Card className="refunds-table-card" variant="borderless">
+                    <Table
+                        className="refunds-table"
+                        columns={lostColumns}
+                        dataSource={filteredRefunds}
+                        rowKey="id"
+                        loading={loading}
+                        scroll={{ x: 980 }}
+                        tableLayout="fixed"
+                        rowClassName={(record) => {
+                            return [
+                                'refunds-table-row',
+                                record.status === 'lost' && compensationMap[record.id] ? 'compensated-row refunds-table-row--compensated' : '',
+                                getRefundItemsForDisplay(record.items).length > 1 ? 'multi-sku-row refunds-table-row--multi' : '',
+                                `refunds-table-row--${record.status || 'pending'}`,
+                            ].filter(Boolean).join(' ');
+                        }}
+                        rowSelection={{
+                            selectedRowKeys,
+                            onChange: (selectedKeys) => {
+                                setSelectedRowKeys(selectedKeys as number[]);
+                            },
+                            columnWidth: 50,
+                            getCheckboxProps: (record) => ({
+                                name: record.orderNumber || record.refundCode || `refund-${record.id}`,
+                            }),
+                        }}
+                        expandable={{
+                            showExpandColumn: false,
+                            expandRowByClick: false,
+                            expandedRowKeys: Array.from(new Set([...expandedRowKeys, ...Array.from(mismatchOpen).filter(id => filteredRefunds.some(record => record.id === id && record.status === 'received'))])),
+                            expandedRowRender: (record) => {
+                                const origItems = getRefundItemsForDisplay(record.items);
+
+                                if (origItems.length === 0) {
+                                    return <p style={{ margin: 0, color: '#bfbfbf' }}>Không có sản phẩm</p>;
+                                }
+
+                                const isReceived = record.status === 'received';
+                                const isCompleted = record.status === 'completed';
+                                const isMismatchMode = mismatchOpen.has(record.id);
+                                const returnItems = returnItemsMap[record.id] || [];
+                                const canConfirmCustom = returnItems.length > 0 && returnItems.every(item =>
+                                    receivedSkuOptions.some(option => option.value === item.sku) && Number.isInteger(item.qty) && item.qty > 0 && item.qty <= 100000,
+                                );
+
+                                const hasLossNote = record.notes?.includes('[KHÔNG KHỚP]');
+                                const skuOptions = Array.from(new Map([
+                                    ...receivedSkuOptions,
+                                    ...returnItems.filter(item => item.sku && !receivedSkuOptions.some(option => option.value === item.sku))
+                                        .map(item => ({ value: item.sku, name: item.name, label: `${item.sku} — ${item.name || 'Hàng gửi gốc'}` })),
+                                ].map(option => [option.value, option])).values());
+
+                                return (
+                                    <div className="refunds-expanded-panel" onClick={e => e.stopPropagation()}>
+                                        {(expandedRowKeys.includes(record.id) || !isMismatchMode) && <>
+                                        <div className="refunds-expanded-meta"><span>{record.refundReason || '—'}</span><span>Ngày hủy: {dayjs(record.refundDate).format('DD/MM/YYYY')}</span><strong>Tổng tiền: {record.totalAmount.toLocaleString('vi-VN')} đ</strong></div>
+                                        <div className="refunds-section-heading"><InboxOutlined /> Hàng gửi đi (gốc)</div>
+                                        <Table
+                                            className="refunds-items-table refunds-items-table--original"
+                                            tableLayout="fixed"
+                                            columns={[
+                                                { title: 'SKU gốc', dataIndex: 'variantSku', width: 240, className: 'refunds-item-cell refunds-item-cell--sku', render: (sku: string) => <Tag color="cyan">{sku || '—'}</Tag> },
+                                                { title: 'Sản phẩm', dataIndex: 'productName', className: 'refunds-item-cell refunds-item-cell--name' },
+                                                { title: 'SL gửi', dataIndex: 'quantity', width: 85, align: 'center' as const, className: 'refunds-item-cell refunds-item-cell--qty', render: (qty: number) => <strong>{qty}</strong> },
+                                                { title: 'Giá trị', dataIndex: 'total', width: 120, align: 'right' as const, className: 'refunds-item-cell refunds-item-cell--total', render: (total: number) => <strong>{(total || 0).toLocaleString('vi-VN')} đ</strong> },
+                                            ]}
+                                            dataSource={origItems.map((item, index) => ({ ...item, rowKey: `orig-${record.id}-${index}` }))}
+                                            pagination={false}
+                                            rowKey="rowKey"
+                                            size="small"
+                                        />
+
+                                        </>}
+                                        {isReceived && isMismatchMode && (
+                                            <section id={`refund-receipt-${record.id}`} className="refunds-mismatch-panel" aria-label="Chỉnh sửa hàng thực nhận">
+                                                <div className="refunds-mismatch-heading">
+                                                    <div className="refunds-mismatch-title">
+                                                        <InboxOutlined />
+                                                        <strong>Hàng thực nhận</strong>
+                                                    </div>
+                                                    <span className="refunds-receipt-help">SKU lấy từ đơn gốc. Có thể đổi nếu hàng bị tráo.</span>
+                                                </div>
+                                                <Table
+                                                    className="refunds-items-table refunds-items-table--received"
+                                                    tableLayout="fixed"
+                                                    columns={[
+                                                        {
+                                                            title: 'SKU thực nhận',
+                                                            className: 'refunds-item-cell refunds-item-cell--received-sku',
+                                                            render: (_: any, item: ReturnItem, index: number) => (
+                                                                <Select
+                                                                    getPopupContainer={getRefundsPopupContainer}
+                                                                    showSearch
+                                                                    aria-label={`SKU thực nhận dòng ${index + 1}`}
+                                                                    placeholder="Chọn hoặc tìm SKU"
+                                                                    value={item.sku || undefined}
+                                                                    optionLabelProp="value"
+                                                                    onChange={val => {
+                                                                        const option = skuOptions.find(option => option.value === val);
+                                                                        updateReturnItem(record.id, index, 'sku', val);
+                                                                        updateReturnItem(record.id, index, 'name', option?.name || val);
+                                                                    }}
+                                                                    filterOption={(input, option) => String(option?.label || '').toLowerCase().includes(input.toLowerCase())}
+                                                                    options={skuOptions}
+                                                                    disabled={confirmingIds.has(record.id)}
+                                                                    style={{ width: '100%' }}
+                                                                />
+                                                            ),
+                                                        },
+                                                        {
+                                                            title: 'Sản phẩm',
+                                                            className: 'refunds-item-cell refunds-item-cell--received-name',
+                                                            render: (_: any, item: ReturnItem) => <span>{item.name || '—'}</span>,
+                                                        },
+                                                        {
+                                                            title: 'SL thực nhận', width: 145, align: 'center' as const,
+                                                            className: 'refunds-item-cell refunds-item-cell--received-qty',
+                                                            render: (_: any, item: ReturnItem, index: number) => (
+                                                                <InputNumber
+                                                                    aria-label={`Số lượng thực nhận dòng ${index + 1}`}
+                                                                    min={0}
+                                                                    max={100000}
+                                                                    precision={0}
+                                                                    disabled={confirmingIds.has(record.id)}
+                                                                    value={item.qty}
+                                                                    onChange={val => updateReturnItem(record.id, index, 'qty', val || 0)}
+                                                                />
+                                                            ),
+                                                        },
+                                                        {
+                                                            title: '', width: 48,
+                                                            className: 'refunds-item-cell refunds-item-cell--received-remove',
+                                                            render: (_: any, __: any, index: number) => returnItems.length > 1 ? (
+                                                                <Button
+                                                                    aria-label={`Xóa dòng hàng ${index + 1}`}
+                                                                    icon={<DeleteOutlined />}
+                                                                    danger
+                                                                    type="text"
+                                                                    disabled={confirmingIds.has(record.id)}
+                                                                    onClick={() => removeReturnItem(record.id, index)}
+                                                                />
+                                                            ) : null,
+                                                        },
+                                                    ]}
+                                                    dataSource={returnItems}
+                                                    pagination={false}
+                                                    rowKey="rowKey"
+                                                    size="small"
+                                                />
+                                                {returnItems.some(item => item.qty > 0 && !receivedSkuOptions.some(option => option.value === item.sku)) && (
+                                                    <p className="refunds-receipt-validation" role="status">Chọn SKU có trong danh mục nhập kho. Với combo/thùng đã mở, chọn SKU lẻ và nhập số lượng thực nhận.</p>
+                                                )}
+                                                <div className="refunds-confirm-bar">
+                                                    <Button className="refunds-add-row" icon={<PlusOutlined />} disabled={confirmingIds.has(record.id)} onClick={() => addReturnItem(record.id)}>Thêm sản phẩm</Button>
+                                                    <div className="refunds-receipt-submit">
+                                                        <div className="refunds-receipt-submit-actions">
+                                                            <Button disabled={confirmingIds.has(record.id)} onClick={() => toggleMismatch(record.id)}>Đóng chỉnh sửa</Button>
+                                                            <Button
+                                                                className="refunds-confirm-button"
+                                                                type="primary"
+                                                                icon={<CheckCircleOutlined />}
+                                                                disabled={!canConfirmCustom}
+                                                                loading={confirmingIds.has(record.id)}
+                                                                onClick={() => confirmCustom(record)}
+                                                            >
+                                                                Xác nhận hàng thực nhận
+                                                            </Button>
+                                                        </div>
+                                                        <span>Cộng tồn kho theo SKU và số lượng thực nhận</span>
+                                                    </div>
+                                                </div>
+                                            </section>
+                                        )}
+
+                                        {/* === ĐÃ HOÀN: hiện kết quả === */}
+                                        {isCompleted && (
+                                            <div style={{ marginTop: 10 }}>
+                                                {hasLossNote ? (
+                                                    <Alert
+                                                        type="warning"
+                                                        showIcon
+                                                        message="Đơn không khớp — đã chỉnh SKU/SL"
+                                                        description={record.notes?.match(/\[KHÔNG KHỚP\](.*)/)?.[1]?.trim()}
+                                                        style={{ marginBottom: 8 }}
+                                                    />
+                                                ) : (
+                                                    <Alert
+                                                        type="success"
+                                                        showIcon
+                                                        message="✅ Hoàn đầy đủ — đã cộng tồn kho theo hàng gốc"
+                                                    />
+                                                )}
+                                            </div>
+                                        )}
+                                    </div>
+                                );
+                            },
+                            rowExpandable: (record) => getRefundItemsForDisplay(record.items).length > 0,
+                        }}
+                        pagination={{
+                            pageSize: 100,
+                            showSizeChanger: true,
+                            pageSizeOptions: ['50', '100', '200', '500'],
+                            showTotal: (total) => `Tổng ${total} phiếu`,
+                        }}
+                    />
+                </Card>
+
+                {/* 📦 Stock Log - Lịch sử cộng tồn kho */}
+                {stockLog.length > 0 && (
+                    <Card
+                        className="refunds-stock-log"
+                        style={{
+                            marginTop: 16,
+                            border: '1px solid #b7eb8f',
+                        }}
+                        title={
+                            <span style={{ color: '#389e0d', fontWeight: 700 }}>
+                                📦 Lịch sử cộng tồn kho (từ hàng hoàn) — Phiên này
+                            </span>
+                        }
+                        size="small"
+                    >
+                        <Table
+                            className="refunds-stock-log-table"
+                            columns={[
+                                { title: 'SKU', dataIndex: 'sku', width: 150, render: (sku: string) => <Tag color="cyan">{sku}</Tag> },
+                                { title: 'Tên sản phẩm', dataIndex: 'name' },
+                                { title: 'Cộng kho', dataIndex: 'qty', width: 100, render: (qty: number) => <Tag color="green" style={{ fontWeight: 700 }}>+{qty} SP</Tag> },
+                                { title: 'Đơn hàng', dataIndex: 'orderId', width: 200, render: (id: string) => <span style={{ fontSize: 11, fontFamily: 'monospace' }}>{id}</span> },
+                                { title: 'Thời gian', dataIndex: 'time', width: 150 },
+                            ]}
+                            dataSource={stockLog.map((item, index) => ({ ...item, rowKey: `log-${index}` }))}
+                            pagination={false}
+                            rowKey="rowKey"
+                            size="small"
+                        />
+                    </Card>
+                )}
+
                 {/* 🎥 ĐƠN CẦN QUAY VIDEO — Thu gọn mặc định */}
                 <Collapse
                     className="refunds-video-panel"
                     size="small"
                     style={{
                         marginBottom: 16,
-                        border: '2px solid #ff4d4f',
+                        border: `1px solid ${videoIds.some(v => !v.done) ? '#ff4d4f' : '#e4e9e6'}`,
                         borderRadius: 10,
                         boxShadow: videoIds.filter(v => !v.done).length > 0 ? '0 2px 8px rgba(255,77,79,0.15)' : 'none',
                     }}
                     items={[{
                         key: 'video',
                         label: (
-                            <span style={{ color: '#a8071a', fontWeight: 700 }}>
+                            <span style={{ color: videoIds.some(v => !v.done) ? '#a8071a' : '#68736c', fontWeight: 600 }}>
                                 🎥 Đơn cần quay video ({videoIds.filter(v => !v.done).length})
                             </span>
                         ),
@@ -1491,439 +1846,6 @@ export default function RefundsPage() {
                         ),
                     }]}
                 />
-
-                {/* 🔍 SCAN INPUT - Ngay ngoài màn hình chính! */}
-                <Card
-                    className="refunds-scan-card"
-                    style={{
-                        marginBottom: 16,
-                        background: 'linear-gradient(135deg, #f9f0ff 0%, #efdbff 100%)',
-                        border: '2px solid #722ed1'
-                    }}
-                >
-                    <div className="refunds-scan-row">
-                        <BarcodeOutlined className="refunds-scan-icon" />
-                        <Input
-                            className="refunds-scan-input"
-                            ref={scanInputRef}
-                            value={scanInput}
-                            onChange={handleScanInputChange}
-                            onKeyDown={handleScanKeyDown}
-                            placeholder="Quét hoặc nhập Tracking ID / Order ID để đánh dấu hoàn thành..."
-                            size="large"
-                            autoFocus
-                            style={{
-                                flex: 1,
-                                fontSize: 16,
-                                fontWeight: 500,
-                                borderColor: '#722ed1',
-                                borderWidth: 2
-                            }}
-                            prefix={<ScanOutlined style={{ color: '#722ed1', fontSize: 18 }} />}
-                        />
-                        <Button
-                            className="refunds-scan-button"
-                            type="primary"
-                            size="large"
-                            icon={<ScanOutlined />}
-                            onClick={() => handleScan(scanInput)}
-                            style={{
-                                background: '#722ed1',
-                                borderColor: '#722ed1',
-                                minWidth: 100
-                            }}
-                        >
-                            Quét
-                        </Button>
-                    </div>
-
-                    {/* Status indicator */}
-                    {scanStatus.type !== 'idle' && (
-                        <div
-                            style={{
-                                marginTop: 12,
-                                padding: '8px 16px',
-                                borderRadius: 6,
-                                background:
-                                    scanStatus.type === 'success' ? '#f6ffed' :
-                                        scanStatus.type === 'error' ? '#fff1f0' :
-                                            scanStatus.type === 'warning' ? '#fffbe6' : '#f5f5f5',
-                                border: `1px solid ${scanStatus.type === 'success' ? '#b7eb8f' :
-                                    scanStatus.type === 'error' ? '#ffccc7' :
-                                        scanStatus.type === 'warning' ? '#ffe58f' : '#d9d9d9'
-                                    }`,
-                                color:
-                                    scanStatus.type === 'success' ? '#52c41a' :
-                                        scanStatus.type === 'error' ? '#ff4d4f' :
-                                            scanStatus.type === 'warning' ? '#faad14' : '#8c8c8c',
-                                fontWeight: 600,
-                                fontSize: 14,
-                            }}
-                        >
-                            {scanStatus.message}
-                        </div>
-                    )}
-                </Card>
-
-                {/* 🔍 Bộ lọc trạng thái, tìm kiếm và xuất dữ liệu */}
-                <div className="refunds-toolbar">
-                    <Radio.Group
-                        className="refunds-status-tabs"
-                        value={statusFilter}
-                        onChange={(e) => setStatusFilter(e.target.value)}
-                        buttonStyle="solid"
-                        size="large"
-                    >
-                        <Radio.Button value="pending">📦 Chưa hoàn ({statusCounts.pending})</Radio.Button>
-                        <Radio.Button value="received">📋 Đã nhận ({statusCounts.received})</Radio.Button>
-                        <Radio.Button value="overdue">⚠️ Khiếu nại ({statusCounts.overdue})</Radio.Button>
-                        <Radio.Button value="completed">✅ Đã hoàn ({statusCounts.completed})</Radio.Button>
-                        <Radio.Button value="lost" className="refunds-status-tab--lost">🚫 Mất hàng ({lostRefunds.length})</Radio.Button>
-                        <Radio.Button value="all">📋 Tất cả ({refunds.length})</Radio.Button>
-                    </Radio.Group>
-
-                    <div className="refunds-toolbar-actions">
-                        <Input.Search
-                            className="refunds-search"
-                            placeholder="Tìm Order ID, Tracking ID..."
-                            allowClear
-                            value={searchText}
-                            onChange={(e) => setSearchText(e.target.value)}
-                            size="large"
-                        />
-                        <Dropdown
-                            getPopupContainer={getRefundsPopupContainer}
-                            menu={{
-                                items: [
-                                    { key: 'all', label: '📋 Xuất tất cả', onClick: () => handleExportExcel('all') },
-                                    { key: 'completed', label: '✅ Chỉ xuất đã hoàn', onClick: () => handleExportExcel('completed') },
-                                    { key: 'processing', label: '⏳ Chỉ xuất đang xử lý', onClick: () => handleExportExcel('processing') },
-                                ],
-                            }}
-                            trigger={['click']}
-                        >
-                            <Button className="refunds-export-button" icon={<DownloadOutlined />} size="large">
-                                Xuất Excel
-                            </Button>
-                        </Dropdown>
-                    </div>
-                </div>
-
-                {/* 📊 Summary cards cho tab Mất hàng */}
-                {statusFilter === 'lost' && lostRefunds.length > 0 && (
-                    <div className="refunds-lost-summary">
-                        <Card className="refunds-lost-stat refunds-lost-stat--danger" style={{ borderColor: '#ffa39e', background: 'linear-gradient(135deg, #fff1f0 0%, #fff 100%)' }}>
-                            <div style={{ fontSize: 28, fontWeight: 700, color: '#a8071a' }}>{lostRefunds.length}</div>
-                            <div style={{ fontSize: 13, color: '#8c8c8c', marginTop: 4 }}>Tổng đơn mất hàng</div>
-                            <div style={{ fontSize: 15, fontWeight: 600, color: '#a8071a', marginTop: 4 }}>Thiệt hại: {lostTotal.toLocaleString('vi-VN')} đ</div>
-                        </Card>
-                        <Card className="refunds-lost-stat refunds-lost-stat--warning" style={{ borderColor: '#ffd591', background: 'linear-gradient(135deg, #fff7e6 0%, #fff 100%)' }}>
-                            <div style={{ fontSize: 28, fontWeight: 700, color: '#d46b08' }}>{lostNotCompensated.length}</div>
-                            <div style={{ fontSize: 13, color: '#8c8c8c', marginTop: 4 }}>Chưa đền bù</div>
-                            <div style={{ fontSize: 15, fontWeight: 600, color: '#d46b08', marginTop: 4 }}>Còn nợ: {notCompensatedTotal.toLocaleString('vi-VN')} đ</div>
-                        </Card>
-                        <Card className="refunds-lost-stat refunds-lost-stat--success" style={{ borderColor: '#b7eb8f', background: 'linear-gradient(135deg, #f6ffed 0%, #fff 100%)' }}>
-                            <div style={{ fontSize: 28, fontWeight: 700, color: '#389e0d' }}>{lostCompensated.length}</div>
-                            <div style={{ fontSize: 13, color: '#8c8c8c', marginTop: 4 }}>Đã đền bù</div>
-                            <div style={{ fontSize: 15, fontWeight: 600, color: '#389e0d', marginTop: 4 }}>Thu hồi: {compensatedTotal.toLocaleString('vi-VN')} đ</div>
-                        </Card>
-                    </div>
-                )}
-
-                <Card className="refunds-table-card" variant="borderless">
-                    <Table
-                        className="refunds-table"
-                        columns={lostColumns}
-                        dataSource={filteredRefunds}
-                        rowKey="id"
-                        loading={loading}
-                        scroll={{ x: 1500 }}
-                        rowClassName={(record) => {
-                            return [
-                                'refunds-table-row',
-                                record.status === 'lost' && compensationMap[record.id] ? 'compensated-row refunds-table-row--compensated' : '',
-                                getRefundItemsForDisplay(record.items).length > 1 ? 'multi-sku-row refunds-table-row--multi' : '',
-                                `refunds-table-row--${record.status || 'pending'}`,
-                            ].filter(Boolean).join(' ');
-                        }}
-                        rowSelection={{
-                            selectedRowKeys,
-                            onChange: (selectedKeys) => {
-                                setSelectedRowKeys(selectedKeys as number[]);
-                            },
-                            columnWidth: 50,
-                            getCheckboxProps: (record) => ({
-                                name: record.orderNumber || record.refundCode || `refund-${record.id}`,
-                            }),
-                        }}
-                        expandable={{
-                            showExpandColumn: false,
-                            expandRowByClick: true,
-                            expandedRowRender: (record) => {
-                                const origItems = getRefundItemsForDisplay(record.items);
-
-                                if (origItems.length === 0) {
-                                    return <p style={{ margin: 0, color: '#bfbfbf' }}>Không có sản phẩm</p>;
-                                }
-
-                                const isReceived = record.status === 'received';
-                                const isCompleted = record.status === 'completed';
-                                const isMismatchMode = mismatchOpen.has(record.id);
-                                const returnItems = returnItemsMap[record.id] || [];
-
-                                // Trích xuất tracking & shipping
-                                const trackingMatch = record.notes?.match(/Tracking: ([^|]+)/);
-                                const tracking = trackingMatch ? trackingMatch[1].trim() : '—';
-                                const shippingMatch = record.notes?.match(/Shipping: ([^|]+)/);
-                                const shipping = shippingMatch ? shippingMatch[1].trim() : '—';
-                                const hasLossNote = record.notes?.includes('[KHÔNG KHỚP]');
-
-                                return (
-                                    <div className="refunds-expanded-panel">
-                                        {/* Info row */}
-                                        <div className="refunds-expanded-meta">
-                                            <span>
-                                                <span style={{ color: '#8c8c8c' }}>Tracking: </span>
-                                                <Tag color="blue" style={{ cursor: 'pointer' }} onClick={() => {
-                                                    navigator.clipboard.writeText(tracking);
-                                                    message.success('📋 Đã copy Tracking!');
-                                                }}>{tracking} 📋</Tag>
-                                            </span>
-                                            <span>
-                                                <span style={{ color: '#8c8c8c' }}>ĐVVC: </span>
-                                                <strong>{shipping}</strong>
-                                            </span>
-                                        </div>
-
-                                        {/* Bảng hàng gốc */}
-                                        <div style={{ fontSize: 12, fontWeight: 700, color: '#8c8c8c', marginBottom: 6 }}>📦 Hàng gửi đi (gốc):</div>
-                                        <Table
-                                            className="refunds-items-table refunds-items-table--original"
-                                            columns={[
-                                                { title: 'SKU gốc', dataIndex: 'variantSku', width: 140, className: 'refunds-item-cell refunds-item-cell--sku', render: (sku: string) => <Tag color="cyan">{sku || 'N/A'}</Tag> },
-                                                { title: 'Sản phẩm', dataIndex: 'productName', className: 'refunds-item-cell refunds-item-cell--name', render: (name: string) => <span style={{ fontSize: 12 }}>{name}</span> },
-                                                { title: 'SL gửi', dataIndex: 'quantity', width: 80, align: 'center' as const, className: 'refunds-item-cell refunds-item-cell--qty', render: (qty: number) => <strong>{qty}</strong> },
-                                                { title: 'Giá trị', dataIndex: 'total', width: 120, align: 'right' as const, className: 'refunds-item-cell refunds-item-cell--total', render: (total: number) => <span style={{ fontWeight: 600 }}>{(total || 0).toLocaleString('vi-VN')}đ</span> },
-                                            ]}
-                                            dataSource={origItems}
-                                            pagination={false}
-                                            rowKey={(_item, index) => `orig-${record.id}-${index}`}
-                                            size="small"
-                                            style={{ marginBottom: 14 }}
-                                        />
-
-                                        {/* === ĐÃ NHẬN: 2 nút action === */}
-                                        {isReceived && !isMismatchMode && (
-                                            <>
-                                                <div className="refunds-full-confirm-row">
-                                                    <Button
-                                                        type="primary"
-                                                        size="large"
-                                                        icon={<CheckCircleOutlined />}
-                                                        onClick={(e) => { e.stopPropagation(); confirmFull(record); }}
-                                                        style={{ background: '#52c41a', borderColor: '#52c41a', fontWeight: 700 }}
-                                                    >
-                                                        ✅ Xác nhận hoàn (đầy đủ)
-                                                    </Button>
-                                                    <span style={{ fontSize: 12, color: '#8c8c8c' }}>→ Cộng tồn kho đúng theo hàng gửi gốc</span>
-                                                </div>
-
-                                                {/* Toggle "Không khớp" */}
-                                                <div
-                                                    className="refunds-mismatch-toggle"
-                                                    onClick={(e) => { e.stopPropagation(); toggleMismatch(record.id); }}
-                                                    style={{
-                                                        display: 'flex', alignItems: 'center', gap: 12,
-                                                        padding: '14px 24px', marginTop: 16,
-                                                        background: 'linear-gradient(135deg, #fff7e6 0%, #fff2e8 100%)',
-                                                        border: '2px solid #fa8c16', borderRadius: 12,
-                                                        cursor: 'pointer', fontSize: 14, fontWeight: 700,
-                                                        color: '#d46b08', position: 'relative', overflow: 'hidden',
-                                                        boxShadow: '0 2px 8px rgba(250,140,22,0.12)',
-                                                        transition: 'all 0.2s',
-                                                    }}
-                                                >
-                                                    <span style={{ fontSize: 22 }}>📦</span>
-                                                    <div style={{ flex: 1 }}>
-                                                        <div>▶ Đơn hàng không khớp số lượng</div>
-                                                        <div style={{ fontSize: 11, color: '#ad6800', fontWeight: 500 }}>Kiện bị rách, mất hàng, thiếu sản phẩm → Đổi SKU & nhập lại số lượng</div>
-                                                    </div>
-                                                </div>
-                                            </>
-                                        )}
-
-                                        {/* === CHẾ ĐỘ KHÔNG KHỚP === */}
-                                        {isReceived && isMismatchMode && (
-                                            <div className="refunds-mismatch-panel" style={{
-                                                marginTop: 12, padding: 16,
-                                                background: '#fff', border: '1px solid #ffd591', borderRadius: 10,
-                                            }}>
-                                                <div className="refunds-mismatch-heading">
-                                                    <div style={{ fontSize: 13, fontWeight: 700, color: '#fa8c16' }}>⚠️ Chỉnh sửa hàng thực nhận</div>
-                                                    <Space>
-                                                        <Button size="small" type="primary" ghost onClick={(e) => { e.stopPropagation(); addReturnItem(record.id); }}>
-                                                            + Thêm dòng
-                                                        </Button>
-                                                        <Button size="small" onClick={(e) => { e.stopPropagation(); toggleMismatch(record.id); }}>✕ Đóng</Button>
-                                                    </Space>
-                                                </div>
-
-                                                <Alert
-                                                    type="warning"
-                                                    showIcon
-                                                    style={{ marginBottom: 12 }}
-                                                    message="Đổi SKU combo → SKU lẻ nếu kiện bị rách. Nhập đúng số lượng thực nhận."
-                                                />
-
-                                                {/* Bảng chỉnh sửa */}
-                                                <Table
-                                                    className="refunds-items-table refunds-items-table--received"
-                                                    columns={[
-                                                        {
-                                                            title: 'SKU thực nhận', width: 240,
-                                                            className: 'refunds-item-cell refunds-item-cell--received-sku',
-                                                            render: (_: any, item: ReturnItem, index: number) => (
-                                                                <Select
-                                                                    getPopupContainer={getRefundsPopupContainer}
-                                                                    showSearch
-                                                                    placeholder="Chọn SKU..."
-                                                                    value={item.sku || undefined}
-                                                                    onChange={(val) => {
-                                                                        const p = products.find(pr => pr.sku === val);
-                                                                        updateReturnItem(record.id, index, 'sku', val);
-                                                                        updateReturnItem(record.id, index, 'name', p?.name || val);
-                                                                    }}
-                                                                    onClick={(e) => e.stopPropagation()}
-                                                                    filterOption={(input, option) =>
-                                                                        String(option?.label || '').toLowerCase().includes(input.toLowerCase()) ||
-                                                                        String(option?.value || '').toLowerCase().includes(input.toLowerCase())
-                                                                    }
-                                                                    options={products.map(p => ({ value: p.sku, label: `${p.sku} — ${p.name}` }))}
-                                                                    style={{ width: '100%' }}
-                                                                    size="small"
-                                                                />
-                                                            ),
-                                                        },
-                                                        { title: 'Tên sản phẩm', className: 'refunds-item-cell refunds-item-cell--received-name', render: (_: any, item: ReturnItem) => <span style={{ fontSize: 11, color: '#595959' }}>{item.name || '—'}</span> },
-                                                        {
-                                                            title: 'SL nhận', width: 90, align: 'center' as const,
-                                                            className: 'refunds-item-cell refunds-item-cell--received-qty',
-                                                            render: (_: any, item: ReturnItem, index: number) => (
-                                                                <InputNumber
-                                                                    min={0}
-                                                                    value={item.qty}
-                                                                    onChange={(val) => updateReturnItem(record.id, index, 'qty', val || 0)}
-                                                                    onClick={(e) => e.stopPropagation()}
-                                                                    size="small"
-                                                                    style={{ width: 70, fontWeight: 700 }}
-                                                                />
-                                                            ),
-                                                        },
-                                                        {
-                                                            title: '', width: 40,
-                                                            className: 'refunds-item-cell refunds-item-cell--received-remove',
-                                                            render: (_: any, __: any, index: number) => returnItems.length > 1 ? (
-                                                                <Button size="small" danger type="link" onClick={(e) => { e.stopPropagation(); removeReturnItem(record.id, index); }}>✕</Button>
-                                                            ) : null,
-                                                        },
-                                                    ]}
-                                                    dataSource={returnItems}
-                                                    pagination={false}
-                                                    rowKey={(_item, index) => `ret-${record.id}-${index}`}
-                                                    size="small"
-                                                    style={{ marginBottom: 14 }}
-                                                />
-
-                                                {/* Confirm bar */}
-                                                <div className="refunds-confirm-bar" style={{
-                                                    padding: '14px 18px',
-                                                    background: 'linear-gradient(135deg, #f6ffed, #e6fffb)',
-                                                    border: '1px solid #b7eb8f', borderRadius: 10,
-                                                    display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-                                                }}>
-                                                    <div style={{ fontSize: 13 }}>
-                                                        📦 Gửi gốc: <strong>{origItems.reduce((s, i) => s + i.quantity, 0)} SP</strong>
-                                                        {' '} → Nhận thực tế: <strong style={{ color: '#1890ff' }}>{returnItems.reduce((s, i) => s + i.qty, 0)} SP</strong>
-                                                        <div style={{ fontSize: 11, color: '#8c8c8c', marginTop: 2 }}>→ Cộng tồn kho theo SKU & SL đã chỉnh</div>
-                                                    </div>
-                                                    <Button
-                                                        type="primary"
-                                                        size="large"
-                                                        icon={<CheckCircleOutlined />}
-                                                        onClick={(e) => { e.stopPropagation(); confirmCustom(record); }}
-                                                        style={{ background: '#52c41a', borderColor: '#52c41a', fontWeight: 700 }}
-                                                    >
-                                                        ✅ Xác nhận hoàn
-                                                    </Button>
-                                                </div>
-                                            </div>
-                                        )}
-
-                                        {/* === ĐÃ HOÀN: hiện kết quả === */}
-                                        {isCompleted && (
-                                            <div style={{ marginTop: 10 }}>
-                                                {hasLossNote ? (
-                                                    <Alert
-                                                        type="warning"
-                                                        showIcon
-                                                        message="Đơn không khớp — đã chỉnh SKU/SL"
-                                                        description={record.notes?.match(/\[KHÔNG KHỚP\](.*)/)?.[1]?.trim()}
-                                                        style={{ marginBottom: 8 }}
-                                                    />
-                                                ) : (
-                                                    <Alert
-                                                        type="success"
-                                                        showIcon
-                                                        message="✅ Hoàn đầy đủ — đã cộng tồn kho theo hàng gốc"
-                                                    />
-                                                )}
-                                            </div>
-                                        )}
-                                    </div>
-                                );
-                            },
-                            rowExpandable: (record) => getRefundItemsForDisplay(record.items).length > 0,
-                        }}
-                        pagination={{
-                            pageSize: 100,
-                            showSizeChanger: true,
-                            pageSizeOptions: ['50', '100', '200', '500'],
-                            showTotal: (total) => `Tổng ${total} phiếu`,
-                        }}
-                    />
-                </Card>
-
-                {/* 📦 Stock Log - Lịch sử cộng tồn kho */}
-                {stockLog.length > 0 && (
-                    <Card
-                        className="refunds-stock-log"
-                        style={{
-                            marginTop: 16,
-                            border: '1px solid #b7eb8f',
-                        }}
-                        title={
-                            <span style={{ color: '#389e0d', fontWeight: 700 }}>
-                                📦 Lịch sử cộng tồn kho (từ hàng hoàn) — Phiên này
-                            </span>
-                        }
-                        size="small"
-                    >
-                        <Table
-                            className="refunds-stock-log-table"
-                            columns={[
-                                { title: 'SKU', dataIndex: 'sku', width: 150, render: (sku: string) => <Tag color="cyan">{sku}</Tag> },
-                                { title: 'Tên sản phẩm', dataIndex: 'name' },
-                                { title: 'Cộng kho', dataIndex: 'qty', width: 100, render: (qty: number) => <Tag color="green" style={{ fontWeight: 700 }}>+{qty} SP</Tag> },
-                                { title: 'Đơn hàng', dataIndex: 'orderId', width: 200, render: (id: string) => <span style={{ fontSize: 11, fontFamily: 'monospace' }}>{id}</span> },
-                                { title: 'Thời gian', dataIndex: 'time', width: 150 },
-                            ]}
-                            dataSource={stockLog}
-                            pagination={false}
-                            rowKey={(_item, index) => `log-${index}`}
-                            size="small"
-                        />
-                    </Card>
-                )}
 
                 {/* Method Selection Modal */}
                 <Modal

@@ -1489,6 +1489,7 @@ export interface ElectronAPI {
         extraFines?: any[];
         fineWaivers?: any[];
         fineAuditLog?: any[];
+        removedFineCount?: number;
       };
       error?: string;
     }>;

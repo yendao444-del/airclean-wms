@@ -1,4 +1,5 @@
 const { normalizeIdentity, isEmployeeResignedOn } = require('./employment-status');
+const { attendanceMonthRange } = require('./attendance-log-scope.cjs');
 
 const CHECKOUT_POLICY_EFFECTIVE_DATE = '2026-10-07';
 const MISSING_CHECKOUT_FINE = 50000;
@@ -48,6 +49,7 @@ async function readCheckoutDeletedIds(client) {
 // Pure plan: never alter logs, payroll snapshots, or pre-existing fine objects.
 function calculateCheckoutFinePlan(data, logs, cutoffs, options = {}) {
   const today = bangkokDate(options.now || new Date());
+  const range = options.month ? attendanceMonthRange(options.month) : null;
   if (!today) throw new Error('Giờ đối soát checkout không hợp lệ.');
   const employees = Array.isArray(data.employees) ? data.employees : [];
   const existing = Array.isArray(data.extraFines) ? data.extraFines : [];
@@ -62,7 +64,8 @@ function calculateCheckoutFinePlan(data, logs, cutoffs, options = {}) {
     const date = String(log.date || bangkokDate(log.timestamp));
     // Close the entire workday first: evening checkout is allowed after 20:30.
     if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || date < CHECKOUT_POLICY_EFFECTIVE_DATE
-      || date >= today || (options.dateKey && date !== options.dateKey)) continue;
+      || date >= today || (options.dateKey && date !== options.dateKey)
+      || (range && (date < range.gte || date >= range.lt))) continue;
     const employee = employeeForLog(employees, log);
     if (!employee || !['Official', 'Seasonal'].includes(employee.type)
       || !Number.isSafeInteger(Number(employee.id)) || Number(employee.id) <= 0

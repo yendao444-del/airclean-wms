@@ -262,6 +262,12 @@ for (const key of runtimeConfigKeys) {
   }
 }
 const { reconcileLateAttendanceFines } = require("./attendance-fines");
+const { attendanceMonthRange } = require("./attendance-log-scope.cjs");
+const { saveLeaveStatus } = require("./attendance-leave-status.cjs");
+const { readWorkdayPolicy, dispatchDailyTasks } = require("./attendance-workday-service.cjs");
+const workdayPolicyPromise = import("./attendance-workday-policy.mjs");
+const { updateAttendanceBranches } = require("./attendance-branch-store.cjs");
+const { saveAttendanceAutosave } = require("./attendance-autosave-store.cjs");
 const {
   CUTOFF_HOUR: ATTENDANCE_SCHEDULE_CUTOFF_HOUR,
   deadlineFor: attendanceScheduleDeadlineFor,
@@ -278,26 +284,11 @@ const {
   normalizeConfig: normalizeAttendanceRewardConfig,
   resolveEmployeeId,
 } = require("./attendance-rewards");
-const { reconcileEcommerceOrderFines } = require("./ecommerce-order-fines");
+const { isEcommerceOrderFine } = require("./ecommerce-order-fines");
 const { reconcilePrepackShortfallFines, isPrepackShortfallFine } = require("./prepack-fines");
 const { MAX_QUANTITY: HANDLING_UNIT_MAX_QUANTITY, assertPackageQuantity, readLabelNumbers, assignLabelNumbers } = require("./handling-unit-labels.cjs");
 const { assertMergePolicy } = require("./handling-unit-merge-policy.cjs");
 const { recordShiftEvents, readShiftPolicy, reconcileShiftFines, isHandlingUnitShiftFine, assigneeFor: shiftAssigneeFor, dayKey: shiftDayKey } = require("./handling-unit-shift-policy.cjs");
-
-// Fine reconciliation scans the shared attendance ledger and can be expensive
-// on a large order history. Keep it out of the pickup/resolve response path.
-let ecommerceFineReconciliationPromise = null;
-function scheduleEcommerceOrderFineReconciliation(reason = "action") {
-  if (!prisma || ecommerceFineReconciliationPromise) return;
-  ecommerceFineReconciliationPromise = enqueueAttendanceMaintenance("ecommerce", () => reconcileEcommerceOrderFines(getPrismaDirectTx(), { now: new Date() }))
-    .catch((error) => {
-      console.warn(`[Ecommerce Fines] Background reconciliation failed (${reason}):`, error.message);
-    })
-    .finally(() => {
-      invalidateAttendanceSnapshotCaches();
-      ecommerceFineReconciliationPromise = null;
-    });
-}
 
 // 📦 Offline Queue — lưu scan khi mất mạng, sync lại khi có mạng
 const offlineQueue = require("./offline-queue");
@@ -5202,6 +5193,7 @@ ipcMain.handle("refunds:adjustStock", async (event, data) => {
 
 // Complete a refund only after every stock movement succeeds. This keeps a
 // failed combo restore visible for retry instead of silently marking it done.
+const { normalizeRefundItems, loadLegacyRefundStockPlan } = require('./refund-stock-plan.cjs');
 ipcMain.handle("refunds:completeAndRestore", async (event, data = {}) => {
   try {
     requireRole("admin", "manager");
@@ -5225,6 +5217,7 @@ ipcMain.handle("refunds:completeAndRestore", async (event, data = {}) => {
           if (!refund) throw new Error("Không tìm thấy phiếu hàng hoàn.");
           if (refund.status === "completed")
             throw new Error("Phiếu hàng hoàn này đã được xác nhận trước đó.");
+          if (refund.status !== "received") throw new Error('Phải ghi nhận đã nhận hàng trước khi xác nhận hoàn kho.');
 
           let persistedItems = [];
           try {
@@ -5233,35 +5226,7 @@ ipcMain.handle("refunds:completeAndRestore", async (event, data = {}) => {
             persistedItems = [];
           }
 
-          const customItems = data.isCustom ? data.items : null;
-          if (data.isCustom && (!Array.isArray(customItems) || customItems.length === 0)) {
-            throw new Error("Danh sách hàng thực nhận không hợp lệ.");
-          }
-          if (Array.isArray(customItems) && customItems.length > 200) {
-            throw new Error("Danh sách hàng thực nhận vượt quá 200 dòng.");
-          }
-          const items = data.isCustom ? customItems : persistedItems;
-
-          const normalizedBySku = new Map();
-          for (const item of Array.isArray(items) ? items : []) {
-            const sku = String(item?.sku || item?.variantSku || "").trim();
-            const quantity = Number(item?.quantity ?? item?.qty ?? 0);
-            if (!sku || !Number.isFinite(quantity) || quantity <= 0) continue;
-            if (data.isCustom && (!Number.isInteger(quantity) || quantity > 100000)) {
-              throw new Error(`Số lượng thực nhận của SKU ${sku} không hợp lệ.`);
-            }
-            const previous = normalizedBySku.get(sku);
-            normalizedBySku.set(sku, {
-              sku,
-              quantity: Number(previous?.quantity || 0) + quantity,
-              name: String(
-                item?.name || item?.productName || previous?.name || "",
-              ).trim(),
-            });
-          }
-          const normalizedItems = [...normalizedBySku.values()];
-          if (normalizedItems.length === 0)
-            throw new Error("Phiếu hoàn không có SKU hợp lệ để cộng kho.");
+          const normalizedItems = normalizeRefundItems(data.isCustom ? data.items : persistedItems);
 
           const reference = String(
             refund.orderNumber || refund.refundCode || `P.Hoan ${refund.id}`,
@@ -5269,22 +5234,39 @@ ipcMain.handle("refunds:completeAndRestore", async (event, data = {}) => {
           const allocationKey = tmdtPhysicalStock.allocationKey(reference);
           const allocationRecord = await tx.appConfig.findUnique({ where: { key: allocationKey } });
           const allocationState = allocationRecord ? JSON.parse(allocationRecord.value) : { version: 1, items: {} };
+          // Both receipt modes must reject a prior receipt. A duplicate refund
+          // row can remain in `received` while sharing the same order reference,
+          // so checking the Refund status alone is not sufficient to prevent a
+          // second stock increase.
+          const previousReceipt = await tx.inventoryLog.findFirst({
+            where: { reference, OR: [{ referenceType: 'HOAN' }, { type: 'refund' }, { type: 'return' }] },
+            select: { id: true },
+          });
+          const hasRestoredAllocation = Object.values(allocationState.items || {}).some(item =>
+            item?.restored || Number(item?.refundedQuantity || 0) > 0,
+          );
+          if (allocationState.receivedRefund || previousReceipt || hasRestoredAllocation) {
+            throw new Error(data.isCustom
+              ? 'Đơn đã có giao dịch hoàn/hủy tồn. Cần đối soát trước khi nhập thêm hàng thực nhận.'
+              : 'Đơn đã nhận hàng hoàn; không được cộng tồn lần nữa.');
+          }
           if (allocationState.hasCustomRefund && !data.isCustom) throw new Error('Đơn đã nhận hoàn theo hàng thực tế. Hãy tiếp tục xác nhận theo SKU thực nhận, không hoàn tự động theo combo.');
           const packedInventory = allocationRecord && !data.isCustom
             ? packagePackingModule.decodeInventory(await tx.appConfig.findUnique({ where: { key: packagePackingModule.INVENTORY_KEY } }))
             : null;
           const physicalReturnBySku = new Map();
-          for (const item of normalizedItems) {
-            const source = data.isCustom ? null : allocationState?.items?.[item.sku];
-            const combo = source ? null : await tx.comboProduct.findUnique({ where: { sku: item.sku } });
-            if (!source && combo && !data.isCustom) throw new Error(`Đơn cũ thiếu thành phần xuất gốc của ${item.sku}. Hãy xác nhận theo SKU và số lượng hàng thực nhận, không hoàn theo combo hiện tại.`);
-            const components = combo ? parseJsonArray(combo.items) : [];
-            const physicalItems = source ? tmdtPhysicalStock.refundStockChanges(source, item.quantity, packedInventory) : components.length > 0
-              ? components.map((component) => ({
-                  sku: String(component?.sku || "").trim(),
-                  quantity: Number(component?.quantity || 0) * item.quantity,
-                }))
-              : [item];
+          const hasMissingSource = !data.isCustom && normalizedItems.some(item => !allocationState?.items?.[item.sku]);
+          // Missing snapshots can only restore a verified whole legacy shipment.
+          // Do not mix guessed combo components with recorded source components.
+          const legacyItems = hasMissingSource
+            ? await loadLegacyRefundStockPlan(tx, reference, normalizedItems, allocationState)
+            : null;
+          for (const item of legacyItems || normalizedItems) {
+            const source = data.isCustom || legacyItems ? null : allocationState?.items?.[item.sku];
+            if (data.isCustom && await tx.comboProduct.findUnique({ where: { sku: item.sku } })) {
+              throw new Error(`SKU ${item.sku} là combo. Hãy chọn SKU lẻ và nhập số lượng thực nhận; không dùng số lượng combo gốc.`);
+            }
+            const physicalItems = source ? tmdtPhysicalStock.refundStockChanges(source, item.quantity, packedInventory) : [item];
             for (const physicalItem of physicalItems) {
               if (!physicalItem.sku || !Number.isFinite(physicalItem.quantity) || physicalItem.quantity <= 0) continue;
               physicalReturnBySku.set(
@@ -5300,7 +5282,7 @@ ipcMain.handle("refunds:completeAndRestore", async (event, data = {}) => {
 
           const note = data.isCustom
             ? `Xác nhận hàng hoàn lệch/custom (${refund.customerName})`
-            : `Xác nhận nhận hàng hoàn/trả về kho (${refund.customerName})`;
+            : `Xác nhận nhận hàng hoàn/trả về kho (${refund.customerName})${legacyItems ? ' — đối chiếu lịch sử trừ kho xuất gốc' : ''}`;
 
           for (const item of physicalReturnItems) {
             await updateProductStockInTx(tx, item.sku, item.quantity, {
@@ -5359,7 +5341,7 @@ ipcMain.handle("refunds:completeAndRestore", async (event, data = {}) => {
             where: { id: refund.id },
             data: { status: "completed", notes: nextNotes },
           });
-          return { refund: updatedRefund, items: normalizedItems, reference, returnUnits };
+          return { refund: updatedRefund, items: physicalReturnItems, reference, returnUnits };
         },
         { timeout: 30000, maxWait: 10000 },
       ),
@@ -17815,6 +17797,9 @@ function getTaskRecipients(
   task,
   attachments = parseTaskAttachments(task?.attachments),
 ) {
+  const dispatch = attachments?.workdayDispatch;
+  if (task?.type === 'daily' && dispatch?.date === getBangkokDateKey(task.dueDate)
+      && Array.isArray(dispatch.recipients)) return dispatch.recipients;
   const assignees = attachments?.assignment?.assignees;
   if (Array.isArray(assignees) && assignees.length > 0) {
     return [
@@ -17878,6 +17863,8 @@ function getDailyRotationAssignee(attachments, date = new Date()) {
 function withEffectiveModuleAssignee(task, date = new Date()) {
   const attachments = parseTaskAttachments(task?.attachments);
   if (!attachments?.moduleLink?.kind || !attachments?.moduleLink?.module) return task;
+  if (attachments?.workdayDispatch?.date === getBangkokDateKey(task.dueDate)) return task;
+  if (task.type === 'daily' && getBangkokDateKey(task.dueDate) < getBangkokDateKey(date)) return task;
   const resolvedAssignee = getDailyRotationAssignee(attachments, date) || task.assignee;
   return resolvedAssignee && resolvedAssignee !== task.assignee
     ? { ...task, assignee: resolvedAssignee }
@@ -17906,7 +17893,15 @@ async function resolveLinkedModuleAssignment(moduleName, date = new Date(), db =
   const template = templates.find((task) => isLinkedModuleTaskTemplate(task, moduleName));
   if (template) {
     const attachments = parseTaskAttachments(template.attachments);
-    const resolvedName = getDailyRotationAssignee(attachments, date) || template.assignee;
+    const baseName = attachments.workdayDispatch?.date === getBangkokDateKey(date)
+      ? template.assignee : getDailyRotationAssignee(attachments, date) || template.assignee;
+    const [policy, dayPolicy, users] = await Promise.all([
+      workdayPolicyPromise, readWorkdayPolicy(db), db.user.findMany({ where: { status: 'active', role: { not: 'admin' } } }),
+    ]);
+    const plan = policy.planDailyDispatch({ ...template, type: 'daily', status: 'pending', area: moduleName },
+      dayPolicy, users, date, { eligible: isEligibleStockCheckAssignee });
+    const resolvedName = plan ? plan.assignee : baseName;
+    if (!resolvedName || policy.isApprovedDayOff(dayPolicy, resolvedName, date)) return null;
     const resolved = await db.user.findFirst({
       where: {
         status: "active",
@@ -17931,7 +17926,8 @@ async function resolveLinkedModuleAssignment(moduleName, date = new Date(), db =
       where: { username: "nguyendinhtoan" },
       select: { id: true, username: true, fullName: true, role: true, status: true },
     });
-    if (legacyChecker?.status === "active") {
+    const [dayPolicy, policy] = await Promise.all([readWorkdayPolicy(db), workdayPolicyPromise]);
+    if (legacyChecker?.status === "active" && !policy.isApprovedDayOff(dayPolicy, legacyChecker, date)) {
       return {
         taskId: null,
         assignee: legacyChecker.username,
@@ -18015,9 +18011,16 @@ function getEvidenceHistoryPayload(evidence) {
 
 async function buildRejectedEvidencePenalties(task, attachments, evidence, reviewedAt, reviewedBy, rejectionReason) {
   if (isTemporarilyUnfinedTask(task?.title)) return [];
-  const recipients = await getActiveTaskRecipients(
+  const originalRecipients = await getActiveTaskRecipients(
     getTaskRecipients(task, attachments),
   );
+  let recipients = originalRecipients;
+  if (task.type === 'daily') {
+    const data = await readWorkdayPolicy(prisma);
+    const { isApprovedDayOff } = await workdayPolicyPromise;
+    recipients = recipients.filter(name => !isApprovedDayOff(data, name, task.dueDate));
+    if (!recipients.length) return [];
+  }
   if (recipients.length === 0) {
     throw new Error("Không xác định được nhân viên để ghi nhận phạt.");
   }
@@ -18051,8 +18054,8 @@ async function buildRejectedEvidencePenalties(task, attachments, evidence, revie
   const escalatedAmount = configuredAmount * cycle;
   const baseFine = task.type === "assignment"
     ? escalatedAmount
-    : Math.floor(escalatedAmount / recipients.length);
-  const remainder = task.type === "assignment" ? 0 : escalatedAmount % recipients.length;
+    : Math.floor(escalatedAmount / originalRecipients.length);
+  const remainder = task.type === "assignment" ? 0 : escalatedAmount % originalRecipients.length;
   const submissionKey = crypto
     .createHash("sha256")
     .update(`${task.id}|${evidence.submittedAt || "unknown-submission"}`)
@@ -18067,7 +18070,7 @@ async function buildRejectedEvidencePenalties(task, attachments, evidence, revie
       taskCode: getDailyTaskReferenceCode(task.id),
       taskTitle: task.title,
       assignee,
-      amount: baseFine + (index < remainder ? 1 : 0),
+      amount: baseFine + (originalRecipients.indexOf(assignee) < remainder ? 1 : 0),
       baseAmount: configuredAmount,
       dueAt,
       penaltyAt: reviewedAt,
@@ -18078,12 +18081,18 @@ async function buildRejectedEvidencePenalties(task, attachments, evidence, revie
       detail: `${task.title} - bằng chứng bị ${reviewedBy} từ chối lần ${cycle}, phạt x${cycle}. Lý do: ${rejectionReason}`,
       rejectionReason,
       source: "daily_task_evidence_rejected",
+      taskType: task.type,
+      workDate: getBangkokDateKey(task.dueDate),
     };
   });
 }
 
 function actorOwnsTask(actor, task) {
   const attachments = parseTaskAttachments(task.attachments);
+  if (task.type === 'daily' && attachments.workdayDispatch?.date === getBangkokDateKey(task.dueDate)) {
+    const names = [actor.username, actor.fullName].map(normalizeActorName);
+    return getTaskRecipients(task, attachments).some(name => names.includes(normalizeActorName(name)));
+  }
   const recipients = Array.isArray(attachments?.assignment?.assignees)
     ? attachments.assignment.assignees
         .map((name) => normalizeActorName(name))
@@ -18533,6 +18542,7 @@ async function createEvidencePenaltyIfDue(
   now = new Date(),
   knownActiveUsers,
   knownPenaltyRows,
+  knownWorkdayPolicy,
 ) {
   if (isTemporarilyUnfinedTask(task?.title)) return [];
   const attachments = parseTaskAttachments(task.attachments);
@@ -18569,14 +18579,17 @@ async function createEvidencePenaltyIfDue(
     return null;
 
   const dueKey = dueAt.toISOString();
-  const recipients = await getActiveTaskRecipients(
+  const dayPolicy = knownWorkdayPolicy || await readWorkdayPolicy(prisma);
+  const { isApprovedDayOff } = await workdayPolicyPromise;
+  const originalRecipients = await getActiveTaskRecipients(
     getTaskRecipients(task, attachments),
     knownActiveUsers,
   );
+  const recipients = originalRecipients.filter(name => !isApprovedDayOff(dayPolicy, name, dueAt));
   if (recipients.length === 0) return [];
   const totalFine = Number(evidence.penaltyAmount) || 30000;
-  const baseFine = Math.floor(totalFine / recipients.length);
-  const remainder = totalFine % recipients.length;
+  const baseFine = Math.floor(totalFine / originalRecipients.length);
+  const remainder = totalFine % originalRecipients.length;
   const created = [];
   // Keep legacy rows intact in safety mode. A single-recipient legacy row is
   // already the correct penalty and must not be duplicated.
@@ -18594,12 +18607,14 @@ async function createEvidencePenaltyIfDue(
       taskId: task.id,
       taskCode: getDailyTaskReferenceCode(task.id),
       assignee,
-      amount: baseFine + (index < remainder ? 1 : 0),
+      amount: baseFine + (originalRecipients.indexOf(assignee) < remainder ? 1 : 0),
       dueAt: dueAt.toISOString(),
       penaltyAt: penaltyAt.toISOString(),
       type: "Không nộp bằng chứng đúng hạn",
       detail: `${task.title} - hết ngày chưa nộp bằng chứng`,
       source: "daily_task_evidence_overdue",
+      taskType: 'daily',
+      workDate: getBangkokDateKey(dueAt),
     };
     try {
       // Several desktop clients may reconcile at the same minute. Let the
@@ -18885,7 +18900,7 @@ function reconcileEvidencePenalties() {
   if (evidencePenaltyReconcilePromise) return evidencePenaltyReconcilePromise;
   evidencePenaltyReconcilePromise = (async () => {
     await cleanupPrematureDailyEvidencePenalties();
-    const [tasks, activeUsers, penaltyRows] = await Promise.all([
+    const [tasks, activeUsers, penaltyRows, dayPolicy] = await Promise.all([
       prisma.dailyTask.findMany({
         // Completed rows are included deliberately: old clients could mark a
         // proof-required task complete without uploading an image.
@@ -18913,6 +18928,7 @@ function reconcileEvidencePenalties() {
         ] },
         select: { key: true, value: true },
       }),
+      readWorkdayPolicy(prisma),
     ]);
     const knownPenaltyRows = new Map(penaltyRows.map((row) => [row.key, row]));
     const created = [];
@@ -18922,6 +18938,7 @@ function reconcileEvidencePenalties() {
         new Date(),
         activeUsers,
         knownPenaltyRows,
+        dayPolicy,
       );
       if (Array.isArray(penalties)) created.push(...penalties);
     }
@@ -18971,7 +18988,7 @@ async function reconcileSnapshotEvidencePenalties(now = new Date(), range = {}) 
     ...(startDate ? { gte: `dailyTasksSnapshot:${startDate}` } : {}),
     ...(endDate ? { lte: `dailyTasksSnapshot:${endDate}` } : {}),
   };
-  const [snapshotRows, existingPenaltyRows, activeUsers, currentTasks] = await Promise.all([
+  const [snapshotRows, existingPenaltyRows, activeUsers, currentTasks, dayPolicy] = await Promise.all([
     prisma.appConfig.findMany({
       where: { key: snapshotKeyFilter },
       select: { key: true, value: true },
@@ -18987,6 +19004,7 @@ async function reconcileSnapshotEvidencePenalties(now = new Date(), range = {}) 
     prisma.dailyTask.findMany({
       select: { id: true, attachments: true, status: true },
     }),
+    readWorkdayPolicy(prisma),
   ]);
   const currentTaskById = new Map(currentTasks.map((task) => [task.id, task]));
   const existingPenaltyKeys = new Set(
@@ -19025,6 +19043,8 @@ async function reconcileSnapshotEvidencePenalties(now = new Date(), range = {}) 
         task,
         now,
         activeUsers,
+        undefined,
+        dayPolicy,
       );
       if (Array.isArray(penalties)) {
         created.push(...penalties);
@@ -20725,7 +20745,7 @@ let evidencePenaltyRefreshInFlight = null;
 const EVIDENCE_PENALTY_CACHE_TTL_MS = 5000;
 
 async function readEvidencePenaltyRows() {
-  const rows = await prisma.appConfig.findMany({
+  const [rows, dayPolicy, tasks] = await Promise.all([prisma.appConfig.findMany({
     where: {
       OR: [
         { key: { startsWith: TASK_PENALTY_KEY_PREFIX } },
@@ -20733,16 +20753,20 @@ async function readEvidencePenaltyRows() {
         { key: { startsWith: REJECTED_EVIDENCE_PENALTY_KEY_PREFIX } },
       ],
     },
-  });
+  }), readWorkdayPolicy(prisma), prisma.dailyTask.findMany({ select: { id: true, type: true } })]);
+  const { isExcusedDailyWorkFine } = await workdayPolicyPromise;
+  const taskTypes = new Map(tasks.map(task => [Number(task.id), task.type]));
   const penalties = rows
     .map((row) => {
       try {
-        return JSON.parse(row.value);
+        const penalty = JSON.parse(row.value);
+        return { ...penalty, taskType: penalty.taskType || taskTypes.get(Number(penalty.taskId)) };
       } catch {
         return null;
       }
     })
     .filter(Boolean)
+    .filter(penalty => !isExcusedDailyWorkFine(penalty, dayPolicy))
     .filter(
       (penalty) =>
         !penalty?.dueAt ||
@@ -20798,6 +20822,9 @@ ipcMain.handle("dailyTasks:listEvidencePenalties", async (_event, options = {}) 
 ipcMain.handle("dailyTasks:list", async (event, filters = {}) => {
   try {
     const actor = await getCurrentActor();
+    // Persist before ownership filtering; a substitute must also be allowed
+    // to submit the task, not merely see a display-only assignment.
+    await dispatchDailyTasks(getPrismaDirectTx(), { eligible: isEligibleStockCheckAssignee });
     const {
       status,
       assignee,
@@ -21637,6 +21664,10 @@ ipcMain.handle("dailyTasks:update", async (event, id, updates) => {
       updates.attachments !== undefined
         ? parseTaskAttachments(updates.attachments)
         : existingAttachments;
+    // Explicit admin reassignment changes the configured owner. Do not let
+    // an earlier automatic substitute override the newly saved selection.
+    if (existingTask.type === 'daily' && updates.assignee !== undefined
+        && updates.assignee !== existingTask.assignee) delete attachments.workdayDispatch;
     if (attachments.evidence?.required) {
       attachments.evidence.minImages =
         getRequiredEvidenceImageCount(attachments.evidence);
@@ -21687,7 +21718,8 @@ ipcMain.handle("dailyTasks:update", async (event, id, updates) => {
           : JSON.stringify(updates.tags);
     }
 
-    if (updates.attachments !== undefined) {
+    if (updates.attachments !== undefined || (existingTask.type === 'daily'
+        && updates.assignee !== undefined && updates.assignee !== existingTask.assignee)) {
       updateData.attachments = JSON.stringify(attachments);
     }
 
@@ -22333,6 +22365,14 @@ async function performDailyTaskReset() {
       const newDueDate = new Date(now);
       newDueDate.setHours(23, 59, 59, 999);
       const attachments = parseTaskAttachments(task.attachments);
+      const previousDispatch = attachments.workdayDispatch;
+      const baseAssignee = previousDispatch?.baseAssignee ?? task.assignee;
+      if (previousDispatch) {
+        if (Array.isArray(attachments.assignment?.assignees)) attachments.assignment = {
+          ...attachments.assignment, assignees: previousDispatch.baseRecipients,
+        };
+        delete attachments.workdayDispatch;
+      }
       const rotationAssignee = getDailyRotationAssignee(attachments, now);
       return prisma.dailyTask.update({
         where: { id: task.id },
@@ -22344,10 +22384,10 @@ async function performDailyTaskReset() {
           // Người cố định phải còn nguyên để phạt/nộp bằng chứng đúng người.
           assignee:
             rotationAssignee ||
-            (isFixedAssignee(attachments) ? task.assignee : ""),
+            (isFixedAssignee(attachments) ? baseAssignee : ""),
           attachments: attachments?.evidence?.required
             ? JSON.stringify(clearEvidenceSubmission(attachments))
-            : task.attachments,
+            : JSON.stringify(attachments),
         },
       });
     });
@@ -22361,6 +22401,7 @@ async function performDailyTaskReset() {
       ...taskUpdates,
       resetMarkerUpdate,
     ]);
+    await dispatchDailyTasks(getPrismaDirectTx(), { now, eligible: isEligibleStockCheckAssignee });
     const recurringAssignmentsCreated = await recurringAssignmentsPromise;
     console.log(
       `✅ [DAILY RESET] Đã cập nhật dueDate của ${dailyTasksBeforeReset.length} tasks sang ngày ${today}`,
@@ -25162,7 +25203,6 @@ ipcMain.handle("ecommerceExports:completePickup", async (event, id, data = {}) =
         recordId: record.id,
       });
     }
-    scheduleEcommerceOrderFineReconciliation("completePickup");
     return {
       success: true,
       skipped: !!result.skipped,
@@ -25202,7 +25242,6 @@ ipcMain.handle("ecommerceExports:resolveMismatch", async (event, id, data = {}) 
         }
         return { success: true, skipped: !!result.skipped, reason: result.reason, data: result.data };
       })();
-      scheduleEcommerceOrderFineReconciliation("resolveMismatch.pickup");
       return response;
     }
     if (action !== "cancel") throw new Error("Thao tác đối soát không hợp lệ.");
@@ -25236,7 +25275,6 @@ ipcMain.handle("ecommerceExports:resolveMismatch", async (event, id, data = {}) 
         recordId: result.data.id,
       });
     }
-    scheduleEcommerceOrderFineReconciliation("resolveMismatch.cancel");
     return { success: true, skipped: !!result.skipped, reason: result.reason, data: result.data };
   } catch (error) {
     console.error("Resolve ecommerce mismatch error:", error);
@@ -30185,6 +30223,81 @@ const lockedPeriodSnapshotCache = new Map();
 let attendanceMaintenanceInFlight = null;
 let attendanceMaintenanceTimer = null;
 const ATTENDANCE_FINE_PATCH_KEY = "attendanceFinePatchesV1";
+const ATTENDANCE_LOCKED_SNAPSHOT_KEY_PREFIX = "attendancePayrollSnapshotV1:";
+let attendanceLockedSnapshotMigrationInFlight = null;
+let attendanceLockedSnapshotMigrationTimer = null;
+
+function getAttendanceLockedSnapshotIdentity(period) {
+  return {
+    id: String(period?.id || "").trim(),
+    start: String(period?.start || "").trim(),
+    end: String(period?.end || "").trim(),
+  };
+}
+
+function getAttendanceLockedSnapshotKey(period) {
+  const identity = getAttendanceLockedSnapshotIdentity(period);
+  if (!identity.start || !identity.end) {
+    throw new Error("Kỳ lương đã khóa không hợp lệ.");
+  }
+  const hash = crypto.createHash("sha256")
+    .update(JSON.stringify(identity))
+    .digest("hex");
+  return `${ATTENDANCE_LOCKED_SNAPSHOT_KEY_PREFIX}${hash}`;
+}
+
+function getAttendanceLockedSnapshotDigest(snapshot) {
+  return crypto.createHash("sha256")
+    .update(JSON.stringify(snapshot))
+    .digest("hex");
+}
+
+function buildAttendanceLockedSnapshotRecord(period, snapshot = period?.payrollSnapshot) {
+  if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot)) {
+    throw new Error("Snapshot kỳ lương đã khóa không hợp lệ.");
+  }
+  return {
+    version: 1,
+    lock: getAttendanceLockedSnapshotIdentity(period),
+    digest: getAttendanceLockedSnapshotDigest(snapshot),
+    payrollSnapshot: snapshot,
+  };
+}
+
+function readAttendanceLockedSnapshotRecord(record, period) {
+  let stored;
+  try {
+    stored = typeof record?.value === "string" ? JSON.parse(record.value) : record?.value;
+  } catch {
+    throw new Error("Snapshot kỳ lương đã khóa không đọc được an toàn.");
+  }
+  if (!stored || typeof stored !== "object" || Array.isArray(stored)
+    || !stored.payrollSnapshot || typeof stored.payrollSnapshot !== "object"
+    || Array.isArray(stored.payrollSnapshot)) {
+    throw new Error("Snapshot kỳ lương đã khóa không hợp lệ.");
+  }
+  const expected = getAttendanceLockedSnapshotIdentity(period);
+  const actual = stored.lock && typeof stored.lock === "object" ? stored.lock : {};
+  if (String(actual.id || "") !== expected.id
+    || String(actual.start || "") !== expected.start
+    || String(actual.end || "") !== expected.end) {
+    throw new Error("Snapshot kỳ lương không khớp với kỳ đã khóa.");
+  }
+  const digest = getAttendanceLockedSnapshotDigest(stored.payrollSnapshot);
+  if (stored.digest && String(stored.digest) !== digest) {
+    throw new Error("Snapshot kỳ lương bị sai lệch dữ liệu.");
+  }
+  return stored.payrollSnapshot;
+}
+
+function toAttendanceLockedPeriodMetadata(period, snapshotKey = getAttendanceLockedSnapshotKey(period)) {
+  const { payrollSnapshot: _snapshot, ...metadata } = period || {};
+  return {
+    ...metadata,
+    snapshotKey,
+    snapshotStorageVersion: 1,
+  };
+}
 
 function normalizeAttendanceFinePatches(value) {
   const source = value === undefined ? {} : value;
@@ -30257,7 +30370,7 @@ function applyAttendanceFinePatches(data, patchValue) {
 
   // Exclude the retired penalty even while background withdrawal is waiting
   // for a lock, or if an older workstation creates it again.
-  return { ...(data || {}), extraFines: extraFines.filter(fine => !isPrepackShortfallFine(fine) && !isHandlingUnitShiftFine(fine)), fineOverrides, fineAuditLog };
+  return { ...(data || {}), extraFines: extraFines.filter(fine => !isPrepackShortfallFine(fine) && !isHandlingUnitShiftFine(fine) && !isEcommerceOrderFine(fine)), fineOverrides, fineAuditLog };
 }
 
 async function readAttendanceFinePatchRecord(client = prisma) {
@@ -30322,7 +30435,12 @@ async function getAttendanceCoreSnapshot() {
       const visibilityBoundary = cachedSnapshot?.nextFineVisibilityAt;
       const visibilityStillValid = !visibilityBoundary || Date.now() < visibilityBoundary;
       if (cachedSnapshot && revisionKey === cachedSnapshot.revision && visibilityStillValid) {
-        return { data: cachedSnapshot.data, updatedAt: cachedSnapshot.updatedAt, cached: true };
+        return {
+          data: cachedSnapshot.data,
+          updatedAt: cachedSnapshot.updatedAt,
+          cached: true,
+          hasInlinePayrollSnapshots: cachedSnapshot.hasInlinePayrollSnapshots === true,
+        };
       }
     }
 
@@ -30342,7 +30460,13 @@ async function getAttendanceCoreSnapshot() {
             FROM json_each(period_row) WHERE key <> 'payrollSnapshot'), '{}'::json))
           FROM json_array_elements(COALESCE(data->'lockedPeriods', '[]'::json)) AS period_row
         ), '[]'::json))
-      )::text AS "value", "updatedAt"
+      )::text AS "value",
+      EXISTS(
+        SELECT 1
+        FROM json_array_elements(COALESCE(data->'lockedPeriods', '[]'::json)) AS legacy_period
+        WHERE legacy_period::jsonb ? 'payrollSnapshot'
+      ) AS "hasInlinePayrollSnapshots",
+      "updatedAt"
       FROM source
     `),
       readAttendanceFinePatchRecord(),
@@ -30358,17 +30482,27 @@ async function getAttendanceCoreSnapshot() {
     // Background reconciliation still removes it from the shared ledger.
     data = applyAttendanceFinePatches(data, patchRecord.value);
     const nextFineVisibilityAt = nextPrematureFineVisibilityAt(data.extraFines);
+    const workdayPolicy = await workdayPolicyPromise;
     if (Array.isArray(data.extraFines)) {
       const now = new Date();
       data = {
         ...data,
-        extraFines: data.extraFines.filter((fine) => !isPrematureMissingScheduleFine(fine, now)),
+        extraFines: data.extraFines.filter((fine) => !isPrematureMissingScheduleFine(fine, now)
+          && !(workdayPolicy.isExcusedDailyWorkFine(fine, data))),
       };
     }
     const updatedAt = record?.updatedAt?.toISOString?.() || null;
     const revision = `${updatedAt || ""}|${patchRecord.updatedAt || ""}`;
-    attendanceCoreReadCache = { data, updatedAt, revision, nextFineVisibilityAt };
-    return { data, updatedAt, cached: false };
+    const hasInlinePayrollSnapshots = record?.hasInlinePayrollSnapshots === true
+      || record?.hasInlinePayrollSnapshots === "true";
+    attendanceCoreReadCache = {
+      data,
+      updatedAt,
+      revision,
+      nextFineVisibilityAt,
+      hasInlinePayrollSnapshots,
+    };
+    return { data, updatedAt, cached: false, hasInlinePayrollSnapshots };
   })();
   attendanceCoreReadInFlight = request;
   try {
@@ -30416,6 +30550,8 @@ async function getAttendanceDataSnapshot() {
     }
     data = applyAttendanceFinePatches(data, patchRecord.value);
     const updatedAt = record?.updatedAt?.toISOString() || null;
+    const workdayPolicy = await workdayPolicyPromise;
+    data.extraFines = data.extraFines.filter(fine => !workdayPolicy.isExcusedDailyWorkFine(fine, data));
     const revision = `${updatedAt || ""}|${patchRecord.updatedAt || ""}`;
     attendanceReadCache = { success: true, data, updatedAt, revision };
     attendanceCoreReadCache = {
@@ -30423,6 +30559,8 @@ async function getAttendanceDataSnapshot() {
       updatedAt,
       revision,
       nextFineVisibilityAt: nextPrematureFineVisibilityAt(data.extraFines),
+      hasInlinePayrollSnapshots: (Array.isArray(data.lockedPeriods) ? data.lockedPeriods : [])
+        .some((period) => Boolean(period?.payrollSnapshot)),
     };
     return { data, updatedAt, cached: false };
   })();
@@ -30447,13 +30585,6 @@ function startAttendanceMaintenance() {
       await maintainHandlingUnitShiftFines();
     } catch (error) {
       console.warn("[Handling-unit shift fines]", error.message);
-    }
-    try {
-      await enqueueAttendanceMaintenance("ecommerce", () => reconcileEcommerceOrderFines(getPrismaDirectTx(), { now: new Date() }));
-    } catch (error) {
-      console.warn("[Ecommerce Fines] Không đối soát được phạt đơn TMDT:", error.message);
-    } finally {
-      invalidateAttendanceSnapshotCaches();
     }
     try {
       await enqueueAttendanceReconcile({ now: new Date() });
@@ -30605,12 +30736,6 @@ ipcMain.handle("policies:getCurrent", async () => {
             configurablePerTask: true,
             escalatesByCycle: true,
           },
-          ecommerceOrderFine: {
-            overdueAmountPerOrder: 10000,
-            overdueSplitBetweenOfficialEmployees: 2,
-            mismatchNextDayAmountPerOrder: 10000,
-            mismatchNextDaySplitBetweenOfficialEmployees: 2,
-          },
           stockCheckMissingFine: {
             enabled: true,
             amount: 50000,
@@ -30643,8 +30768,19 @@ ipcMain.handle("attendance:getInitialData", async () => {
       attendanceMaintenanceTimer = setTimeout(() => {
         attendanceMaintenanceTimer = null;
         void startAttendanceMaintenance();
-      }, 2500);
+      // Keep all historical maintenance out of the first Attendance load.
+      // The initial sync may still be reconciling the current payroll and a
+      // large legacy snapshot migration may be running on another workstation.
+      // Maintenance is best-effort and can safely run after the user has had
+      // time to open the page.
+      }, 30000);
       attendanceMaintenanceTimer.unref?.();
+    }
+    // Existing installations may still keep frozen payroll statements inside
+    // attendanceData. Split them after first paint so future reads/writes no
+    // longer deserialize every historical period.
+    if (snapshot.hasInlinePayrollSnapshots) {
+      scheduleInlineLockedPayrollSnapshotMigration();
     }
     console.log(`[Perf] attendance:getInitialData ms=${Date.now() - startedAt} cached=${snapshot.cached}`);
     return {
@@ -30696,8 +30832,26 @@ ipcMain.handle("attendance:getLockedPeriodSnapshot", async (_event, payload = {}
       LIMIT 1
     `);
     const row = rows?.[0] || null;
-    const period = row?.period || null;
+    let period = row?.period || null;
+    if (typeof period === "string") {
+      try { period = JSON.parse(period); } catch { period = null; }
+    }
     if (!period) throw new Error("Không tìm thấy kỳ lương đã khóa trong dữ liệu hiện hành.");
+    const snapshotKey = String(period?.snapshotKey || "").trim();
+    if (snapshotKey) {
+      if (snapshotKey !== getAttendanceLockedSnapshotKey(period)) {
+        throw new Error("Khóa snapshot kỳ lương không hợp lệ.");
+      }
+      const snapshotRecord = await prisma.appConfig.findUnique({
+        where: { key: snapshotKey },
+        select: { value: true },
+      });
+      const payrollSnapshot = readAttendanceLockedSnapshotRecord(snapshotRecord, period);
+      period = { ...period, payrollSnapshot };
+    }
+    if (!period?.payrollSnapshot) {
+      throw new Error("Kỳ lương đã khóa chưa có snapshot lương an toàn.");
+    }
     const updatedAt = row?.updatedAt?.toISOString?.() || null;
     if (updatedAt) lockedPeriodSnapshotCache.set(cacheKey, { period, updatedAt });
     return { success: true, data: period, updatedAt, cached: false };
@@ -30719,16 +30873,18 @@ ipcMain.handle("attendance:updateWorkSchedule", async (_event, payload = {}) => 
     const session = String(payload.session || "").trim();
     const note = String(payload.note || "").trim().slice(0, 500);
     if (!Number.isInteger(empId) || empId <= 0) throw new Error("Nhân viên không hợp lệ.");
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new Error("Ngày làm việc không hợp lệ.");
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || getBangkokDateKey(`${date}T12:00:00+07:00`) !== date) throw new Error("Ngày làm việc không hợp lệ.");
     if (!["save", "clear"].includes(action)) throw new Error("Thao tác lịch làm không hợp lệ.");
     if (action === "save" && !["morning", "afternoon", "off"].includes(session)) throw new Error("Nhân viên thời vụ chỉ đăng ký một ca hoặc báo nghỉ.");
 
     const actor = await getCurrentActor();
-    const result = await enqueueAttendanceDataWrite(async () => getPrismaDirectTx().$transaction(async (tx) => {
-      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('attendanceData'))`;
-      const row = await tx.appConfig.findUnique({ where: { key: "attendanceData" } });
-      let attendanceData = {};
-      try { attendanceData = JSON.parse(row?.value || "{}"); } catch {}
+    const result = await enqueueAttendanceDataWrite(() => updateAttendanceBranches(
+      getPrismaDirectTx(), ["employees", "workSchedules"], attendanceData => {
+      if (!Array.isArray(attendanceData.employees)
+        || (attendanceData.workSchedules != null && !Array.isArray(attendanceData.workSchedules))) {
+        throw new Error("Dữ liệu lịch làm việc không hợp lệ. Chưa thực hiện thay đổi.");
+      }
+      if (isAttendanceDateLocked(attendanceData, date)) throw new Error("Kỳ lương chứa ngày này đã khóa. Admin phải mở khóa trước khi sửa lịch.");
       const employees = Array.isArray(attendanceData.employees) ? attendanceData.employees : [];
       const employee = employees.find((item) => Number(item?.id) === empId);
       if (!employee || employee.type !== "Seasonal") throw new Error("Chỉ nhân viên thời vụ mới được đăng ký ca.");
@@ -30759,15 +30915,14 @@ ipcMain.handle("attendance:updateWorkSchedule", async (_event, payload = {}) => 
         ...withoutDate,
         { id: `${empId}-${date}-${session}`, empId, date, session, note, createdAt: new Date().toISOString(), createdBy: actor.username },
       ];
-      const nextData = { ...attendanceData, workSchedules: nextSchedules };
-      await tx.appConfig.upsert({
-        where: { key: "attendanceData" },
-        update: { value: JSON.stringify(nextData) },
-        create: { key: "attendanceData", value: JSON.stringify(nextData) },
-      });
-      return { workSchedules: nextSchedules };
-    }, { isolationLevel: "Serializable", timeout: 10000, maxWait: 10000 }));
-    await enqueueAttendanceReconcile({ dateKey: date, now: new Date() });
+      return { patch: { workSchedules: nextSchedules }, result: { workSchedules: nextSchedules } };
+    }), { priority: true, maxQueueWaitMs: 3000 });
+    invalidateAttendanceSnapshotCaches();
+    // A committed declaration must not be reported as failed merely because
+    // best-effort fine maintenance later encounters a busy database.
+    void Promise.resolve().then(() => enqueueAttendanceReconcile({ dateKey: date, now: new Date() }))
+      .then(() => invalidateAttendanceSnapshotCaches())
+      .catch(error => console.warn("[Attendance Schedule] Chưa đối soát nền sau lưu lịch:", error.message));
     void logActivity({
       module: "attendance",
       action: "UPDATE_WORK_SCHEDULE",
@@ -30793,7 +30948,9 @@ ipcMain.handle("appConfig:get", async (event, key) => {
     }
     if (!prisma) throw new Error("Prisma not available");
     if (key === "attendanceData") {
-      const snapshot = await getAttendanceDataSnapshot();
+      // The generic configuration bridge is used by supporting screens and
+      // autosave merge checks. Never send all frozen payroll statements here.
+      const snapshot = await getAttendanceCoreSnapshot();
       return {
         success: true,
         data: snapshot.data,
@@ -30942,11 +31099,165 @@ function enqueueAttendanceMaintenance(key, work) {
   return task;
 }
 
+async function migrateInlineLockedPayrollSnapshots() {
+  const client = getPrismaDirectTx();
+  let lastConflict = null;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      // Read one legacy period only.  The old implementation parsed and
+      // rewrote all 10+ MB in one interactive transaction, which held the
+      // attendance advisory lock long enough to make normal payroll writes
+      // fail with 55P03/P2028.
+      const candidates = await client.$queryRaw(Prisma.sql`
+        SELECT period_row AS "period"
+        FROM "AppConfig",
+          jsonb_array_elements(
+            COALESCE(("value"::jsonb)->'lockedPeriods', '[]'::jsonb)
+          ) WITH ORDINALITY AS entries(period_row, period_index)
+        WHERE "key" = 'attendanceData'
+          AND period_row ? 'payrollSnapshot'
+        ORDER BY period_index
+        LIMIT 1
+      `);
+      let period = candidates?.[0]?.period || null;
+      if (typeof period === "string") {
+        try { period = JSON.parse(period); } catch { period = null; }
+      }
+      if (!period?.payrollSnapshot) return { migrated: false, skipped: "already_compact" };
+
+      const snapshotKey = getAttendanceLockedSnapshotKey(period);
+      const snapshotRecord = buildAttendanceLockedSnapshotRecord(period);
+      const existing = await client.appConfig.findUnique({
+        where: { key: snapshotKey },
+        select: { value: true },
+      });
+      if (existing) {
+        const storedSnapshot = readAttendanceLockedSnapshotRecord(existing, period);
+        if (getAttendanceLockedSnapshotDigest(storedSnapshot) !== snapshotRecord.digest) {
+          throw new Error("Snapshot kỳ lương hiện có không khớp. Chưa tách dữ liệu để tránh mất lịch sử.");
+        }
+      } else {
+        try {
+          // The snapshot is immutable and keyed by the lock identity.  If a
+          // second workstation wins the race, the unique-key conflict is
+          // harmless; it is verified on the next read below.
+          await client.appConfig.create({
+            data: { key: snapshotKey, value: JSON.stringify(snapshotRecord) },
+          });
+        } catch (error) {
+          const detail = `${String(error?.message || "")} ${String(error?.meta?.target || "")}`;
+          if (!/P2002|unique constraint|already exists/i.test(`${error?.code || ""} ${detail}`)) throw error;
+          const raced = await client.appConfig.findUnique({
+            where: { key: snapshotKey },
+            select: { value: true },
+          });
+          const storedSnapshot = readAttendanceLockedSnapshotRecord(raced, period);
+          if (getAttendanceLockedSnapshotDigest(storedSnapshot) !== snapshotRecord.digest) {
+            throw new Error("Snapshot kỳ lương hiện có không khớp. Chưa tách dữ liệu để tránh mất lịch sử.");
+          }
+        }
+      }
+
+      const result = await client.$transaction(async (tx) => {
+        await tx.$executeRaw`SET LOCAL statement_timeout = '8000ms'`;
+        const advisoryRows = await tx.$queryRaw(Prisma.sql`
+          SELECT pg_try_advisory_xact_lock(hashtext('attendanceData')) AS "locked"
+        `);
+        if (advisoryRows?.[0] && advisoryRows[0].locked === false) {
+          return { migrated: false, skipped: "lock_busy" };
+        }
+        const lockedRow = await tx.$queryRaw(Prisma.sql`
+          SELECT "id"
+          FROM "AppConfig"
+          WHERE "key" = 'attendanceData'
+          FOR UPDATE SKIP LOCKED
+        `);
+        if (!lockedRow?.length) return { migrated: false, skipped: "lock_busy" };
+
+        const updated = await tx.$queryRaw(Prisma.sql`
+          UPDATE "AppConfig"
+          SET "value" = jsonb_set(
+            COALESCE("value"::jsonb, '{}'::jsonb),
+            '{lockedPeriods}',
+            COALESCE((
+              SELECT jsonb_agg(
+                CASE
+                  WHEN period_row->>'start' = ${String(period.start || "")}
+                    AND period_row->>'end' = ${String(period.end || "")}
+                    AND (${String(period.id || "")} = '' OR period_row->>'id' = ${String(period.id || "")})
+                    AND period_row ? 'payrollSnapshot'
+                  THEN (period_row - 'payrollSnapshot')
+                    || jsonb_build_object('snapshotKey', ${snapshotKey}, 'snapshotStorageVersion', 1)
+                  ELSE period_row
+                END ORDER BY period_index
+              )
+              FROM jsonb_array_elements(
+                COALESCE("value"::jsonb->'lockedPeriods', '[]'::jsonb)
+              ) WITH ORDINALITY AS entries(period_row, period_index)
+            ), '[]'::jsonb), true
+          )::text,
+          "updatedAt" = CURRENT_TIMESTAMP
+          WHERE "key" = 'attendanceData'
+            AND EXISTS (
+              SELECT 1
+              FROM jsonb_array_elements(COALESCE("value"::jsonb->'lockedPeriods', '[]'::jsonb)) AS period_row
+              WHERE period_row->>'start' = ${String(period.start || "")}
+                AND period_row->>'end' = ${String(period.end || "")}
+                AND (${String(period.id || "")} = '' OR period_row->>'id' = ${String(period.id || "")})
+                AND period_row ? 'payrollSnapshot'
+            )
+          RETURNING "id"
+        `);
+        return updated?.length ? { migrated: true, count: 1 } : { migrated: false, skipped: "already_compact" };
+      }, { isolationLevel: "Serializable", timeout: 10000, maxWait: 2000 });
+      return result;
+    } catch (error) {
+      if (!isAttendanceFineDeleteRetryableError(error)) throw error;
+      lastConflict = error;
+      await waitForRetry(attempt);
+    }
+  }
+  throw lastConflict || new Error("Không thể tách snapshot lương lúc này.");
+}
+
+function scheduleInlineLockedPayrollSnapshotMigration(delayMs = 30000) {
+  if (attendanceLockedSnapshotMigrationInFlight || attendanceLockedSnapshotMigrationTimer) return;
+  attendanceLockedSnapshotMigrationTimer = setTimeout(() => {
+    attendanceLockedSnapshotMigrationTimer = null;
+    const task = enqueueAttendanceDataWrite(migrateInlineLockedPayrollSnapshots);
+    attendanceLockedSnapshotMigrationInFlight = task;
+    task.then((result) => {
+      if (result?.migrated) {
+        invalidateAttendanceSnapshotCaches();
+        console.info(`[Attendance] Tách ${result.count} snapshot lương đã khóa khỏi dữ liệu chung.`);
+        // Move one period per short transaction.  This keeps a large legacy
+        // document from monopolizing the shared attendance lock for minutes.
+        scheduleInlineLockedPayrollSnapshotMigration(1500);
+      } else if (result?.skipped === "lock_busy") {
+        // A different workstation owns the row.  Retry later without making
+        // the current Attendance screen wait or logging a raw 55P03 error.
+        scheduleInlineLockedPayrollSnapshotMigration(10000);
+      }
+    }).catch((error) => {
+      console.warn("[Attendance] Chưa thể tách snapshot lương cũ:", error.message);
+      scheduleInlineLockedPayrollSnapshotMigration(30000);
+    }).finally(() => {
+      if (attendanceLockedSnapshotMigrationInFlight === task) {
+        attendanceLockedSnapshotMigrationInFlight = null;
+      }
+    });
+  }, Math.max(1000, Number(delayMs) || 30000));
+  attendanceLockedSnapshotMigrationTimer.unref?.();
+}
+
 function isTransactionWriteConflict(error) {
-  return (
-    error?.code === "P2034" ||
-    /write conflict|deadlock|could not serialize/i.test(String(error?.message || ""))
-  );
+  const code = String(error?.code || "");
+  const nestedCode = String(error?.meta?.code || "");
+  const detail = `${String(error?.message || "")} ${String(error?.meta?.error || "")}`;
+  return ["P2034", "55P03", "40001", "40P01"].includes(code)
+    || ["55P03", "40001", "40P01"].includes(nestedCode)
+    || (code === "P2028" && /expired|timeout|timed out|already closed/i.test(detail))
+    || /write conflict|deadlock|could not serialize|lock timeout/i.test(detail);
 }
 
 function isAttendanceFineDeleteRetryableError(error) {
@@ -30966,6 +31277,7 @@ function isAttendanceAutosaveRetryableError(error) {
   return isTransactionWriteConflict(error)
     || error?.code === "P2028"
     || error?.code === "55P03"
+    || ["55P03", "40001", "40P01"].includes(String(error?.meta?.code || ""))
     || /lock timeout|transaction already closed|expired transaction/i.test(detail);
 }
 
@@ -30991,132 +31303,12 @@ ipcMain.handle("appConfig:set", async (event, key, value, expectedUpdatedAt) => 
     }
     let config;
     if (key === "attendanceData") {
-      config = await enqueueAttendanceDataWrite(async () => {
-        let lastConflict = null;
-        for (let attempt = 0; attempt < 5; attempt++) {
-          const transactionStartedAt = Date.now();
-          try {
-            const saved = await getPrismaDirectTx().$transaction(
-              async (tx) => {
-                // Waiting for another workstation's advisory lock counts toward
-                // Prisma's interactive transaction timeout. Retry a short lock
-                // wait in a fresh transaction instead of expiring mid-write.
-                await tx.$executeRaw`SET LOCAL lock_timeout = '7000ms'`;
-                await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('attendanceData'))`;
-                const current = await tx.appConfig.findUnique({ where: { key } });
-                let valueToSave = { ...(value || {}), employees: [] };
-                let currentValueForFineMerge = null;
-                if (current) {
-                  try {
-                    const patchRow = await tx.appConfig.findUnique({
-                      where: { key: ATTENDANCE_FINE_PATCH_KEY },
-                      select: { value: true },
-                    });
-                    const finePatches = parseAttendanceFinePatches(patchRow);
-                    const currentValue = applyAttendanceFinePatches(JSON.parse(current.value), finePatches);
-                    currentValueForFineMerge = currentValue;
-                    valueToSave = {
-                      ...(value || {}),
-                      employees: Array.isArray(currentValue?.employees)
-                        ? currentValue.employees
-                        : [],
-                      // Leave cells are mutated through the atomic attendance
-                      // API below; never accept a stale whole-page copy here.
-                      leaveRecords: Array.isArray(currentValue?.leaveRecords)
-                        ? currentValue.leaveRecords
-                        : [],
-                      // Work schedules are mutated through the atomic API.
-                      // Never let an older page snapshot undo a declaration.
-                      workSchedules: Array.isArray(currentValue?.workSchedules)
-                        ? currentValue.workSchedules
-                        : [],
-                      // Locks/snapshots and payroll overrides have dedicated
-                      // atomic APIs. A stale whole-page autosave must never
-                      // replace either authoritative value.
-                      lockedPeriods: Array.isArray(currentValue?.lockedPeriods)
-                        ? currentValue.lockedPeriods
-                        : [],
-                      payrollOverrides:
-                        currentValue?.payrollOverrides && typeof currentValue.payrollOverrides === "object"
-                          ? currentValue.payrollOverrides
-                          : {},
-                      // Automatic attendance waivers are written by the
-                      // reconciliation service, never by whole-page autosave.
-                      fineWaivers: Array.isArray(currentValue?.fineWaivers)
-                        ? currentValue.fineWaivers
-                        : [],
-                    };
-                    // A renderer opened before a schedule change can flush a
-                    // stale snapshot while closing. Keep the authoritative
-                    // schedule history in that case instead of reverting the
-                    // new hours in the shared attendance document.
-                    const incomingConfig = valueToSave?.config;
-                    const currentConfig = currentValue?.config;
-                    const currentScheduleHistory = Array.isArray(currentConfig?.scheduleHistory)
-                      ? currentConfig.scheduleHistory
-                      : [];
-                    const incomingScheduleHistory = Array.isArray(incomingConfig?.scheduleHistory)
-                      ? incomingConfig.scheduleHistory
-                      : [];
-                    const currentLatestSchedule = [...currentScheduleHistory]
-                      .filter((version) => version?.effectiveAt)
-                      .sort((left, right) => Date.parse(right.effectiveAt) - Date.parse(left.effectiveAt))[0];
-                    const incomingLatestSchedule = [...incomingScheduleHistory]
-                      .filter((version) => version?.effectiveAt)
-                      .sort((left, right) => Date.parse(right.effectiveAt) - Date.parse(left.effectiveAt))[0];
-                    const incomingScheduleIsStale = currentLatestSchedule && (
-                      !incomingLatestSchedule
-                      || Date.parse(incomingLatestSchedule.effectiveAt) < Date.parse(currentLatestSchedule.effectiveAt)
-                    );
-                    if (incomingConfig && currentConfig && incomingScheduleIsStale) {
-                      valueToSave.config = {
-                        ...incomingConfig,
-                        morningStart: currentConfig.morningStart,
-                        afternoonStart: currentConfig.afternoonStart,
-                        graceMinutes: currentConfig.graceMinutes,
-                        scheduleHistory: currentConfig.scheduleHistory,
-                      };
-                    }
-                  } catch (error) {
-                    if (error instanceof SyntaxError) {
-                      throw new Error("Dữ liệu chấm công hiện hành không hợp lệ. Chưa thực hiện thay đổi.");
-                    }
-                    throw error;
-                  }
-                }
-                if (currentValueForFineMerge) {
-                  const mergedFineLedger = mergeAttendanceFineLedger(currentValueForFineMerge, valueToSave);
-                  valueToSave = {
-                    ...valueToSave,
-                    ...mergedFineLedger,
-                  };
-                }
-                const serializedValue = JSON.stringify(valueToSave);
-                if (current?.value === serializedValue) return current;
-                return tx.appConfig.upsert({
-                  where: { key },
-                  update: { value: serializedValue },
-                  create: { key, value: serializedValue },
-                });
-              },
-              { isolationLevel: "Serializable", timeout: 25000, maxWait: 10000 },
-            );
-            console.info(`[Attendance autosave] attempt=${attempt + 1} transaction=${Date.now() - transactionStartedAt}ms`);
-            return saved;
-          } catch (error) {
-            if (!isAttendanceAutosaveRetryableError(error)
-              || attempt === 4
-              || (error?.code === "P2028" && attempt >= 2)) throw error;
-            lastConflict = error;
-            console.warn(`[Attendance autosave] retry=${attempt + 1} code=${error?.code || "lock_busy"} transaction=${Date.now() - transactionStartedAt}ms`);
-            await waitForRetry(attempt);
-          }
-        }
-        throw (
-          lastConflict ||
-          new Error("Dữ liệu chấm công đang được cập nhật ở máy khác. Hãy thử lại.")
-        );
-      });
+      config = await enqueueAttendanceDataWrite(() => saveAttendanceAutosave(getPrismaDirectTx(), value, {
+        parsePatches: parseAttendanceFinePatches,
+        applyPatches: applyAttendanceFinePatches,
+        mergeLedger: mergeAttendanceFineLedger,
+      }), { maxQueueWaitMs: 15000 });
+      invalidateAttendanceSnapshotCaches();
     } else {
       config = await getPrismaDirectTx().$transaction(async (tx) => {
         await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`app-config:${key}`}))`;
@@ -31144,14 +31336,17 @@ ipcMain.handle("appConfig:set", async (event, key, value, expectedUpdatedAt) => 
         });
       });
     }
-    if (policy.sensitive) {
-      await logActivity({
+    if (policy.sensitive && !config.unchanged) {
+      const audit = logActivity({
         module: "app_config",
         action: "UPDATE_SENSITIVE_CONFIG",
         description: `Updated sensitive configuration: ${key}`,
         recordName: key,
         severity: "WARNING",
       });
+      if (key === "attendanceData") {
+        void audit.catch(error => console.warn("Không thể ghi audit autosave bảng công:", error.message));
+      } else await audit;
     }
     console.log(`✅ Set config "${key}"`);
     return {
@@ -31767,6 +31962,7 @@ ipcMain.handle("attendance:updatePayrollLock", async (event, payload = {}) => {
     }
 
     let normalizedLock = null;
+    let normalizedPayrollSnapshot = null;
     if (action === "lock") {
       const snapshot = sourceLock?.payrollSnapshot;
       if (
@@ -31787,18 +31983,23 @@ ipcMain.handle("attendance:updatePayrollLock", async (event, payload = {}) => {
       if (snapshotBytes > 20 * 1024 * 1024) {
         throw new Error("Snapshot kỳ lương quá lớn để lưu an toàn.");
       }
-      normalizedLock = {
+      const lockBase = {
         id: String(sourceLock.id || `lock-${Date.now()}`).slice(0, 100),
         start: start.toISOString(),
         end: end.toISOString(),
         lockedAt: new Date().toISOString(),
         lockedBy: currentSession.username,
-        payrollSnapshot: {
-          ...snapshot,
-          version: 1,
-          capturedAt: String(snapshot.capturedAt || new Date().toISOString()),
-          capturedBy: currentSession.username,
-        },
+      };
+      normalizedPayrollSnapshot = {
+        ...snapshot,
+        version: 1,
+        capturedAt: String(snapshot.capturedAt || new Date().toISOString()),
+        capturedBy: currentSession.username,
+      };
+      normalizedLock = {
+        ...lockBase,
+        snapshotKey: getAttendanceLockedSnapshotKey(lockBase),
+        snapshotStorageVersion: 1,
       };
     }
 
@@ -31808,11 +32009,9 @@ ipcMain.handle("attendance:updatePayrollLock", async (event, payload = {}) => {
         try {
           return await getPrismaDirectTx().$transaction(
             async (tx) => {
-              // attendanceData contains frozen payroll snapshots and can be
-              // several megabytes.  Do not pull/parse/stringify the whole
-              // document in Node just to change lockedPeriods.  PostgreSQL
-              // updates that JSON path while the advisory lock protects the
-              // shared document from concurrent attendance writers.
+              // Keep only lock metadata in attendanceData. The immutable
+              // statement itself is a separate AppConfig record, so ordinary
+              // payroll reads never carry every older frozen period.
               await tx.$executeRaw`SET LOCAL lock_timeout = '3000ms'`;
               await tx.$executeRaw`SET LOCAL statement_timeout = '10000ms'`;
               await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('attendanceData'))`;
@@ -31838,6 +32037,27 @@ ipcMain.handle("attendance:updatePayrollLock", async (event, payload = {}) => {
               if (action === "lock") {
                 if (lockedPeriods.some(matchesPeriod)) {
                   throw new Error("Kỳ lương này đã được khóa.");
+                }
+                const snapshotRecord = buildAttendanceLockedSnapshotRecord(
+                  normalizedLock,
+                  normalizedPayrollSnapshot,
+                );
+                const existingSnapshot = await tx.appConfig.findUnique({
+                  where: { key: normalizedLock.snapshotKey },
+                  select: { value: true },
+                });
+                if (existingSnapshot) {
+                  const storedSnapshot = readAttendanceLockedSnapshotRecord(existingSnapshot, normalizedLock);
+                  if (getAttendanceLockedSnapshotDigest(storedSnapshot) !== snapshotRecord.digest) {
+                    throw new Error("Snapshot kỳ lương hiện có không khớp. Kỳ chưa được khóa.");
+                  }
+                } else {
+                  await tx.appConfig.create({
+                    data: {
+                      key: normalizedLock.snapshotKey,
+                      value: JSON.stringify(snapshotRecord),
+                    },
+                  });
                 }
                 nextLockedPeriods = [...lockedPeriods, normalizedLock];
               } else {
@@ -31925,7 +32145,7 @@ ipcMain.handle("attendance:updateLeaveStatus", async (event, payload = {}) => {
     if (!Number.isInteger(empId) || empId <= 0) {
       throw new Error("Nhân viên không hợp lệ.");
     }
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || getBangkokDateKey(`${date}T12:00:00+07:00`) !== date) {
       throw new Error("Ngày nghỉ không hợp lệ.");
     }
     if (!sessions.length || sessions.some((session) => !["morning", "afternoon"].includes(session))) {
@@ -31935,109 +32155,44 @@ ipcMain.handle("attendance:updateLeaveStatus", async (event, payload = {}) => {
       throw new Error("Trạng thái nghỉ không hợp lệ.");
     }
 
-    const result = await enqueueAttendanceDataWrite(async () => {
-      let lastConflict = null;
-      for (let attempt = 0; attempt < 5; attempt++) {
-        try {
-          return await getPrismaDirectTx().$transaction(
-            async (tx) => {
-              await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('attendanceData'))`;
-              const config = await tx.appConfig.findUnique({
-                where: { key: "attendanceData" },
-              });
-              let attendanceData = {};
-              try {
-                attendanceData = JSON.parse(config?.value || "{}");
-              } catch {}
+    const actor = { username: currentSession.username, fullName: currentSession.fullName };
+    const result = await enqueueAttendanceDataWrite(() =>
+      saveLeaveStatus(getPrismaDirectTx(), { empId, date, sessions, status, note }, {
+        actor, isDateLocked: isAttendanceDateLocked,
+      }), { priority: true, maxQueueWaitMs: 3000 });
 
-              if (isAttendanceDateLocked(attendanceData, date)) {
-                throw new Error("Kỳ lương chứa ngày này đã khóa. Admin phải mở khóa trước khi sửa nghỉ phép.");
-              }
+    invalidateAttendanceSnapshotCaches();
 
-              const currentLeaveRecords = Array.isArray(attendanceData.leaveRecords)
-                ? attendanceData.leaveRecords
-                : [];
-              const nextLeaveRecords = currentLeaveRecords.filter((leave) => !(
-                Number(leave?.empId) === empId &&
-                leave?.date === date &&
-                sessions.includes(leave?.session)
-              ));
+    evidencePenaltyReadCache = null;
+    void dispatchDailyTasks(getPrismaDirectTx(), { date, eligible: isEligibleStockCheckAssignee })
+      .catch(error => console.warn('[Attendance Leave] Chưa điều phối được công việc nền:', error.message));
+    if (date === getStockCheckTodayKey()) void dispatchCurrentStockChecksForLeave()
+      .catch(error => console.warn('[Attendance Leave] Chưa điều phối được kiểm hàng nền:', error.message));
 
-              if (status !== "clear") {
-                const now = new Date().toISOString();
-                for (const session of sessions) {
-                  nextLeaveRecords.push({
-                    id: `${empId}-${date}-${session}`,
-                    empId,
-                    date,
-                    session,
-                    exempt: status === "exempt",
-                    unpaid: status === "unpaid",
-                    note,
-                    createdAt: now,
-                    createdBy: currentSession.username,
-                  });
-                }
-              }
-
-              attendanceData = {
-                ...attendanceData,
-                leaveRecords: nextLeaveRecords,
-              };
-              await tx.appConfig.upsert({
-                where: { key: "attendanceData" },
-                update: { value: JSON.stringify(attendanceData) },
-                create: { key: "attendanceData", value: JSON.stringify(attendanceData) },
-              });
-              return { leaveRecords: nextLeaveRecords };
-            },
-            { isolationLevel: "Serializable", timeout: 10000, maxWait: 10000 },
-          );
-        } catch (error) {
-          if (!isTransactionWriteConflict(error)) throw error;
-          lastConflict = error;
-          await waitForRetry(attempt);
-        }
-      }
-      throw lastConflict || new Error("Dữ liệu nghỉ đang được cập nhật ở máy khác. Hãy thử lại.");
-    });
-
-    // A leave approval can restore an attendance streak and invalidate an
-    // already-created absence/late fine. Reconcile both ledgers immediately so
-    // the UI and payroll do not wait for the next page refresh.
-    try {
-      await reconcileLateAttendanceFines(getPrismaDirectTx(), { actor: "system" });
-    } catch (error) {
-      console.warn("[Attendance Leave] Không đối soát được miễn phạt sau khi lưu nghỉ:", error.message);
-    }
-    try {
-      await enqueueAttendanceReconcile({ dateKey: date, now: new Date() });
-    } catch (error) {
-      console.warn("[Attendance Leave] Không đối soát được phạt vắng sau khi lưu nghỉ:", error.message);
-    }
-    const refreshedConfig = await prisma.appConfig.findUnique({ where: { key: "attendanceData" } });
-    let refreshedData = {};
-    try {
-      refreshedData = JSON.parse(refreshedConfig?.value || "{}");
-    } catch {}
+    // Absence withdrawal is already committed with the leave above. Restore
+    // any derived streak/late-waiver benefits separately, without keeping the
+    // leave button waiting for a scan of all historical attendance records.
+    // Revoking an approval needs absence charges recalculated as well. The
+    // conditional withdrawal audit is not a permanent manual exemption.
+    void Promise.resolve().then(() => enqueueAttendanceReconcile({ dateKey: date, now: new Date() }))
+      .then(() => invalidateAttendanceSnapshotCaches())
+      .catch(error => console.warn("[Attendance Leave] Chưa đối soát phạt vắng nền:", error.message));
+    void Promise.resolve().then(() => reconcileLateAttendanceFines(getPrismaDirectTx(), { month: date.slice(0, 7), actor: "system", readOnlyProbe: true }))
+      .then(() => invalidateAttendanceSnapshotCaches())
+      .catch(error => console.warn("[Attendance Leave] Không đối soát được miễn phạt chuyên cần nền:", error.message));
 
     void logActivity({
       module: "attendance",
       action: "UPDATE_LEAVE_STATUS",
       description: `Cập nhật nghỉ ${date} (${sessions.join(", ")}) cho nhân viên #${empId}: ${status}`,
       recordName: `${empId}-${date}`,
-      userName: currentSession.username,
+      userName: actor.username,
       severity: "INFO",
     }).catch((error) => console.warn("Không thể ghi audit trạng thái nghỉ:", error.message));
 
     return {
       success: true,
-      data: {
-        ...result,
-        extraFines: Array.isArray(refreshedData.extraFines) ? refreshedData.extraFines : [],
-        fineWaivers: Array.isArray(refreshedData.fineWaivers) ? refreshedData.fineWaivers : [],
-        fineAuditLog: Array.isArray(refreshedData.fineAuditLog) ? refreshedData.fineAuditLog : [],
-      },
+      data: result,
     };
   } catch (error) {
     console.error("❌ attendance:updateLeaveStatus error:", error);
@@ -32087,69 +32242,34 @@ ipcMain.handle("attendance:updatePayrollOverride", async (event, payload = {}) =
     }
 
     const overrideKey = `${empId}_${periodKey}`;
-    const result = await enqueueAttendanceDataWrite(async () => {
-      let lastConflict = null;
-      for (let attempt = 0; attempt < 5; attempt++) {
-        try {
-          return await getPrismaDirectTx().$transaction(
-            async (tx) => {
-              await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('attendanceData'))`;
-              const config = await tx.appConfig.findUnique({
-                where: { key: "attendanceData" },
-              });
-              let attendanceData = {};
-              try {
-                attendanceData = JSON.parse(config?.value || "{}");
-              } catch {}
-
-              if (isAttendanceMonthLocked(attendanceData, periodKey)) {
-                throw new Error("Kỳ lương này đã khóa. Admin phải mở khóa trước khi điều chỉnh lương.");
-              }
-
-              const payrollOverrides = {
-                ...(attendanceData.payrollOverrides && typeof attendanceData.payrollOverrides === "object"
-                  ? attendanceData.payrollOverrides
-                  : {}),
-              };
-
-              let savedOverride = null;
-              if (clear) {
-                delete payrollOverrides[overrideKey];
-              } else {
-                savedOverride = {
-                  ...(payrollOverrides[overrideKey] || {}),
-                  ...normalizedPatch,
-                  updatedAt: new Date().toISOString(),
-                  updatedBy: currentSession.username,
-                };
-                payrollOverrides[overrideKey] = savedOverride;
-              }
-
-              attendanceData = { ...attendanceData, payrollOverrides };
-              await tx.appConfig.upsert({
-                where: { key: "attendanceData" },
-                update: { value: JSON.stringify(attendanceData) },
-                create: { key: "attendanceData", value: JSON.stringify(attendanceData) },
-              });
-              return { overrideKey, override: savedOverride };
-            },
-            { isolationLevel: "Serializable", timeout: 10000, maxWait: 10000 },
-          );
-        } catch (error) {
-          if (!isTransactionWriteConflict(error)) throw error;
-          lastConflict = error;
-          await waitForRetry(attempt);
+    const actor = { username: currentSession.username };
+    const result = await enqueueAttendanceDataWrite(() => updateAttendanceBranches(
+      getPrismaDirectTx(), ["payrollOverrides"], attendanceData => {
+        if (isAttendanceMonthLocked(attendanceData, periodKey)) {
+          throw new Error("Kỳ lương này đã khóa. Admin phải mở khóa trước khi điều chỉnh lương.");
         }
-      }
-      throw lastConflict || new Error("Điều chỉnh lương đang được cập nhật ở máy khác. Hãy thử lại.");
-    });
+        const current = attendanceData.payrollOverrides;
+        if (current != null && (typeof current !== "object" || Array.isArray(current))) {
+          throw new Error("Dữ liệu điều chỉnh lương không hợp lệ. Chưa thực hiện thay đổi.");
+        }
+        const payrollOverrides = { ...(current || {}) };
+        let savedOverride = null;
+        if (clear) delete payrollOverrides[overrideKey];
+        else {
+          savedOverride = { ...(payrollOverrides[overrideKey] || {}), ...normalizedPatch,
+            updatedAt: new Date().toISOString(), updatedBy: actor.username };
+          payrollOverrides[overrideKey] = savedOverride;
+        }
+        return { patch: { payrollOverrides }, result: { overrideKey, override: savedOverride } };
+      }), { priority: true, maxQueueWaitMs: 3000 });
+    invalidateAttendanceSnapshotCaches();
 
     void logActivity({
       module: "attendance",
       action: clear ? "CLEAR_PAYROLL_OVERRIDE" : "UPDATE_PAYROLL_OVERRIDE",
       description: `${clear ? "Xóa" : "Cập nhật"} điều chỉnh lương ${periodKey} cho nhân viên #${empId}`,
       recordName: overrideKey,
-      userName: currentSession.username,
+      userName: actor.username,
       severity: "WARNING",
     }).catch((error) => console.warn("Không thể ghi audit điều chỉnh lương:", error.message));
 
@@ -32175,6 +32295,26 @@ async function readStockCheckSessions() {
     where: { key: "stockCheckSessionsV2" },
   });
   return parseStockCheckSessionsFromConfig(record);
+}
+
+async function dispatchStockChecksForLeave(sessions, tx) {
+  const [policy, data, users] = await Promise.all([
+    workdayPolicyPromise, readWorkdayPolicy(tx),
+    tx.user.findMany({ where: { role: 'manager', status: 'active' },
+      select: { username: true, fullName: true, role: true, status: true, permissions: true } }),
+  ]);
+  return policy.planStockCheckLeaveDispatch(sessions, data, users, getStockCheckTodayKey(),
+    { eligible: isEligibleStockCheckAssignee });
+}
+
+async function dispatchCurrentStockChecksForLeave() {
+  return getPrismaDirectTx().$transaction(async tx => {
+    await lockStockCheckSessions(tx);
+    const record = await tx.appConfig.findUnique({ where: { key: 'stockCheckSessionsV2' } });
+    const dispatched = await dispatchStockChecksForLeave(parseStockCheckSessionsFromConfig(record), tx);
+    if (dispatched.changed) await writeStockCheckSessions(dispatched.sessions, tx);
+    return dispatched.changed;
+  }, { isolationLevel: 'Serializable', timeout: 10000, maxWait: 3000 });
 }
 
 function getStockCheckTodayKey() {
@@ -33244,7 +33384,9 @@ ipcMain.handle("stockCheck:getSessions", async (_event, options = {}) => {
           const record = await tx.appConfig.findUnique({
             where: { key: "stockCheckSessionsV2" },
           });
-          const storedSessions = parseStockCheckSessionsFromConfig(record);
+          const dispatched = await dispatchStockChecksForLeave(parseStockCheckSessionsFromConfig(record), tx);
+          const storedSessions = dispatched.sessions;
+          if (dispatched.changed) await writeStockCheckSessions(storedSessions, tx);
           const today = getStockCheckTodayKey();
           if (
             !TEMPORARY_DAILY_ONLY_MODE &&
@@ -33323,7 +33465,9 @@ ipcMain.handle("stockCheck:ensureDailySession", async (event, payload = {}) => {
         const record = await tx.appConfig.findUnique({
           where: { key: "stockCheckSessionsV2" },
         });
-        const storedSessions = parseStockCheckSessionsFromConfig(record);
+        const dispatched = await dispatchStockChecksForLeave(parseStockCheckSessionsFromConfig(record), tx);
+        const storedSessions = dispatched.sessions;
+        if (dispatched.changed) await writeStockCheckSessions(storedSessions, tx);
         if (
           !TEMPORARY_DAILY_ONLY_MODE &&
           storedSessions.some(
@@ -33358,6 +33502,8 @@ ipcMain.handle("stockCheck:ensureDailySession", async (event, payload = {}) => {
           };
         }
 
+        const dayPolicy = await readWorkdayPolicy(tx);
+        const workdayPolicy = await workdayPolicyPromise;
         const managers = (
           await tx.user.findMany({
             where: { role: "manager", status: "active" },
@@ -33371,6 +33517,7 @@ ipcMain.handle("stockCheck:ensureDailySession", async (event, payload = {}) => {
           })
         )
           .filter(isEligibleStockCheckAssignee)
+          .filter(user => !workdayPolicy.isApprovedDayOff(dayPolicy, user, today))
           .sort((a, b) =>
             String(a.username).localeCompare(String(b.username), "vi"),
           );
@@ -33531,7 +33678,9 @@ ipcMain.handle("stockCheck:createFullSession", async (event, payload = {}) => {
         const record = await tx.appConfig.findUnique({
           where: { key: "stockCheckSessionsV2" },
         });
-        const sessions = parseStockCheckSessionsFromConfig(record);
+        const dispatched = await dispatchStockChecksForLeave(parseStockCheckSessionsFromConfig(record), tx);
+        const sessions = dispatched.sessions;
+        if (dispatched.changed) await writeStockCheckSessions(sessions, tx);
         const existing = sessions.find(
           (session) => String(session?.id) === sessionId,
         );
@@ -33546,7 +33695,7 @@ ipcMain.handle("stockCheck:createFullSession", async (event, payload = {}) => {
           throw new Error("Phiên kiểm toàn bộ hôm nay đã được chốt.");
         }
 
-        const assignee = await tx.user.findUnique({
+        let assignee = await tx.user.findUnique({
           where: { username: assignedTo },
           select: {
             username: true,
@@ -33565,6 +33714,16 @@ ipcMain.handle("stockCheck:createFullSession", async (event, payload = {}) => {
           throw new Error(
             "Người phụ trách không hợp lệ, là tài khoản test, hoặc không còn được phân công vận hành.",
           );
+        }
+
+        const [dayPolicy, workdayPolicy] = await Promise.all([readWorkdayPolicy(tx), workdayPolicyPromise]);
+        if (workdayPolicy.isApprovedDayOff(dayPolicy, assignee, today)) {
+          const managers = await tx.user.findMany({ where: { role: 'manager', status: 'active' },
+            select: { username: true, fullName: true, role: true, status: true, permissions: true } });
+          assignee = managers.filter(isEligibleStockCheckAssignee)
+            .filter(user => !workdayPolicy.isApprovedDayOff(dayPolicy, user, today))
+            .sort((a, b) => a.username.localeCompare(b.username, 'vi'))[0];
+          if (!assignee) throw new Error('Không có quản lý đi làm phù hợp để điều phối phiên kiểm toàn bộ.');
         }
 
         const now = new Date();
@@ -33754,12 +33913,13 @@ ipcMain.handle(
           }
 
           const rejectedAt = new Date().toISOString();
-          const penaltyAmount = 50000;
+          const workdayPolicy = await workdayPolicyPromise;
+          const penaltyAmount = workdayPolicy.isApprovedDayOff(attendanceData, { empId: employee.id }, storedSession.date) ? 0 : 50000;
           const fineId = `stock-check-rejected:${sessionId}`;
           const extraFines = Array.isArray(attendanceData.extraFines)
             ? [...attendanceData.extraFines]
             : [];
-          if (!extraFines.some((fine) => String(fine?.id || "") === fineId)) {
+          if (penaltyAmount > 0 && !extraFines.some((fine) => String(fine?.id || "") === fineId)) {
             const periodKey = getBangkokDateKey(rejectedAt).slice(0, 7);
             if (periodKey && isAttendanceMonthLocked(attendanceData, periodKey)) {
               throw new Error(
@@ -33774,6 +33934,7 @@ ipcMain.handle(
               amount: penaltyAmount,
               date: rejectedAt,
               source: "stock_check_rejected",
+              workDate: storedSession.date,
               sessionId,
               rejectionReason: reason,
             });
@@ -40784,7 +40945,9 @@ ipcMain.handle(
         });
       } else {
         if (date) where.date = date;
-        else if (month) where.date = { startsWith: month }; // month: 'YYYY-MM'
+        // Never silently return all historical rows for an omitted filter.
+        // The caller must select a past month explicitly to read it.
+        else where.date = attendanceMonthRange(month || new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Bangkok' }).slice(0, 7));
         if (userId) where.userId = userId;
         [serverClock, logs] = await Promise.all([
           getAttendanceServerClock(),
@@ -41011,33 +41174,33 @@ ipcMain.handle(
   },
 );
 
-// Đối soát toàn bộ lịch sử để bù các khoản phạt đi muộn từng bị sót.
-ipcMain.handle("attendance:reconcileLateFines", async () => {
+// Interactive payroll reconciles only the selected month. Full historical
+// repair remains available to dedicated maintenance, not the page's load gate.
+ipcMain.handle("attendance:reconcileLateFines", async (_event, filters = {}) => {
   const startedAt = Date.now();
   try {
     requireRole("admin");
+    const month = filters.month || new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Bangkok' }).slice(0, 7);
+    const actor = currentSession.username;
+    attendanceMonthRange(month); // Reject malformed filters before any reads/writes.
     // Finish checkout charges before returning the ledger used for live
     // payroll; delayed maintenance alone can otherwise miss the first paint.
-    await enqueueAttendanceMaintenance("checkout", () => reconcileMissingCheckoutFines(getPrismaDirectTx()));
-    // Ecommerce overdue/mismatch fines are written by the maintenance loop as
-    // well, but that loop intentionally starts after the first paint. Run the
-    // small idempotent reconciliation in this explicit ledger refresh too so
-    // the Fines tab receives the new TMDT rows in the same response instead of
-    // requiring a second app reload.
-    await enqueueAttendanceMaintenance("ecommerce", () => reconcileEcommerceOrderFines(getPrismaDirectTx(), { now: new Date() }));
+    const checkout = await enqueueAttendanceMaintenance(`checkout:${month}`, () => reconcileMissingCheckoutFines(getPrismaDirectTx(), { month }));
+    if (checkout?.skipped === 'lock_busy') throw new Error('Bảng công đang được cập nhật ở máy khác. Chưa xác nhận đối soát; vui lòng thử lại.');
     const result = await reconcileLateAttendanceFines(getPrismaDirectTx(), {
+      month,
       useHistoricalRates: true,
       repairReconciledAmounts: true,
-      actor: currentSession.username,
+      actor,
       includeLedger: true,
       readOnlyProbe: true,
     });
     if (result.ledger) {
       const now = new Date();
-      result.ledger.extraFines = result.ledger.extraFines.filter(fine => !isPrematureMissingScheduleFine(fine, now) && !isPrepackShortfallFine(fine) && !isHandlingUnitShiftFine(fine));
+      result.ledger.extraFines = result.ledger.extraFines.filter(fine => !isPrematureMissingScheduleFine(fine, now) && !isPrepackShortfallFine(fine) && !isHandlingUnitShiftFine(fine) && !isEcommerceOrderFine(fine));
     }
     invalidateAttendanceSnapshotCaches();
-    console.log(`[Perf] attendance:reconcileLateFines ms=${Date.now() - startedAt} checked=${result.checked}`);
+    console.log(`[Perf] attendance:reconcileLateFines month=${month} ms=${Date.now() - startedAt} checked=${result.checked}`);
     return { success: true, data: result };
   } catch (err) {
     console.error("❌ attendance:reconcileLateFines error:", err.message);

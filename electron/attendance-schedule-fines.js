@@ -1,6 +1,8 @@
 const { addDays, isRestDay } = require('./attendance-rewards');
 const { loadResignedEmployeeCutoffs, isEmployeeResignedOn } = require('./employment-status');
 const { calculateCheckoutFinePlan, isCheckoutFine, readCheckoutDeletedIds, CHECKOUT_POLICY_EFFECTIVE_DATE } = require('./attendance-checkout-fines.cjs');
+const { attendanceLogDateWhere } = require('./attendance-log-scope.cjs');
+const { hasApprovedLeave, isExcusedAbsenceFine } = require('./attendance-leave-status.cjs');
 
 const MISSING_SCHEDULE_FINE = 100000;
 const PARTIAL_ATTENDANCE_FINE = 50000;
@@ -82,7 +84,7 @@ function absenceFineId(employeeId, dateKey, session) {
 
 function deletedFineIds(fineAuditLog) {
     return new Set((fineAuditLog || [])
-        .filter((entry) => entry?.action === 'delete' && entry?.before?.id)
+        .filter((entry) => entry?.action === 'delete' && !entry.leaveApproval && entry?.before?.id)
         .map((entry) => String(entry.before.id)));
 }
 
@@ -196,6 +198,14 @@ async function reconcileMissingSeasonalScheduleFinesLegacy(prisma, options = {})
                 ));
                 const scheduled = declaredSchedules.length > 0;
                 const existing = existingFines.find((fine) => String(fine?.id) === id);
+                if (hasApprovedLeave(leaveRecords, employee.id, dateKey, 'morning')
+                    && hasApprovedLeave(leaveRecords, employee.id, dateKey, 'afternoon')) {
+                    removed.push(...existingFines.filter(fine => Number(fine?.empId) === Number(employee.id)
+                        && fine?.source === 'attendance-schedule'
+                        && (fine.attendanceDate || String(fine.id || '').match(/-(\d{4}-\d{2}-\d{2})(?:-(morning|afternoon))?$/)?.[1]) === dateKey
+                        && isExcusedAbsenceFine(fine, leaveRecords)));
+                    continue;
+                }
                 if (scheduled) {
                     if (existing && existing.source === 'attendance-schedule') removed.push(existing);
                     if (new Date(evaluationNow).getTime() < dateAtBangkok(dateKey, CUTOFF_HOUR).getTime()) continue;
@@ -205,6 +215,11 @@ async function reconcileMissingSeasonalScheduleFinesLegacy(prisma, options = {})
                             ? logsForDate.some((log) => ['morning_in', 'morning_out'].includes(log.checkType))
                             : logsForDate.some((log) => ['afternoon_in', 'evening_out'].includes(log.checkType));
                         const absenceId = absenceFineId(employee.id, dateKey, declaration.session);
+                        if (hasApprovedLeave(leaveRecords, employee.id, dateKey, declaration.session)) {
+                            const absence = existingFines.find(fine => String(fine?.id) === absenceId);
+                            if (absence?.source === 'attendance-schedule') removed.push(absence);
+                            continue;
+                        }
                         if (attendedDeclaredSession
                             || existingFines.some((fine) => String(fine?.id) === absenceId)
                             || created.some((fine) => fine.id === absenceId)
@@ -369,9 +384,7 @@ async function readScheduleReconcileSnapshot(client, options, evaluationNow) {
         loadResignedEmployeeCutoffs(client),
         client.attendanceLog.findMany({
             where: {
-                date: options.dateKey
-                    ? String(options.dateKey)
-                    : { gte: options.checkoutOnly ? CHECKOUT_POLICY_EFFECTIVE_DATE : POLICY_EFFECTIVE_DATE, lte: latestLogDate },
+                date: attendanceLogDateWhere(options, { gte: options.checkoutOnly ? CHECKOUT_POLICY_EFFECTIVE_DATE : POLICY_EFFECTIVE_DATE, lte: latestLogDate }),
                 checkType: { in: ['morning_in', 'morning_out', 'afternoon_in', 'evening_out'] },
             },
             select: { faceId: true, userName: true, date: true, timestamp: true, checkType: true },
@@ -412,6 +425,14 @@ function calculateScheduleReconcileResult(attendanceData, resignedCutoffs, logs,
             const declaredSchedules = schedules.filter((schedule) => Number(schedule?.empId) === Number(employee.id) && schedule?.date === dateKey);
             const scheduled = declaredSchedules.length > 0;
             const existing = existingFines.find((fine) => String(fine?.id) === id);
+            if (hasApprovedLeave(leaveRecords, employee.id, dateKey, 'morning')
+                && hasApprovedLeave(leaveRecords, employee.id, dateKey, 'afternoon')) {
+                removed.push(...existingFines.filter(fine => Number(fine?.empId) === Number(employee.id)
+                    && fine?.source === 'attendance-schedule'
+                    && (fine.attendanceDate || String(fine.id || '').match(/-(\d{4}-\d{2}-\d{2})(?:-(morning|afternoon))?$/)?.[1]) === dateKey
+                    && isExcusedAbsenceFine(fine, leaveRecords)));
+                continue;
+            }
             if (scheduled) {
                 if (existing && existing.source === 'attendance-schedule') removed.push(existing);
                 if (nowMs < dateAtBangkok(dateKey, CUTOFF_HOUR).getTime()) continue;
@@ -421,6 +442,11 @@ function calculateScheduleReconcileResult(attendanceData, resignedCutoffs, logs,
                         ? logsForDate.some((log) => ['morning_in', 'morning_out'].includes(log.checkType))
                         : logsForDate.some((log) => ['afternoon_in', 'evening_out'].includes(log.checkType));
                     const absenceId = absenceFineId(employee.id, dateKey, declaration.session);
+                    if (hasApprovedLeave(leaveRecords, employee.id, dateKey, declaration.session)) {
+                        const absence = existingFines.find(fine => String(fine?.id) === absenceId);
+                        if (absence?.source === 'attendance-schedule') removed.push(absence);
+                        continue;
+                    }
                     if (attendedDeclaredSession || existingFines.some((fine) => String(fine?.id) === absenceId) || created.some((fine) => fine.id === absenceId) || deletedIds.has(absenceId)) continue;
                     const [year, month, day] = dateKey.split('-');
                     created.push({
@@ -525,22 +551,42 @@ async function reconcileMissingSeasonalScheduleFinesFast(prisma, options = {}) {
         const transactionStartedAt = Date.now();
         try {
             const saved = await prisma.$transaction(async (tx) => {
-                await tx.$executeRaw`SET LOCAL lock_timeout = '700ms'`;
+                // This is best-effort maintenance.  A user edit may already
+                // own the attendance row on another workstation; SKIP LOCKED
+                // lets this pass yield immediately instead of surfacing a
+                // Prisma 55P03 lock-timeout error.
                 await tx.$executeRaw`SET LOCAL statement_timeout = '8000ms'`;
                 const rows = await tx.$queryRaw`
                     SELECT CURRENT_TIMESTAMP AS "checkoutNow", "value"::json->'extraFines' AS "extraFines",
                            "value"::json->'fineAuditLog' AS "fineAuditLog",
+                           "value"::json->'leaveRecords' AS "leaveRecords",
                            (SELECT json_agg(json_build_object('start', period->'start', 'end', period->'end'))
                             FROM json_array_elements(CASE WHEN json_typeof("value"::json->'lockedPeriods') = 'array' THEN "value"::json->'lockedPeriods' ELSE '[]'::json END) AS period) AS "checkoutLockedRanges"
-                    FROM "AppConfig" WHERE "key" = 'attendanceData' FOR UPDATE NOWAIT
+                    FROM "AppConfig" WHERE "key" = 'attendanceData' FOR UPDATE SKIP LOCKED
                 `;
+                if (!rows?.length) return { skipped: 'lock_busy' };
+                for (const key of ['extraFines', 'fineAuditLog', 'leaveRecords']) {
+                    if (rows[0][key] != null && !Array.isArray(rows[0][key])) {
+                        throw new Error(`Dữ liệu ${key} không hợp lệ. Chưa đối soát phạt.`);
+                    }
+                }
                 const currentFines = Array.isArray(rows?.[0]?.extraFines) ? rows[0].extraFines : [];
                 const currentAudit = Array.isArray(rows?.[0]?.fineAuditLog) ? rows[0].fineAuditLog : [];
+                const currentLeaves = rows?.[0]?.leaveRecords ?? [];
+                if (!Array.isArray(currentLeaves)) throw new Error('Dữ liệu nghỉ không hợp lệ. Chưa đối soát phạt.');
+                // A leave may be approved after the scan but before this row
+                // lock. Do not let the stale no-show plan recreate its charge.
+                const freshPlan = calculateScheduleReconcileResult({ ...snapshot.attendanceData,
+                    extraFines: currentFines, fineAuditLog: currentAudit, leaveRecords: currentLeaves },
+                    snapshot.resignedCutoffs, snapshot.logs, options, evaluationNow);
+                result.created = freshPlan.created.filter(fine => !isExcusedAbsenceFine(fine, currentLeaves));
+                result.removed = freshPlan.removed;
+                result.updated = freshPlan.updated;
                 // Recheck checkout under the ledger lock: an admin correction
                 // between the initial scan and the write must not create a fine.
                 if (result.created.some(isCheckoutFine) || result.removed.some(isCheckoutFine)) {
                     const freshLogs = await tx.attendanceLog.findMany({
-                        where: { date: options.dateKey ? String(options.dateKey) : { gte: CHECKOUT_POLICY_EFFECTIVE_DATE, lte: dateKeyFromTimestamp(evaluationNow) },
+                        where: { date: attendanceLogDateWhere(options, { gte: CHECKOUT_POLICY_EFFECTIVE_DATE, lte: dateKeyFromTimestamp(evaluationNow) }),
                             checkType: { in: ['morning_in', 'morning_out', 'afternoon_in', 'evening_out'] } },
                         select: { faceId: true, userName: true, date: true, timestamp: true, checkType: true },
                     });
@@ -577,6 +623,7 @@ async function reconcileMissingSeasonalScheduleFinesFast(prisma, options = {}) {
                 return true;
             }, { isolationLevel: 'Serializable', timeout: 20000, maxWait: 5000 });
             console.info(`[Attendance Schedule] attempt=${attempt + 1} transaction=${Date.now() - transactionStartedAt}ms created=${result.created.length} removed=${result.removed.length} updated=${result.updated.length}`);
+            if (saved?.skipped) return { created: [], removed: [], updated: [], checked: result.checked, skipped: saved.skipped };
             return result;
         } catch (error) {
             if (!isRetryableReconcileError(error) || attempt === 2) {

@@ -171,11 +171,16 @@ async function reconcileShiftFines(prisma, { now = new Date() } = {}) {
   const result = await reconcileWithdrawnFines(prisma, isHandlingUnitShiftFine,
     'Tạm ngừng phạt chưa kiểm kiện cuối ca theo yêu cầu quản lý.', { now });
   if (!prisma?.$transaction) return result;
+  if (result?.skipped === 'lock_busy') return result;
   // Duties still carry over normally. This transaction touches only the
   // checklist ledger, never a full attendance/payroll document.
-  await prisma.$transaction(async (tx) => {
-    await tx.$executeRaw`SET LOCAL lock_timeout = '1000ms'`;
-    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${LEDGER_KEY}))`;
+  try {
+    await prisma.$transaction(async (tx) => {
+    await tx.$executeRaw`SET LOCAL statement_timeout = '8000ms'`;
+    if (typeof tx.$queryRaw === 'function') {
+      const locks = await tx.$queryRaw`SELECT pg_try_advisory_xact_lock(hashtext(${LEDGER_KEY})) AS "locked"`;
+      if (locks?.[0] && locks[0].locked === false) return;
+    }
     const ledgerRow = await tx.appConfig.findUnique({ where: { key: LEDGER_KEY } });
     const ledger = parseLedger(ledgerRow);
     // Introduce pre-existing pending packages on observation, never backdate
@@ -190,7 +195,15 @@ async function reconcileShiftFines(prisma, { now = new Date() } = {}) {
     if (ledgerRow?.value !== ledgerValue) {
       await tx.appConfig.upsert({ where: { key: LEDGER_KEY }, create: { key: LEDGER_KEY, value: ledgerValue }, update: { value: ledgerValue } });
     }
-  }, { isolationLevel: 'Serializable', timeout: 15000, maxWait: 10000 });
+    }, { isolationLevel: 'Serializable', timeout: 15000, maxWait: 10000 });
+  } catch (error) {
+    const message = String(error?.message || '');
+    const code = String(error?.code || error?.meta?.code || '');
+    if (code === '55P03' || /lock timeout|could not obtain lock/i.test(message)) {
+      return { ...result, skipped: 'lock_busy' };
+    }
+    throw error;
+  }
   return { ...result, skipped: 'policy_paused' };
 }
 

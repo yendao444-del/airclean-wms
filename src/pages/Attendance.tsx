@@ -1,6 +1,7 @@
 import { useState, useMemo, useCallback, useRef, useEffect, useTransition, forwardRef, useImperativeHandle, cloneElement, isValidElement } from 'react';
 import AttendancePackingChart from '../components/AttendancePackingChart';
 import { groupPayslipFines } from '../lib/payslipFineGroups';
+import { isApprovedDayOff, isExcusedDailyWorkFine, dailyFineWorkDate } from '../../electron/attendance-workday-policy.mjs';
 import { awaitPackingRequest, packingRequestIdentity } from '../lib/packingRequest';
 import { Medal } from '@phosphor-icons/react';
 import { useCurrentUser } from '../lib/hooks/useCurrentUser';
@@ -217,6 +218,9 @@ interface FineRecord {
     amount: number;
     date?: string; // ISO string — ngày tạo phạt
     attendanceDate?: string;
+    workDate?: string;
+    dueAt?: string;
+    taskType?: string;
     source?: string; // nguồn tạo phạt
     disabled?: boolean;
     taskId?: number | string;
@@ -226,6 +230,7 @@ interface FineRecord {
     multiplier?: number;
     rejectionReason?: string;
 }
+
 
 // Payroll periods follow the business date of a penalty. Automatic TMDT
 // fines also carry `date` (when the system discovered them) for audit/history,
@@ -298,7 +303,7 @@ const getFineRecordKeys = (fine: Partial<FineRecord> | undefined) => {
 
 const getDeletedFineKeys = (logs: any[] = []) => {
     const deletedKeys = new Set<string>(logs
-        .filter(log => log?.action === 'delete' && log?.before)
+        .filter(log => log?.action === 'delete' && !log.leaveApproval && log?.before)
         .flatMap(log => getFineRecordKeys(log.before))
         .filter(Boolean));
     // A deliberate restoration is the only operation allowed to clear a
@@ -339,7 +344,7 @@ const mergeFinesWithDeletes = (
         const deleted = getFineRecordKeys(fineWithId).some(item => deletedKeys.has(item));
         // Schedule fines are generated and withdrawn by the server. A stale
         // renderer snapshot must not recreate one the reconciliation removed.
-        if (['attendance-schedule', 'attendance-missing-checkout'].includes(fine.source || '') && !merged.has(key)) return;
+        if (['attendance-schedule', 'attendance-official-absence', 'attendance-missing-checkout'].includes(fine.source || '') && !merged.has(key)) return;
         // A stale renderer must not overwrite a fine that was edited in the DB.
         // A local record wins only when this snapshot also contains a new audit action for it.
         if (key && !deleted && (!merged.has(key) || snapshotHasNewChange(fineWithId))) {
@@ -503,6 +508,7 @@ interface LockedPeriod {
     end: string;   // ISO — cuối kỳ
     lockedAt: string;
     lockedBy: string;
+    snapshotKey?: string;
     payrollSnapshot?: LockedPayrollSnapshot;
 }
 
@@ -944,6 +950,13 @@ const normalizeAttendanceText = (value?: string | null) =>
         .trim();
 
 const isTemporarilyExcludedFine = (fine: Partial<FineRecord>) => {
+    // Exclude retired export penalties from live payroll, including stale
+    // local snapshots. Frozen payroll statements retain their original rows.
+    if (['ecommerce_overdue', 'ecommerce_mismatch'].includes(fine.source || '')
+        || /^fine-ecommerce-(overdue|mismatch)-/.test(String(fine.id || ''))
+        || ['đơn tmdt trễ hạn', 'đơn tmdt trễ hẹn', 'đơn tmdt cần kiểm tra quá ngày',
+            'đơn tmđt trễ hạn', 'đơn tmđt trễ hẹn', 'đơn tmđt cần kiểm tra quá ngày']
+            .includes(String(fine.type || '').trim().toLocaleLowerCase('vi-VN'))) return true;
     if (fine.source === 'prepack-shortfall'
         || String(fine.id || '').startsWith('fine-prepack-shortfall-')
         || String(fine.type || '').trim().toLocaleLowerCase('vi-VN') === 'thiếu đóng gói sẵn') return true;
@@ -2079,11 +2092,13 @@ const InlineLeavePopover = ({
     session: LeaveSession;
     request?: LeaveRequest;
     isDue: boolean;
-    onSave: (action: 'save' | 'clear' | 'unpaid' | 'exempt', scope: LeaveSession | 'full_day', note: string) => void;
+    onSave: (action: 'save' | 'clear' | 'unpaid' | 'exempt', scope: LeaveSession | 'full_day', note: string) => Promise<boolean>;
     children: React.ReactNode;
 }) => {
     const [open, setOpen] = useState(false);
     const [note, setNote] = useState(request?.note || '');
+    const [saving, setSaving] = useState(false);
+    const savingRef = useRef(false);
 
     useEffect(() => {
         if (open) {
@@ -2091,9 +2106,16 @@ const InlineLeavePopover = ({
         }
     }, [open, request]);
 
-    const handleAction = (action: 'save' | 'clear' | 'unpaid' | 'exempt', scope: LeaveSession | 'full_day') => {
-        onSave(action, scope, note);
-        setOpen(false);
+    const handleAction = async (action: 'save' | 'clear' | 'unpaid' | 'exempt', scope: LeaveSession | 'full_day') => {
+        if (savingRef.current) return;
+        savingRef.current = true;
+        setSaving(true);
+        try {
+            if (await onSave(action, scope, note)) setOpen(false);
+        } finally {
+            savingRef.current = false;
+            setSaving(false);
+        }
     };
 
     const sessionLabel = session === 'morning' ? 'Ca sáng' : 'Ca chiều';
@@ -2102,7 +2124,7 @@ const InlineLeavePopover = ({
         <div style={{ width: 210, padding: '2px 0' }} onClick={(e) => e.stopPropagation()}>
             <div style={{ fontSize: 12, fontWeight: 800, color: '#1e293b', marginBottom: 8, padding: '0 4px', display: 'flex', alignItems: 'center', gap: 6 }}>
                 <CalendarOutlined style={{ color: '#1677ff', fontSize: 13 }} />
-                <span>Nghỉ phép: {emp.name}</span>
+                <span>{saving ? 'Đang lưu nghỉ và cập nhật phạt…' : `Nghỉ phép: ${emp.name}`}</span>
             </div>
 
             <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
@@ -2111,6 +2133,7 @@ const InlineLeavePopover = ({
                     size="small"
                     style={{ background: '#1677ff', color: '#fff', border: 'none', height: 26, fontSize: 11, fontWeight: 700, borderRadius: 4, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 4 }}
                     onClick={() => handleAction('save', session)}
+                    disabled={saving}
                 >
                     Nghỉ có phép {sessionLabel}
                 </Button>
@@ -2118,6 +2141,7 @@ const InlineLeavePopover = ({
                     size="small"
                     style={{ background: '#e6f4ff', color: '#1677ff', border: '1px solid #91caff', height: 26, fontSize: 11, fontWeight: 700, borderRadius: 4, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 4 }}
                     onClick={() => handleAction('save', 'full_day')}
+                    disabled={saving}
                 >
                     Nghỉ có phép cả ngày
                 </Button>
@@ -2125,6 +2149,7 @@ const InlineLeavePopover = ({
                     size="small"
                     style={{ background: '#fff1f0', color: '#a8071a', border: '1px solid #ff7875', height: 26, fontSize: 11, fontWeight: 700, borderRadius: 4, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 4 }}
                     onClick={() => handleAction('unpaid', session)}
+                    disabled={saving}
                 >
                     Nghỉ không phép {sessionLabel}
                 </Button>
@@ -2132,6 +2157,7 @@ const InlineLeavePopover = ({
                     size="small"
                     style={{ background: '#fff2e8', color: '#ad2102', border: '1px solid #ffbb96', height: 26, fontSize: 11, fontWeight: 700, borderRadius: 4, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 4 }}
                     onClick={() => handleAction('unpaid', 'full_day')}
+                    disabled={saving}
                 >
                     Nghỉ không phép cả ngày
                 </Button>
@@ -2139,6 +2165,7 @@ const InlineLeavePopover = ({
                     size="small"
                     style={{ background: '#ecfeff', color: '#0891b2', border: '1px solid #67e8f9', height: 26, fontSize: 11, fontWeight: 700, borderRadius: 4, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 4 }}
                     onClick={() => handleAction('exempt', session)}
+                    disabled={saving}
                 >
                     Miễn trừ {sessionLabel}
                 </Button>
@@ -2146,6 +2173,7 @@ const InlineLeavePopover = ({
                     size="small"
                     style={{ background: '#f0fdfa', color: '#0f766e', border: '1px solid #5eead4', height: 26, fontSize: 11, fontWeight: 700, borderRadius: 4, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 4 }}
                     onClick={() => handleAction('exempt', 'full_day')}
+                    disabled={saving}
                 >
                     Miễn trừ cả ngày
                 </Button>
@@ -2155,6 +2183,7 @@ const InlineLeavePopover = ({
                         size="small"
                         style={{ background: '#fff0f0', color: '#ff4d4f', border: '1px solid #ffccc7', height: 26, fontSize: 11, fontWeight: 700, borderRadius: 4, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 4 }}
                         onClick={() => handleAction('clear', session)}
+                        disabled={saving}
                     >
                         ❌ Xóa lịch xin nghỉ
                     </Button>
@@ -2169,6 +2198,7 @@ const InlineLeavePopover = ({
                     <Input
                         size="small"
                         placeholder="Lý do..."
+                        disabled={saving}
                         value={note}
                         onChange={(e) => setNote(e.target.value)}
                         style={{ fontSize: 11, height: 24, borderRadius: 4, flex: 1 }}
@@ -2178,6 +2208,7 @@ const InlineLeavePopover = ({
                         size="small"
                         style={{ background: '#10b981', borderColor: '#10b981', color: '#fff', height: 24, fontSize: 11, fontWeight: 700, borderRadius: 4, padding: '0 8px' }}
                         onClick={() => handleAction('save', session)}
+                        loading={saving}
                     >
                         Lưu
                     </Button>
@@ -2202,6 +2233,7 @@ const InlineLeavePopover = ({
                 onClick={(event) => {
                     event.preventDefault();
                     event.stopPropagation();
+                    if (savingRef.current) return;
                     setOpen(current => !current);
                 }}
             >{children}</span>
@@ -4224,6 +4256,7 @@ export default function Attendance() {
     const [isCoreSnapshotReady, setIsCoreSnapshotReady] = useState(false);
     const payrollLoadStartedAt = useRef(performance.now());
     const [isBackgroundSyncComplete, setIsBackgroundSyncComplete] = useState(false);
+    const [backgroundSyncError, setBackgroundSyncError] = useState('');
     const [systemUsernames, setSystemUsernames] = useState<string[]>([]);
     const [systemUsers, setSystemUsers] = useState<any[]>([]);
 
@@ -4685,6 +4718,7 @@ export default function Attendance() {
     // chỉ không bắt toàn bộ giao diện phải chờ quét lịch sử chấm công.
     useEffect(() => {
         if (!isCoreSnapshotReady) return;
+        setBackgroundSyncError('');
         if (isAttendanceUiTest) {
             setIsBackgroundSyncComplete(true);
             return;
@@ -4698,6 +4732,7 @@ export default function Attendance() {
         }
         let cancelled = false;
         const syncStartedAt = performance.now();
+        let syncSucceeded = false;
         setIsBackgroundSyncComplete(false);
         const syncTask = (async () => {
             // The fresh core snapshot is already committed. Reconciliation
@@ -4706,21 +4741,25 @@ export default function Attendance() {
             const api = (window as any).electronAPI;
             try {
                 let dbFines = extraFinesRef.current;
+                let dbFineWaivers = fineWaivers;
                 let dbAuditLog = fineAuditLogStateRef.current;
 
                 if (isAdmin && api.attendance?.reconcileLateFines) {
                     const reconcileStartedAt = performance.now();
-                    const reconcileResult = await api.attendance.reconcileLateFines();
+                    const reconcileResult = await api.attendance.reconcileLateFines({ month: overviewDateRange[0].format('YYYY-MM') });
                     console.info('[Attendance:load] late-fine reconcile ms:', Math.round(performance.now() - reconcileStartedAt));
                     if (!reconcileResult?.success) {
-                        console.error('Lỗi đối soát phạt điểm danh:', reconcileResult?.error);
+                        throw new Error(reconcileResult?.error || 'Không đối soát được số liệu lương mới nhất.');
                     } else if (Array.isArray(reconcileResult.data?.ledger?.extraFines)
                         && Array.isArray(reconcileResult.data?.ledger?.fineAuditLog)) {
                         // The ledger is from the committed reconciliation snapshot;
                         // avoid reading the large attendance document a second time.
                         dbFines = reconcileResult.data.ledger.extraFines;
+                        if (Array.isArray(reconcileResult.data.ledger.fineWaivers)) {
+                            dbFineWaivers = reconcileResult.data.ledger.fineWaivers;
+                        }
                         dbAuditLog = reconcileResult.data.ledger.fineAuditLog;
-                    }
+                    } else throw new Error('Đối soát chưa trả về số liệu lương đã xác nhận.');
                 }
 
                 if (cancelled) return;
@@ -4743,9 +4782,11 @@ export default function Attendance() {
                     startBackgroundTransition(() => {
                         setFineAuditLog(mergedAuditLog);
                         setExtraFines(mergedFines);
+                        setFineWaivers(dbFineWaivers);
                     });
                 };
                 publishLedger(dbFines);
+                syncSucceeded = true;
                 if (dbFines.some((fine) => fine?.source === 'returns')) {
                     void normalizeReturnFineDates(api, dbFines)
                         .then((normalized) => {
@@ -4755,9 +4796,10 @@ export default function Attendance() {
                 }
             } catch (err) {
                 console.error('Lỗi đồng bộ nền dữ liệu chấm công:', err);
+                if (!cancelled) setBackgroundSyncError(err instanceof Error ? err.message : 'Không đồng bộ được bảng công.');
             } finally {
                 if (!cancelled) {
-                    setIsBackgroundSyncComplete(true);
+                    setIsBackgroundSyncComplete(syncSucceeded);
                     console.info('[Attendance:load] background sync ready ms:', Math.round(performance.now() - syncStartedAt));
                 }
             }
@@ -4767,7 +4809,7 @@ export default function Attendance() {
         return () => {
             cancelled = true;
         };
-    }, [isAdmin, isAttendanceUiTest, isCoreSnapshotReady, isSelectedPeriodLocked]);
+    }, [isAdmin, isAttendanceUiTest, isCoreSnapshotReady, isSelectedPeriodLocked, overviewDateRange[0].format('YYYY-MM'), attendanceRewardRefreshKey]);
 
     const saveAttendanceSnapshot = useCallback(async (snapshot: Record<string, any>) => {
         // Mọi đường ghi đều xếp sau đối soát để không thể ghi snapshot cũ đè kết quả nền.
@@ -6154,7 +6196,7 @@ export default function Attendance() {
                 matchTaskAssigneeToEmployee(penalty.assignee, emp)
                 || (account && matchTaskAssigneeToEmployee(account.fullName, emp))
             );
-            if (!employee) return [];
+            if (!employee || isExcusedDailyWorkFine({ ...penalty, empId: employee.id }, { employees, leaveRecords })) return [];
             if (account?.employmentStatus === 'resigned'
                 && account.resignationDate
                 && !penaltyAt.isBefore(dayjs(account.resignationDate), 'day')) return [];
@@ -6166,6 +6208,9 @@ export default function Attendance() {
                 amount: Number(penalty.amount) || 0,
                 date: penaltyAt.toISOString(),
                 source: (penalty.source || 'daily_task_evidence_overdue') as any,
+                dueAt: penalty.dueAt,
+                workDate: dailyFineWorkDate(penalty),
+                taskType: penalty.taskType,
                 taskId: penalty.taskId,
                 taskCode: penalty.taskCode,
                 taskTitle: penalty.taskTitle,
@@ -6174,7 +6219,7 @@ export default function Attendance() {
                 rejectionReason: penalty.rejectionReason,
             }];
         });
-    }, [employees, evidencePenaltyRecords, overviewDateRange, systemUsers]);
+    }, [employees, leaveRecords, evidencePenaltyRecords, overviewDateRange, systemUsers]);
 
     const autoStockCheckMissingFines = useMemo(() => {
         if (!STOCK_CHECK_MISSING_FINE_ENABLED) return [] as FineRecord[];
@@ -6206,6 +6251,7 @@ export default function Attendance() {
                 // official employee instead of blaming the rotated assignee.
                 employees
                     .filter(emp => emp.type === 'Official')
+                    .filter(emp => !isApprovedDayOff({ employees, leaveRecords }, { empId: emp.id }, dateKey))
                     .filter(emp => !systemUsers.some((account: any) =>
                         account?.employmentStatus === 'resigned'
                         && (normalizeAttendanceText(account.username) === normalizeAttendanceText(emp.username)
@@ -6266,6 +6312,7 @@ export default function Attendance() {
                 assignee = employees.find(emp => matchTaskAssigneeToEmployee(expectedUsername, emp));
             }
             if (!assignee) continue;
+            if (isApprovedDayOff({ employees, leaveRecords }, { empId: assignee.id }, dateKey)) continue;
 
             fines.push({
                 empId: assignee.id,
@@ -6278,7 +6325,7 @@ export default function Attendance() {
         }
 
         return fines;
-    }, [employees, isAdmin, stockCheckSessions, stockBalanceRecords, overviewDateRange]);
+    }, [employees, leaveRecords, systemUsers, isAdmin, stockCheckSessions, stockBalanceRecords, overviewDateRange]);
 
     const applyFineOverride = useCallback((fine: FineRecord): FineRecord => {
         const override = fineOverrides[getFineOverrideKey(fine)];
@@ -6303,6 +6350,7 @@ export default function Attendance() {
             const rows = [...finesData, ...extraFines, ...autoVatOverdueFines.filter(fine => !fine.id || !persistedVatIds.has(fine.id)), ...autoReturnOverdueFines.filter(fine => !fine.id || !persistedReturnIds.has(fine.id)), ...autoRefundOverdueFines.filter(fine => !fine.id || !persistedRefundIds.has(fine.id)), ...autoDeadlineOverdueFines, ...autoEvidenceOverdueFines, ...autoStockCheckMissingFines]
                 .map(applyFineOverride)
                 .filter(f => !isTemporarilyExcludedFine(f))
+                .filter(f => !isExcusedDailyWorkFine(f, { employees, leaveRecords }))
                 .filter(f => !isVatFineOutsideSchedule(f))
                 .filter(f => !getFineRecordKeys(f).some(key => deletedFineKeys.has(key)))
                 // Auto VAT fines made before the approved rollout are invalid;
@@ -6348,7 +6396,7 @@ export default function Attendance() {
             result.push(...vatRows.values());
             return result;
         },
-        [extraFines, fineAuditLog, returnOverdueTracking, autoVatOverdueFines, autoReturnOverdueFines, autoRefundOverdueFines, autoDeadlineOverdueFines, autoEvidenceOverdueFines, autoStockCheckMissingFines, applyFineOverride, isVatFineOutsideSchedule]
+        [employees, leaveRecords, extraFines, fineAuditLog, returnOverdueTracking, autoVatOverdueFines, autoReturnOverdueFines, autoRefundOverdueFines, autoDeadlineOverdueFines, autoEvidenceOverdueFines, autoStockCheckMissingFines, applyFineOverride, isVatFineOutsideSchedule]
     );
 
     // Helper: lọc theo overviewDateRange
@@ -6383,10 +6431,16 @@ export default function Attendance() {
     ), [systemUsers]);
 
     // August 2026 policy: keep history intact, but deduct only late-arrival fines.
-    const liveOverviewFines = useMemo(
-        () => allFines.filter(f => inOverviewRange(finePeriodDate(f)) && !isAugust2026WaivedFine(f)),
-        [allFines, overviewDateRange]
-    );
+    const liveOverviewFines = useMemo(() => {
+        const waived = (fine: FineRecord) => fineWaivers.some(item =>
+            (fine.id && item?.fine?.id === fine.id)
+            || (fine.attendanceLogId && item?.fine?.attendanceLogId === fine.attendanceLogId)
+            || getFineContentKey(item?.fine) === getFineContentKey(fine)
+        );
+        return allFines
+            .filter(f => inOverviewRange(finePeriodDate(f)) && !isAugust2026WaivedFine(f))
+            .map(f => waived(f) ? { ...f, amount: 0 } : f);
+    }, [allFines, fineWaivers, overviewDateRange]);
     const liveOverviewBonuses = useMemo(() => extraBonuses.filter(b => inOverviewRange(b.date)), [extraBonuses, overviewDateRange]);
     const liveOverviewPackingLogs = useMemo(() => packingOrderLogsData.filter(o => inOverviewRange(o.timestamp)), [packingOrderLogsData, overviewDateRange]);
     const livePackingLogs = useMemo(() => activeTab === 'packaging'
@@ -6898,7 +6952,11 @@ export default function Attendance() {
         // The locked overview is rendered from its payroll snapshot. Delay
         // the attendance-log month read until the user actually opens the
         // detailed attendance tab.
-        if (isDbLoaded && (!isSelectedPeriodLocked || activeTab === 'attendance')) fetchMonthLogs();
+        if (!isDbLoaded || (activeTab !== 'overview' && activeTab !== 'attendance')) return;
+        if (isSelectedPeriodLocked && activeTab !== 'attendance') return;
+        // Opening Phạt/Đóng gói does not need raw attendance history. Reuse
+        // this month's committed rows when moving between overview/details.
+        if (!overviewAttendanceLogsReady) void fetchMonthLogs();
     }, [activeTab, isSelectedPeriodLocked, selectedYear, selectedMonth, isDbLoaded]);
 
     // A failed read must be recoverable by reopening Điểm danh, without
@@ -7971,10 +8029,13 @@ const openConfigModal = () => {
                     const persistedLock = nextLockedPeriods.find(item =>
                         item.start === newLock.start && item.end === newLock.end
                     );
-                    if (persistedLock?.payrollSnapshot) {
+                    // The backend stores the frozen statement separately from
+                    // lock metadata. Reuse the just-captured snapshot locally
+                    // so the newly locked overview needs no second download.
+                    if (persistedLock && newLock.payrollSnapshot) {
                         lockedPayrollSnapshotCache.set(
                             buildLockedPayrollSnapshotKey(persistedLock.start, persistedLock.end),
-                            { lockIdentity: getLockedPeriodIdentity(persistedLock), snapshot: persistedLock.payrollSnapshot },
+                            { lockIdentity: getLockedPeriodIdentity(persistedLock), snapshot: newLock.payrollSnapshot },
                         );
                     }
                     setLockedPeriods(nextLockedPeriods);
@@ -9667,7 +9728,14 @@ const openConfigModal = () => {
                 group.date = dayjs(fineDate).isAfter(dayjs(group.date)) ? fineDate : group.date;
                 group.ecommerceDetails.push(fine);
             });
-            return rows;
+            const ecommercePriority = (row: any) => row?.isEcommerceGroup
+                ? (row.ecommerceKind === 'overdue' ? 0 : 1)
+                : 2;
+            return rows.sort((left, right) => {
+                const priorityDiff = ecommercePriority(left) - ecommercePriority(right);
+                if (priorityDiff !== 0) return priorityDiff;
+                return getFineSortTime(right) - getFineSortTime(left);
+            });
         })();
         const selectedFineEmployeeName = canViewAllPayroll
             ? (effectiveFineEmployeeFilter === 'all'
@@ -10192,6 +10260,8 @@ const openConfigModal = () => {
             return;
         }
         setWorkSchedules(Array.isArray(result.data?.workSchedules) ? result.data.workSchedules : []);
+        setIsBackgroundSyncComplete(false);
+        setAttendanceRewardRefreshKey(value => value + 1);
         message.success(action === 'clear' ? 'Đã xóa lịch làm.' : action === 'off' ? 'Đã khai báo nghỉ ngày mai.' : 'Đã đăng ký ca làm việc.');
     }, [canManageAttendanceEmployee, canManageWorkSchedules, canEditWorkScheduleDate, checkLocked]);
 
@@ -10227,6 +10297,20 @@ const openConfigModal = () => {
         }
         if (Array.isArray(result.data?.fineWaivers)) setFineWaivers(result.data.fineWaivers);
         if (Array.isArray(result.data?.fineAuditLog)) setFineAuditLog(result.data.fineAuditLog);
+        attendanceInitialDataCache = null;
+        // Keep the unmount/autosave snapshot aligned with the atomic response,
+        // even before React has committed the corresponding state updates.
+        if (latestSnapshotRef.current) latestSnapshotRef.current = {
+            ...latestSnapshotRef.current,
+            leaveRecords: nextRecords,
+            extraFines: result.data?.extraFines,
+            fineAuditLog: result.data?.fineAuditLog,
+            fineWaivers: result.data?.fineWaivers,
+        };
+        // The leave/absence withdrawal is confirmed, but derived streak and
+        // late-waiver reconciliation is still pending. Refresh its ledger and
+        // keep lock/export actions gated until that fresh result arrives.
+        setIsBackgroundSyncComplete(false);
         setAttendanceRewardRefreshKey(value => value + 1);
         return nextRecords;
     }, []);
@@ -10238,18 +10322,20 @@ const openConfigModal = () => {
         scope: LeaveSession | 'full_day',
         note: string = ''
     ) => {
-        if (!canManageAttendance || !canManageAttendanceEmployee(emp)) return;
-        if (checkLocked()) return;
+        if (!canManageAttendance || !canManageAttendanceEmployee(emp)) return false;
+        if (checkLocked()) return false;
         if (!canEditAttendanceDate(date)) {
             message.warning('Quản lý chỉ được lên lịch cho ngày tương lai. Hôm nay hoặc ngày đã qua chỉ admin được sửa.');
-            return;
+            return false;
         }
 
         try {
             await persistLeaveStatus(emp, date, action, scope, note);
             message.success(action === 'clear' ? 'Đã xóa trạng thái nghỉ.' : (action === 'exempt' ? 'Đã ghi nhận miễn trừ.' : action === 'unpaid' ? 'Đã ghi nhận nghỉ không phép.' : 'Đã ghi nhận nghỉ có phép.'));
+            return true;
         } catch (error: any) {
             message.error(error?.message || 'Không lưu được trạng thái nghỉ.');
+            return false;
         }
     }, [canManageAttendance, canManageAttendanceEmployee, canEditAttendanceDate, checkLocked, persistLeaveStatus]);
 
@@ -11196,7 +11282,11 @@ const openConfigModal = () => {
             {activeTab === 'overview' && <div className="att-page-header">
                 <Space className="att-page-actions" size={8} wrap style={{ justifyContent: 'flex-end', width: '100%' }}>
                     {!isBackgroundSyncComplete && (
-                        <Tag color="processing" icon={<SyncOutlined spin />} style={{ margin: 0 }}>
+                        backgroundSyncError ? <Tooltip title={backgroundSyncError}>
+                            <Button size="small" danger icon={<WarningOutlined />} onClick={() => setAttendanceRewardRefreshKey(value => value + 1)}>
+                                Đồng bộ lỗi — thử lại
+                            </Button>
+                        </Tooltip> : <Tag color="processing" icon={<SyncOutlined spin />} style={{ margin: 0 }}>
                             Đang đồng bộ dữ liệu nền
                         </Tag>
                     )}

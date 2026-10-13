@@ -26,15 +26,15 @@ function withdrawFines(data, isWithdrawnFine, note, now = new Date()) {
 
 async function reconcileWithdrawnFines(prisma, isWithdrawnFine, note, options = {}) {
   if (!prisma?.$transaction) return { created: [], removed: [], checked: 0, skipped: 'missing_prisma' };
-  return prisma.$transaction(async tx => {
-    await tx.$executeRaw`SET LOCAL lock_timeout = '1000ms'`;
+  try {
+    return await prisma.$transaction(async tx => {
     await tx.$executeRaw`SET LOCAL statement_timeout = '8000ms'`;
-    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('attendanceData'))`;
     const rows = await tx.$queryRaw`
       SELECT "value"::json->'extraFines' AS "extraFines",
              "value"::json->'fineAuditLog' AS "fineAuditLog"
-      FROM "AppConfig" WHERE "key" = 'attendanceData' FOR UPDATE
+      FROM "AppConfig" WHERE "key" = 'attendanceData' FOR UPDATE SKIP LOCKED
     `;
+    if (!rows?.length) return { created: [], removed: [], checked: 0, skipped: 'lock_busy' };
     const patch = withdrawFines(rows[0] || {}, isWithdrawnFine, note, options.now || new Date());
     if (patch.removed.length) {
       await tx.$executeRaw`
@@ -49,7 +49,19 @@ async function reconcileWithdrawnFines(prisma, isWithdrawnFine, note, options = 
       `;
     }
     return { created: [], removed: patch.removed.map(fine => fine.id), checked: 0, skipped: 'policy_removed' };
-  }, { isolationLevel: 'Serializable', timeout: 20000, maxWait: 5000 });
+    }, { isolationLevel: 'Serializable', timeout: 20000, maxWait: 5000 });
+  } catch (error) {
+    // Maintenance is best-effort. A user autosave or another fine writer may
+    // own the shared attendance row; do not surface a scary raw 55P03 error or
+    // make the next maintenance pass fail as well. The next scheduled pass
+    // will retry the withdrawal after the writer commits.
+    const message = String(error?.message || '');
+    const code = String(error?.code || error?.meta?.code || '');
+    if (code === '55P03' || /lock timeout|could not obtain lock/i.test(message)) {
+      return { created: [], removed: [], checked: 0, skipped: 'lock_busy' };
+    }
+    throw error;
+  }
 }
 
 module.exports = { withdrawFines, reconcileWithdrawnFines };
