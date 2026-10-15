@@ -606,6 +606,7 @@ export interface ElectronAPI {
         reason?: string;
         note?: string;
       }>;
+      shift?: "midday" | "evening";
       idempotencyKey?: string;
     }) => Promise<{ success: boolean; data?: any; error?: string }>;
     moveUnit: (data: {
@@ -1434,6 +1435,18 @@ export interface ElectronAPI {
     getCurrent: () => Promise<{ success: boolean; data?: any; error?: string }>;
   };
   attendance: {
+    getPackingIncomeSettings: (data: { periodKey: string }) => ReturnType<ElectronAPI['attendance']['getSalesBonusSettings']>;
+    updatePackingIncomeSettings: (data: { periodKey: string; employeeIds: number[]; expectedRevision: string }) => ReturnType<ElectronAPI['attendance']['updateSalesBonusSettings']>;
+    getSalesBonusSettings: (data: { periodKey: string }) => Promise<{
+      success: boolean;
+      data?: { periodKey: string; employees: Array<{ id: number; name: string; username: string }>; employeeIds: number[]; revision: string; payrollOverrides: Record<string, any> };
+      error?: string;
+    }>;
+    updateSalesBonusSettings: (data: { periodKey: string; employeeIds: number[]; expectedRevision: string }) => Promise<{
+      success: boolean;
+      data?: { periodKey: string; employeeIds: number[]; revision: string; payrollOverrides: Record<string, any>; unchanged?: boolean };
+      error?: string;
+    }>;
     getSalesBonusSummary: (filters: { from: string; to: string }) => Promise<{
       success: boolean;
       data?: {
@@ -1518,6 +1531,8 @@ export interface ElectronAPI {
       data?: {
         overrideKey: string;
         override: {
+          salesBonusEligible?: boolean;
+          packingIncomeEligible?: boolean;
           extraShifts?: number;
           extraAdjust?: number;
           adjustNote?: string;

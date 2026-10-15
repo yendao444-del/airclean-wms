@@ -66,6 +66,8 @@ const DATA_SAFETY_ALLOWED_CHANNELS = new Set([
   "dailyTasks:saveCategories",
   "attendance:updateLeaveStatus",
   "attendance:updatePayrollOverride",
+  "attendance:updateSalesBonusSettings",
+  "attendance:updatePackingIncomeSettings",
   "attendance:updatePayrollLock",
   "attendance:updatePackingCommission",
   "attendance:createFine",
@@ -267,6 +269,7 @@ const { saveLeaveStatus } = require("./attendance-leave-status.cjs");
 const { readWorkdayPolicy, dispatchDailyTasks } = require("./attendance-workday-service.cjs");
 const workdayPolicyPromise = import("./attendance-workday-policy.mjs");
 const { updateAttendanceBranches } = require("./attendance-branch-store.cjs");
+const { readSalesBonusSettings, saveSalesBonusSettings, readPackingIncomeSettings, savePackingIncomeSettings } = require("./attendance-sales-bonus-settings.cjs");
 const { saveAttendanceAutosave } = require("./attendance-autosave-store.cjs");
 const {
   CUTOFF_HOUR: ATTENDANCE_SCHEDULE_CUTOFF_HOUR,
@@ -288,7 +291,7 @@ const { isEcommerceOrderFine } = require("./ecommerce-order-fines");
 const { reconcilePrepackShortfallFines, isPrepackShortfallFine } = require("./prepack-fines");
 const { MAX_QUANTITY: HANDLING_UNIT_MAX_QUANTITY, assertPackageQuantity, readLabelNumbers, assignLabelNumbers } = require("./handling-unit-labels.cjs");
 const { assertMergePolicy } = require("./handling-unit-merge-policy.cjs");
-const { recordShiftEvents, readShiftPolicy, reconcileShiftFines, isHandlingUnitShiftFine, assigneeFor: shiftAssigneeFor, dayKey: shiftDayKey } = require("./handling-unit-shift-policy.cjs");
+const { recordShiftEvents, readShiftPolicy, reconcileShiftFines, assigneeFor: shiftAssigneeFor, dayKey: shiftDayKey } = require("./handling-unit-shift-policy.cjs");
 
 // 📦 Offline Queue — lưu scan khi mất mạng, sync lại khi có mạng
 const offlineQueue = require("./offline-queue");
@@ -13032,6 +13035,12 @@ ipcMain.handle("handlingUnits:finalizeShiftCheck", async (_event, payload = {}) 
       throw new Error("Danh sách kiểm cuối ca không hợp lệ.");
     }
 
+    const checkTime = new Date();
+    const checkDate = shiftDayKey(checkTime);
+    const currentShift = checkTime <= new Date(`${checkDate}T12:30:00+07:00`) ? "midday" : "evening";
+    const requestedShift = payload.shift === "midday" || payload.shift === "evening"
+      ? payload.shift
+      : currentShift;
     const normalizedItems = items.map((item) => ({
       code: String(item?.code || "").trim().toUpperCase(),
       expectedQuantity: item?.expectedQuantity,
@@ -13039,6 +13048,7 @@ ipcMain.handle("handlingUnits:finalizeShiftCheck", async (_event, payload = {}) 
       expectedUpdatedAt: item?.expectedUpdatedAt,
       reason: String(item?.reason || "").trim(),
       note: String(item?.note || "").trim(),
+      shift: requestedShift,
     }));
     if (
       normalizedItems.some(
@@ -30370,7 +30380,7 @@ function applyAttendanceFinePatches(data, patchValue) {
 
   // Exclude the retired penalty even while background withdrawal is waiting
   // for a lock, or if an older workstation creates it again.
-  return { ...(data || {}), extraFines: extraFines.filter(fine => !isPrepackShortfallFine(fine) && !isHandlingUnitShiftFine(fine) && !isEcommerceOrderFine(fine)), fineOverrides, fineAuditLog };
+  return { ...(data || {}), extraFines: extraFines.filter(fine => !isPrepackShortfallFine(fine) && !isEcommerceOrderFine(fine)), fineOverrides, fineAuditLog };
 }
 
 async function readAttendanceFinePatchRecord(client = prisma) {
@@ -30738,8 +30748,8 @@ ipcMain.handle("policies:getCurrent", async () => {
           },
           stockCheckMissingFine: {
             enabled: true,
-            amount: 50000,
-            effectiveAt: "2026-05-06",
+            amount: getStockCheckFineAmount(getStockCheckTodayKey()),
+            effectiveAt: "2026-10-15",
             excludesRestDays: true,
           },
         },
@@ -32202,6 +32212,70 @@ ipcMain.handle("attendance:updateLeaveStatus", async (event, payload = {}) => {
 
 // Update one employee/month override atomically. This avoids reopening the
 // whole-page attendanceData write that can overwrite another workstation.
+ipcMain.handle("attendance:getSalesBonusSettings", async (_event, payload = {}) => {
+  try {
+    requireRole("admin");
+    if (!prisma) throw new Error("Prisma not available");
+    const data = await readSalesBonusSettings(getPrismaDirectTx(), payload.periodKey);
+    return { success: true, data };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle("attendance:updateSalesBonusSettings", async (_event, payload = {}) => {
+  try {
+    requireRole("admin");
+    if (!prisma) throw new Error("Prisma not available");
+    const actor = { username: currentSession.username };
+    const data = await enqueueAttendanceDataWrite(() => saveSalesBonusSettings(getPrismaDirectTx(), payload, {
+      actor, isMonthLocked: isAttendanceMonthLocked,
+    }), { priority: true, maxQueueWaitMs: 3000 });
+    invalidateAttendanceSnapshotCaches();
+    if (!data.unchanged) void logActivity({
+      module: "attendance", action: "UPDATE_SALES_BONUS_RECIPIENTS", severity: "WARNING",
+      recordName: data.periodKey, userName: actor.username,
+      description: `Cập nhật nhân viên nhận thưởng doanh thu ${data.periodKey}: ${data.employeeIds.join(", ") || "không có"}`,
+    }).catch(error => console.warn("Không thể ghi audit cài đặt thưởng doanh thu:", error.message));
+    return { success: true, data };
+  } catch (error) {
+    console.error("❌ attendance:updateSalesBonusSettings error:", error.message);
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle("attendance:getPackingIncomeSettings", async (_event, payload = {}) => {
+  try {
+    requireRole("admin");
+    if (!prisma) throw new Error("Prisma not available");
+    const data = await readPackingIncomeSettings(getPrismaDirectTx(), payload.periodKey);
+    return { success: true, data };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle("attendance:updatePackingIncomeSettings", async (_event, payload = {}) => {
+  try {
+    requireRole("admin");
+    if (!prisma) throw new Error("Prisma not available");
+    const actor = { username: currentSession.username };
+    const data = await enqueueAttendanceDataWrite(() => savePackingIncomeSettings(getPrismaDirectTx(), payload, {
+      actor, isMonthLocked: isAttendanceMonthLocked,
+    }), { priority: true, maxQueueWaitMs: 3000 });
+    invalidateAttendanceSnapshotCaches();
+    if (!data.unchanged) void logActivity({
+      module: "attendance", action: "UPDATE_PACKING_INCOME_RECIPIENTS", severity: "WARNING",
+      recordName: data.periodKey, userName: actor.username,
+      description: `Cập nhật nhân viên nhận thu nhập đóng gói ${data.periodKey}: ${data.employeeIds.join(", ") || "không có"}`,
+    }).catch(error => console.warn("Không thể ghi audit cài đặt thu nhập đóng gói:", error.message));
+    return { success: true, data };
+  } catch (error) {
+    console.error("❌ attendance:updatePackingIncomeSettings error:", error.message);
+    return { success: false, error: error.message };
+  }
+});
+
 ipcMain.handle("attendance:updatePayrollOverride", async (event, payload = {}) => {
   try {
     requireRole("admin");
@@ -32254,7 +32328,17 @@ ipcMain.handle("attendance:updatePayrollOverride", async (event, payload = {}) =
         }
         const payrollOverrides = { ...(current || {}) };
         let savedOverride = null;
-        if (clear) delete payrollOverrides[overrideKey];
+        if (clear) {
+          // Reset monetary adjustments without opting a disabled employee
+          // back into the separately administered revenue bonus.
+          const recipientFlags = Object.fromEntries(["salesBonusEligible", "packingIncomeEligible"]
+            .filter(field => typeof payrollOverrides[overrideKey]?.[field] === "boolean")
+            .map(field => [field, payrollOverrides[overrideKey][field]]));
+          if (Object.keys(recipientFlags).length) {
+            savedOverride = recipientFlags;
+            payrollOverrides[overrideKey] = savedOverride;
+          } else delete payrollOverrides[overrideKey];
+        }
         else {
           savedOverride = { ...(payrollOverrides[overrideKey] || {}), ...normalizedPatch,
             updatedAt: new Date().toISOString(), updatedBy: actor.username };
@@ -32319,6 +32403,10 @@ async function dispatchCurrentStockChecksForLeave() {
 
 function getStockCheckTodayKey() {
   return getLocalDateKey(new Date());
+}
+
+function getStockCheckFineAmount(workDate) {
+  return String(workDate || "") >= "2026-10-15" ? 200000 : 50000;
 }
 
 function getBangkokHour(date = new Date()) {
@@ -33884,7 +33972,7 @@ ipcMain.handle(
           if (storedSession.reviewStatus === "rejected") {
             return {
               session: storedSession,
-              penaltyAmount: Number(storedSession.rejectionPenaltyAmount || 50000),
+              penaltyAmount: Number(storedSession.rejectionPenaltyAmount ?? getStockCheckFineAmount(storedSession.date)),
               alreadyRejected: true,
             };
           }
@@ -33914,7 +34002,7 @@ ipcMain.handle(
 
           const rejectedAt = new Date().toISOString();
           const workdayPolicy = await workdayPolicyPromise;
-          const penaltyAmount = workdayPolicy.isApprovedDayOff(attendanceData, { empId: employee.id }, storedSession.date) ? 0 : 50000;
+          const penaltyAmount = workdayPolicy.isApprovedDayOff(attendanceData, { empId: employee.id }, storedSession.date) ? 0 : getStockCheckFineAmount(storedSession.date);
           const fineId = `stock-check-rejected:${sessionId}`;
           const extraFines = Array.isArray(attendanceData.extraFines)
             ? [...attendanceData.extraFines]
@@ -41197,7 +41285,7 @@ ipcMain.handle("attendance:reconcileLateFines", async (_event, filters = {}) => 
     });
     if (result.ledger) {
       const now = new Date();
-      result.ledger.extraFines = result.ledger.extraFines.filter(fine => !isPrematureMissingScheduleFine(fine, now) && !isPrepackShortfallFine(fine) && !isHandlingUnitShiftFine(fine) && !isEcommerceOrderFine(fine));
+      result.ledger.extraFines = result.ledger.extraFines.filter(fine => !isPrematureMissingScheduleFine(fine, now) && !isPrepackShortfallFine(fine) && !isEcommerceOrderFine(fine));
     }
     invalidateAttendanceSnapshotCaches();
     console.log(`[Perf] attendance:reconcileLateFines month=${month} ms=${Date.now() - startedAt} checked=${result.checked}`);

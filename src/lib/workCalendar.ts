@@ -25,8 +25,14 @@ export const DAILY_REPORT_POLICY_START_DATE = '2026-04-28';
 // Missing-check fines apply on working days; Sundays and Vietnam holidays are
 // excluded by isPastStockCheckWorkingDay below.
 export const STOCK_CHECK_MISSING_FINE_ENABLED = true;
-export const STOCK_CHECK_MISSING_FINE = 50000;
+export const STOCK_CHECK_MISSING_FINE = 200000;
+export const STOCK_CHECK_FINE_EFFECTIVE_DATE = '2026-10-15';
 export const STOCK_CHECK_POLICY_START_DATE = '2026-05-06';
+
+// Price by the work date, not the month currently being viewed or the date
+// an administrator reviews the session. Earlier violations retain their rate.
+export const getStockCheckFineAmount = (workDate: string) =>
+    workDate >= STOCK_CHECK_FINE_EFFECTIVE_DATE ? STOCK_CHECK_MISSING_FINE : 50000;
 
 export const getFixedVietnamHolidayName = (date: Dayjs) => {
     return FIXED_VIETNAM_HOLIDAYS[date.format('MM-DD')] || '';

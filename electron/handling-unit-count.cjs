@@ -28,7 +28,7 @@ async function finalizeCountsInTx(tx, items, { actor, packedInventory, updateSto
       if (!lot || !['submitted', 'ready', 'issued'].includes(lot.status)) throw new Error('Lô đóng sẵn chưa gửi xác nhận hoặc đã trả lại để sửa.');
       const result = packing.checkPackedCount(packedInventory, item, actor.username);
       checked.push(result.checked);
-      history.push({ ...result.history, reference, note });
+      history.push({ ...result.history, reference, note, shift: item.shift });
       if (variance) for (const component of lot.components) {
         if (!Number.isSafeInteger(component.quantity) || component.quantity <= 0) throw new Error('Thành phần đóng sẵn không hợp lệ.');
         addDelta(component.sku, variance * component.quantity, note);
@@ -47,7 +47,7 @@ async function finalizeCountsInTx(tx, items, { actor, packedInventory, updateSto
     const nextStatus = item.actualQuantity === 0 ? 'empty' : sealed && variance === 0 ? 'sealed' : 'opened';
     const updated = await tx.handlingUnit.update({ where: { code: item.code }, data: { remainingQuantity: item.actualQuantity, status: nextStatus, updatedAt: new Date() } });
     checked.push({ code: item.code, expectedQuantity: item.expectedQuantity, actualQuantity: item.actualQuantity, variance, status: nextStatus, unit: updated });
-    history.push({ unitId: item.code, sku: unit.sku, type: variance === 0 ? 'Kiểm cuối ca - khớp' : 'Kiểm cuối ca - điều chỉnh', quantity: variance, remaining: item.actualQuantity, expectedQuantity: item.expectedQuantity, actualQuantity: item.actualQuantity, variance, actor: actor.username, reason: variance === 0 ? 'Kiểm khớp' : item.reason, note, reference });
+    history.push({ unitId: item.code, sku: unit.sku, type: variance === 0 ? 'Kiểm cuối ca - khớp' : 'Kiểm cuối ca - điều chỉnh', quantity: variance, remaining: item.actualQuantity, expectedQuantity: item.expectedQuantity, actualQuantity: item.actualQuantity, variance, actor: actor.username, reason: variance === 0 ? 'Kiểm khớp' : item.reason, note, reference, shift: item.shift, status: nextStatus });
     if (variance) addDelta(unit.sku, variance, note);
   }
   const stockChanges = [];

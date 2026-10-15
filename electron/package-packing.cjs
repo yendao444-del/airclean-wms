@@ -6,10 +6,10 @@ let pickOrderPromise;
 const getPickOrder = () => pickOrderPromise ||= import('./handling-unit-pick-order.mjs');
 const isReturnSource = unit => String(unit?.packagingName || '')
   .normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/đ/g, 'd').toLowerCase().includes('hang hoan');
-async function openedSources(tx, sku) {
+async function packingSources(tx, sku) {
   const { compareHandlingUnitPickOrder } = await getPickOrder();
   const units = await tx.handlingUnit.findMany({
-    where: { sku, status: 'opened', remainingQuantity: { gt: 0 } },
+    where: { sku, status: { in: ['opened', 'sealed'] }, remainingQuantity: { gt: 0 } },
     orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
   });
   return units.filter(unit => !isReturnSource(unit)).sort((left, right) => compareHandlingUnitPickOrder(
@@ -114,7 +114,7 @@ async function transferToPacked(tx, row, nextQuantity, inventory, actor, recordT
     const required = Math.abs(delta) * component.quantity;
     if (!Number.isSafeInteger(required)) throw new Error('Số lượng thành phần vượt giới hạn.');
     if (delta > 0) {
-      const candidates = (await openedSources(tx, component.sku)).filter(unit => unit.baseUnit === component.unit);
+      const candidates = (await packingSources(tx, component.sku)).filter(unit => unit.baseUnit === component.unit);
       let left = required;
       for (const source of candidates) {
         const available = plannedBalances.get(source.code) ?? Number(source.remainingQuantity || 0);
@@ -124,7 +124,7 @@ async function transferToPacked(tx, row, nextQuantity, inventory, actor, recordT
         left -= take;
         if (!left) break;
       }
-      if (left > 0) throw new Error(`SKU ${component.sku} không đủ hàng trong các kiện đang mở để đóng ${nextQuantity} combo.`);
+      if (left > 0) throw new Error(`SKU ${component.sku} không đủ hàng trong các kiện đang dở và nguyên niêm phong để đóng ${nextQuantity} combo.`);
     } else {
       const allocations = Array.isArray(component.allocations) && component.allocations.length
         ? component.allocations
@@ -148,7 +148,7 @@ async function transferToPacked(tx, row, nextQuantity, inventory, actor, recordT
   for (const plan of plans) {
     const source = await tx.handlingUnit.findUnique({ where: { code: plan.code } });
     if (!source || source.sku !== plan.component.sku || source.baseUnit !== plan.component.unit) throw new Error('Kiện nguồn đã thay đổi SKU hoặc đơn vị. Vui lòng tải lại.');
-    if (plan.moved > 0 && (source.status !== 'opened' || isReturnSource(source))) throw new Error(`Kiện ${source.code} chưa khui hoặc đang chờ kiểm/gộp.`);
+    if (plan.moved > 0 && (!['opened', 'sealed'].includes(source.status) || isReturnSource(source))) throw new Error(`Kiện ${source.code} đang chờ kiểm/gộp hoặc không đủ điều kiện đóng gói.`);
     if (plan.moved < 0 && !['opened', 'pending_check', 'empty'].includes(source.status)) throw new Error(`Không thể hoàn hàng về kiện ${source.code} đã đóng hoặc tách.`);
     const remaining = Number(source.remainingQuantity) - plan.moved;
     if (remaining < 0) throw new Error(`Kiện ${source.code} không đủ hàng để đóng ${nextQuantity} combo.`);
@@ -252,7 +252,7 @@ function createPackagePackingService({ getDb, getSession, recordTransfers }) {
           if (item.sourceCode) {
             legacyUnit = await tx.handlingUnit.findUnique({ where: { code: String(item.sourceCode).trim() } });
             if (!sku) sku = String(legacyUnit?.sku || '').trim();
-            if (!legacyUnit || legacyUnit.sku !== sku || legacyUnit.status !== 'opened' || Number(legacyUnit.remainingQuantity) <= 0 || isReturnSource(legacyUnit)) throw new Error('Chọn kiện đã khui còn hàng cho từng thành phần.');
+            if (!legacyUnit || legacyUnit.sku !== sku || !['opened', 'sealed'].includes(legacyUnit.status) || Number(legacyUnit.remainingQuantity) <= 0 || isReturnSource(legacyUnit)) throw new Error('Chọn kiện đang dở hoặc nguyên niêm phong còn hàng cho từng thành phần.');
           }
           resolvedInputs.push({ item, sku, legacyUnit });
         }
@@ -265,12 +265,12 @@ function createPackagePackingService({ getDb, getSession, recordTransfers }) {
           const sku = entry.sku;
           const perCombo = quantity(item.quantity, 1);
           const requestedQty = quantity(payload.requestedQty, 1);
-          const candidates = await openedSources(tx, sku);
+          const candidates = await packingSources(tx, sku);
           if (candidates.some(unit => unit.baseUnit !== candidates[0].baseUnit)) throw new Error(`SKU ${sku} có các kiện khác đơn vị, cần kiểm tra lại trước khi giao việc.`);
           const available = candidates.reduce((sum, unit) => sum + Number(unit.remainingQuantity || 0), 0);
           const required = requestedQty * perCombo * employees.length;
           if (!Number.isSafeInteger(required)) throw new Error('Số lượng thành phần vượt giới hạn.');
-          if (!available || required > available) throw new Error(`SKU ${sku} cần ${required} ${candidates[0]?.baseUnit || 'gói'} cho ${employees.length} nhân viên; các kiện đang mở còn ${available}. Không đủ hàng.`);
+          if (!available || required > available) throw new Error(`SKU ${sku} cần ${required} ${candidates[0]?.baseUnit || 'gói'} cho ${employees.length} nhân viên; các kiện đang dở và nguyên niêm phong còn ${available}. Không đủ hàng.`);
           const unit = candidates[0];
           const normalizedComponent = { sku, name: sku, unit: unit?.baseUnit || 'gói', quantity: perCombo };
           if (item.sourceCode) normalizedComponent.sourceCode = String(item.sourceCode).trim();

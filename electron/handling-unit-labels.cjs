@@ -1,6 +1,6 @@
 const KEY = "handlingUnitLabelNumbersV1";
 const MAX_QUANTITY = 300;
-const MAX_SEQUENCE_NUMBER = 50;
+const MAX_SEQUENCE_NUMBER = Number.MAX_SAFE_INTEGER;
 
 function assertPackageQuantity(quantity) {
   if (!Number.isSafeInteger(Number(quantity)) || Number(quantity) < 1 || Number(quantity) > MAX_QUANTITY) {
@@ -17,7 +17,7 @@ async function readLabelNumbers(tx) {
 }
 
 // Numbers identify physical labels per SKU, independently of FIFO position.
-// Each cycle has numbers 1..50 and remains open while at
+// Numbers continue beyond 50 without reusing a physical label. A cycle remains open while at
 // least one physical unit is still active (including opened/pending-check),
 // then starts again at 1 after the whole cycle is finished or split.
 async function assignLabelNumbers(tx, rows) {
@@ -102,7 +102,7 @@ async function assignLabelNumbers(tx, rows) {
     }
     const occupied = occupiedBySku.get(sku) || new Set();
     const number = Math.max(Number(ledger.counters[sku] || 0), ...occupied, 0) + 1;
-    if (!Number.isSafeInteger(number) || number < 1 || number > MAX_SEQUENCE_NUMBER) throw new Error(`SKU ${sku} đã đủ ${MAX_SEQUENCE_NUMBER} kiện trong đợt hiện tại. Hãy hoàn tất/kiểm hết kiện trước khi mở đợt mới.`);
+    if (!Number.isSafeInteger(number) || number < 1 || number > MAX_SEQUENCE_NUMBER) throw new Error(`Số thứ tự kiện của SKU ${sku} vượt giới hạn số nguyên an toàn.`);
     occupied.add(number);
     occupiedBySku.set(sku, occupied);
     ledger.counters[sku] = Math.max(Number(ledger.counters[sku] || 0), number);

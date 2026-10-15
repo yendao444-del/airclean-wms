@@ -33,6 +33,7 @@ import refundOverdueHero from '../assets/policies/refund-overdue-hero.webp';
 import taskDeadlineFineHero from '../assets/policies/task-deadline-fine-hero.webp';
 import taskEvidenceFineHero from '../assets/policies/task-evidence-fine-hero.webp';
 import stockCheckMissingHero from '../assets/policies/stock-check-missing-hero.webp';
+import { STOCK_CHECK_MISSING_FINE, STOCK_CHECK_FINE_EFFECTIVE_DATE } from '../lib/workCalendar';
 
 interface PackingLevel {
     key: string;
@@ -162,7 +163,7 @@ const defaultMechanisms: PolicyMechanisms = {
     refundOverdueFine: { firstFineAfterDays: 8, firstAmount: 30000, dailyIncrement: 10000, effectiveAt: '2026-09-04', excludesRestDays: true },
     taskDeadlineFine: { defaultAmount: 50000, configurablePerTask: true, splitBetweenRecipients: true },
     taskEvidenceFine: { defaultAmount: 30000, configurablePerTask: true, escalatesByCycle: true },
-    stockCheckMissingFine: { enabled: true, amount: 50000, effectiveAt: '2026-05-06', excludesRestDays: true },
+    stockCheckMissingFine: { enabled: true, amount: STOCK_CHECK_MISSING_FINE, effectiveAt: STOCK_CHECK_FINE_EFFECTIVE_DATE, excludesRestDays: true },
 };
 
 const defaultSnapshot: PolicySnapshot = {
@@ -1130,7 +1131,7 @@ export default function PolicyLibrary() {
                 fineAmountNote="Mỗi ngày làm việc thiếu kiểm"
                 exclusionValue={policy.excludesRestDays ? 'Chủ nhật & Ngày lễ' : 'Không loại trừ'}
                 exclusionNote={policy.excludesRestDays ? 'Miễn trừ hoàn toàn ngày nghỉ' : 'Tính tất cả các ngày'}
-                noteText="Mức phạt được hệ thống tự động tính dựa trên lịch làm việc thực tế và đối chiếu phiên kiểm kho mỗi ngày."
+                noteText="Từ 15/10/2026: 200.000đ cho mỗi ngày/lần vi phạm, cộng vào bảng lương tháng. Ngày kiểm trước 15/10/2026 giữ mức 50.000đ."
                 guideTip={<><ClockCircleOutlined /> Mở ca từ 17:00</>}
                 guideTitle="3 bước kiểm hàng mỗi ngày để tránh bị phạt"
                 steps={[

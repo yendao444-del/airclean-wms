@@ -46,7 +46,6 @@ import {
   TagOutlined,
   DownOutlined,
   ScissorOutlined,
-  UserAddOutlined,
 } from "@ant-design/icons";
 import { Warehouse2DMap } from "../components/Warehouse2DMap";
 import Modal from "../components/HandlingUnitModal";
@@ -61,6 +60,7 @@ import { useAuth } from "../contexts/AuthContext";
 import { canCreatePackagePacking } from "../lib/packagePackingPermissions";
 import { canRecheckHandlingUnit } from "../lib/handlingUnitCheck";
 import PrepackManagement from "./PrepackManagement";
+import PrepackInventoryView from "../components/PrepackInventoryView";
 import type { PackingLot } from "../types/packagePacking";
 import { compareHandlingUnitPickOrder } from "../../electron/handling-unit-pick-order.mjs";
 import sealedSackImage from "../assets/warehouse-sack-sealed.webp";
@@ -151,6 +151,9 @@ type Workspace = {
     assignedTo: string;
     nextAssignedTo: string;
     deadline: string;
+    currentShift?: "midday" | "evening";
+    shiftLabel?: string;
+    deadlines?: Record<string, string>;
     todayRemaining: number;
     outstanding: Array<{ code: string; requiredAt: string; date: string }>;
     trackedCodes: string[];
@@ -2105,7 +2108,8 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
           obligation && obligation.date === todayKey,
         );
         const latestCompletedCheck = history
-          .filter(isCompletedCheckTransaction)
+          .filter(item => isCompletedCheckTransaction(item) && (!workspace.shiftCheckPolicy?.currentShift
+            || (item.shift || (new Date(item.createdAt) <= new Date(`${localDayKey(item.createdAt)}T12:30:00+07:00`) ? "midday" : "evening")) === workspace.shiftCheckPolicy.currentShift))
           .reduce(
             (latest, item) =>
               Math.max(latest, new Date(item.createdAt || 0).getTime() || 0),
@@ -2280,6 +2284,7 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
       setIsSubmittingShiftCheck(true);
       const response = await window.electronAPI?.handlingUnits?.finalizeShiftCheck({
         items,
+        shift: workspace.shiftCheckPolicy?.currentShift,
         idempotencyKey: shiftCheckRequestIdRef.current,
       });
       if (!response?.success) {
@@ -3073,10 +3078,9 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
                 <div style={{ maxWidth: "min(300px, calc(100vw - 48px))" }}>
                   <p><b>Hôm nay:</b> {workspace.shiftCheckPolicy.assignedTo}</p>
                   <p><b>Ngày mai:</b> {workspace.shiftCheckPolicy.nextAssignedTo}</p>
-                  <p>Hạn kiểm: <b>23:59</b> (giờ Việt Nam).</p>
-                  <p>
-                    Tạm thời chưa áp dụng phạt kiểm kiện cuối ca.
-                  </p>
+                  <p><b>Ca hiện tại:</b> {workspace.shiftCheckPolicy.shiftLabel || "ca chiều"} · hạn <b>{new Date(workspace.shiftCheckPolicy.deadline).toLocaleTimeString("vi-VN", { hour: "2-digit", minute: "2-digit", timeZone: "Asia/Bangkok" })}</b>.</p>
+                  <p>Ca trưa: <b>12:30</b> · Ca chiều: <b>19:00</b> (giờ Việt Nam).</p>
+                  <p>Chưa nhập số đếm sau hạn sẽ phạt <b>{fmt(workspace.shiftCheckPolicy.fineAmount)}đ/ca</b>.</p>
                   <Typography.Paragraph type="secondary">
                     Kiện chưa kiểm chuyển sang ngày tiếp theo. Kết quả độc lập với Kiểm hàng trong Quản lý kho.
                   </Typography.Paragraph>
@@ -3095,7 +3099,7 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
                   <span className="hu-shift-assignee-label">Phụ trách kiểm</span>
                   <span className="hu-shift-assignee-name">{workspace.shiftCheckPolicy.assignedTo}</span>
                   <span className="hu-shift-assignee-fine">
-                    Hạn kiểm 23:59 · Chưa áp dụng phạt
+                    {workspace.shiftCheckPolicy.shiftLabel || "Ca đang đến"} · hạn {new Date(workspace.shiftCheckPolicy.deadline).toLocaleTimeString("vi-VN", { hour: "2-digit", minute: "2-digit", timeZone: "Asia/Bangkok" })} · phạt {fmt(workspace.shiftCheckPolicy.fineAmount)}đ
                   </span>
                 </span>
                 <svg width="12" height="12" viewBox="0 0 12 12" fill="none" className="hu-shift-assignee-chevron" aria-hidden="true">
@@ -3250,9 +3254,6 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
             <div>
               <Typography.Title level={2}>Quản lý kiện hàng</Typography.Title>
             </div>
-            {activeModuleTab === "prepack" && canCreatePackagePacking(user?.role, isRolePreview) && (
-              <Button className="hu-packing-assign" type="primary" icon={<UserAddOutlined />} onClick={() => setPrepackCreateRequest(value => value + 1)}>{isAdmin || user?.role === "manager" ? 'Giao việc' : 'Tạo đóng gói'}</Button>
-            )}
           </header>
           <div className="hu-module-tabs" role="tablist" aria-label="Phân hệ quản lý kiện hàng">
             <button type="button" role="tab" id="hu-tab-units" aria-controls="hu-module-content" aria-selected={activeModuleTab === "units"} className={`hu-module-tab ${activeModuleTab === "units" ? "is-active" : ""}`} onClick={() => { setActiveModuleTab("units"); setHistoryScope("units"); }}>Kiện hàng</button>
@@ -3262,7 +3263,7 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
           <div ref={moduleContentRef} className="hu-tab-content" id="hu-module-content" role="tabpanel" aria-labelledby={`hu-tab-${activeModuleTab}`}>
           {activeModuleTab === "history" && <div className="hu-history-scope"><Segmented value={historyScope} onChange={value => setHistoryScope(value as "units" | "prepack")} options={[{ value: "units", label: "Kiện hàng" }, { value: "prepack", label: "Đóng gói sẵn" }]} /></div>}
           {(activeModuleTab === "prepack" || (activeModuleTab === "history" && historyScope === "prepack")) ? (
-            <PrepackManagement view={activeModuleTab === "history" ? "history" : "report"} createRequest={prepackCreateRequest} onCreateHandled={() => setPrepackCreateRequest(0)} sourceUnits={workspace.register.map(unit => ({ id: unit.id, skuName: unit.skuName, unitName: unit.unitName, status: unit.status, currentPcs: unit.currentPcs, packageType: unit.packageType }))} productSkus={selected ? workspace.catalog.filter(item => item.productGroup === selected.productGroup).map(item => item.sku) : undefined} />
+            activeModuleTab === "history" ? <PrepackManagement view="history" createRequest={prepackCreateRequest} onCreateHandled={() => setPrepackCreateRequest(0)} sourceUnits={workspace.register.map(unit => ({ id: unit.id, skuName: unit.skuName, unitName: unit.unitName, status: unit.status, currentPcs: unit.currentPcs, packageType: unit.packageType }))} productSkus={selected ? workspace.catalog.filter(item => item.productGroup === selected.productGroup).map(item => item.sku) : undefined} /> : selected ? <PrepackInventoryView lots={workspace.packedInventory} sku={selected.sku} unitName={selected.unitName} canCreate={user?.role === "staff" && canCreatePackagePacking(user?.role, isRolePreview)} onCreate={() => setPrepackCreateRequest(value => value + 1)} /> : null
           ) : selected ? (
             <>
               <header className="hu-selected-header">
@@ -4373,7 +4374,7 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
               <small>
                 {shiftCheckFocusCode ? `Kiểm lại kiện ${shiftCheckFocusCode}, không phụ thuộc phát sinh xuất hàng` : shiftCheckScope === "mandatory"
                   ? "Chỉ gồm các kiện đang ở trạng thái Chờ kiểm"
-                  : "Đối chiếu kiện đang khui và kiện chờ kiểm của dòng sản phẩm đã chọn"}
+                  : `Đối chiếu kiện đang khui và kiện chờ kiểm · ${workspace.shiftCheckPolicy?.shiftLabel || "ca hiện tại"} · hạn ${workspace.shiftCheckPolicy?.currentShift === "midday" ? "12:30" : "19:00"}`}
               </small>
             </div>
             {!shiftCheckFocusCode && <ShiftFamilySearch

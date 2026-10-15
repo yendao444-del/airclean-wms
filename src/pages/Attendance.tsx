@@ -1,5 +1,6 @@
 import { useState, useMemo, useCallback, useRef, useEffect, useTransition, forwardRef, useImperativeHandle, cloneElement, isValidElement } from 'react';
 import AttendancePackingChart from '../components/AttendancePackingChart';
+import SalesBonusSettingsModal from '../components/SalesBonusSettingsModal';
 import { groupPayslipFines } from '../lib/payslipFineGroups';
 import { isApprovedDayOff, isExcusedDailyWorkFine, dailyFineWorkDate } from '../../electron/attendance-workday-policy.mjs';
 import { awaitPackingRequest, packingRequestIdentity } from '../lib/packingRequest';
@@ -20,7 +21,7 @@ import {
 } from '../lib/vatFineSchedule';
 import {
     STOCK_CHECK_MISSING_FINE_ENABLED,
-    STOCK_CHECK_MISSING_FINE,
+    getStockCheckFineAmount,
     STOCK_CHECK_POLICY_START_DATE,
     isVietnamRestDay,
     isPastStockCheckWorkingDay,
@@ -932,6 +933,8 @@ const getPackingLevelOption = (commission: PackingCommissionConfig, key: string)
 // === Điều chỉnh lương thủ công (Admin) ===
 // Key = `${empId}_${YYYY-MM}` ví dụ: "3_2026-04"
 interface PayrollOverride {
+    salesBonusEligible?: boolean; // Đối tượng nhận thưởng doanh thu của tháng
+    packingIncomeEligible?: boolean; // Đối tượng nhận thu nhập đóng gói của tháng
     extraShifts?: number;   // Thêm ca thủ công (cộng vào số ca điểm danh)
     extraAdjust?: number;   // Điều chỉnh tiền thêm (+/-)
     adjustNote?: string;    // Ghi chú điều chỉnh
@@ -960,9 +963,6 @@ const isTemporarilyExcludedFine = (fine: Partial<FineRecord>) => {
     if (fine.source === 'prepack-shortfall'
         || String(fine.id || '').startsWith('fine-prepack-shortfall-')
         || String(fine.type || '').trim().toLocaleLowerCase('vi-VN') === 'thiếu đóng gói sẵn') return true;
-    if (fine.source === 'handling-unit-shift-check'
-        || String(fine.id || '').startsWith('fine-hu-shift-')
-        || String(fine.type || '').trim().toLocaleLowerCase('vi-VN') === 'chưa kiểm kiện cuối ca') return true;
     return String(fine.source || '').startsWith('daily_task_')
         && normalizeAttendanceText(`${(fine as any).taskTitle || ''} ${fine.detail || ''}`).includes('tach kien 5d unicare');
 };
@@ -1770,12 +1770,13 @@ function calculatePayroll(
 
         // === Tính thu nhập đóng gói CÁ NHÂN bằng match linh hoạt ===
         const packingAggregate = packingByEmployee.get(emp.id);
-        const packIncome = packingAggregate?.income || 0;
+        const calculatedPackIncome = packingAggregate?.income || 0;
+        const packIncome = ov?.packingIncomeEligible === false ? 0 : calculatedPackIncome;
         const packOrderCount = packingAggregate?.orderCount || 0;
         const packTotalUnits = packingAggregate?.units || 0;
         const packBreakdown = packingAggregate?.breakdown || {};
 
-        const autoPackIncome = packIncome;
+        const autoPackIncome = calculatedPackIncome;
 
         const isAccruedDuringEmployment = (record: { date?: string; attendanceDate?: string }) => {
             const date = dayjs(finePeriodDate(record) || '');
@@ -1787,6 +1788,7 @@ function calculatePayroll(
 
         const mBonus = bonusesData.filter(b => b.empId === emp.id && isAccruedDuringEmployment(b)).reduce((sum, b) => sum + b.amount, 0);
         const salesBonus = emp.type === 'Official'
+            && ov?.salesBonusEligible !== false
             && (!employmentEnd || employmentEnd.isAfter(dayjs(`${yearNum}-${monthNum}-${daysInPayrollMonth}`), 'day'))
             ? Math.max(0, Math.round(salesBonusAmount))
             : 0;
@@ -4145,6 +4147,8 @@ export default function Attendance() {
     const [salesBonusReadyKey, setSalesBonusReadyKey] = useState('');
     const [salesBonusLoading, setSalesBonusLoading] = useState(false);
     const [salesBonusError, setSalesBonusError] = useState('');
+    const [salesBonusSettingsOpen, setSalesBonusSettingsOpen] = useState(false);
+    const [packingIncomeSettingsOpen, setPackingIncomeSettingsOpen] = useState(false);
     const salesBonusRequestRef = useRef('');
 
     // === State cho quỹ + audit ===
@@ -6261,7 +6265,7 @@ export default function Attendance() {
                         empId: employee.id,
                         type: 'Thiếu kiểm hàng toàn bộ cuối tuần',
                         detail: `Không kiểm toàn bộ kho thứ 7 ${date.format('DD/MM/YYYY')}`,
-                        amount: STOCK_CHECK_MISSING_FINE,
+                        amount: getStockCheckFineAmount(dateKey),
                         date: date.hour(20).minute(0).second(0).millisecond(0).toISOString(),
                         source: 'stock_check_missing' as any,
                     }));
@@ -6318,7 +6322,7 @@ export default function Attendance() {
                 empId: assignee.id,
                 type: 'Thiếu kiểm hàng ngày',
                 detail: `Không kiểm hàng ngày ${date.format('DD/MM/YYYY')}`,
-                amount: STOCK_CHECK_MISSING_FINE,
+                amount: getStockCheckFineAmount(dateKey),
                 date: date.hour(20).minute(0).second(0).millisecond(0).toISOString(),
                 source: 'stock_check_missing' as any,
             });
@@ -6588,7 +6592,9 @@ export default function Attendance() {
                 if (!score) return;
                 score.orderCount += Math.max(1, Number(order.orderCount || 1));
                 score.units += packing.units;
-                score.income += packing.income;
+                if (payrollOverrides[`${employee.id}_${dayjs(order.timestamp).format('YYYY-MM')}`]?.packingIncomeEligible !== false) {
+                    score.income += packing.income;
+                }
             });
         });
 
@@ -6616,7 +6622,7 @@ export default function Attendance() {
             totalUnits: allScores.reduce((sum, entry) => sum + entry.units, 0),
             totalIncome: allScores.reduce((sum, entry) => sum + entry.income, 0),
         };
-    }, [activeTab, employees, hiddenEmployeeKeys, packingDateRange, livePackingLogs, livePackingTrendLogs, packingCommission]);
+    }, [activeTab, employees, hiddenEmployeeKeys, packingDateRange, livePackingLogs, livePackingTrendLogs, packingCommission, payrollOverrides]);
     const overviewWareHousePacking = useMemo(() => {
         let totalUnits = 0;
         overviewPackingLogs.forEach(order => {
@@ -8504,6 +8510,16 @@ const openConfigModal = () => {
     // TAB 2: ĐÓNG GÓI (TEAM)
     // ============================================
     const renderPackaging = () => {
+        const packingPeriodKey = packingDateRange[0].format('YYYY-MM');
+        const isSinglePackingMonth = packingDateRange[0].isSame(packingDateRange[1], 'month');
+        const isPackingMonthLocked = lockedPeriods.some(period =>
+            !dayjs(period.end).isBefore(packingDateRange[0].startOf('month'), 'day')
+            && !dayjs(period.start).isAfter(packingDateRange[0].endOf('month'), 'day'));
+        const isPackingOrderPayable = (order: PackingOrderLog) => {
+            const packers = employees.filter(employee => matchPacker(order.packer, employee));
+            return !packers.length || packers.some(employee =>
+                payrollOverrides[`${employee.id}_${dayjs(order.timestamp).format('YYYY-MM')}`]?.packingIncomeEligible !== false);
+        };
         const unitPrice = 20;
         const { orderLogs, tableRows, leaderboard, totalOrders, totalUnits, totalIncome } = packingDashboardData;
         // Compatibility aliases for the unreachable legacy layout kept below.
@@ -8562,6 +8578,30 @@ const openConfigModal = () => {
 
         return (
             <div className="packing-league">
+                {isAdmin && <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+                    <Tooltip title={!isSinglePackingMonth ? 'Chọn khoảng ngày trong cùng một tháng để cài đặt người nhận.'
+                        : isPackingMonthLocked ? 'Mở khóa kỳ lương trước khi sửa người nhận thu nhập đóng gói.'
+                            : `Áp dụng cho tháng ${packingDateRange[0].format('MM/YYYY')}.`}>
+                        <Button icon={<SettingOutlined />} disabled={!isCoreSnapshotReady || !isSinglePackingMonth || isPackingMonthLocked}
+                            onClick={() => setPackingIncomeSettingsOpen(true)}>Cài đặt nhân viên nhận thu nhập</Button>
+                    </Tooltip>
+                </div>}
+                {isAdmin && <SalesBonusSettingsModal
+                    key={`packing-${packingPeriodKey}`}
+                    kind="packing"
+                    open={packingIncomeSettingsOpen && isSinglePackingMonth}
+                    periodKey={packingPeriodKey}
+                    eligibleEmployeeIds={visibleEmployees.filter(employee => employee.type === 'Official' || employee.type === 'Seasonal').map(employee => Number(employee.id))}
+                    onClose={() => setPackingIncomeSettingsOpen(false)}
+                    onSaved={(nextOverrides) => {
+                        attendanceInitialDataCache = null;
+                        setPayrollOverrides(nextOverrides as Record<string, PayrollOverride>);
+                        if (latestSnapshotRef.current) latestSnapshotRef.current = {
+                            ...(latestSnapshotRef.current as Record<string, any>), payrollOverrides: nextOverrides,
+                        };
+                        setPackingIncomeSettingsOpen(false);
+                    }}
+                />}
                 <section className="packing-duel" aria-label="Bảng đua số đơn đóng gói">
                     <header className="packing-duel__header">
                         <div className="packing-duel__title"><TrophyOutlined /><h3>Số đơn hàng</h3></div>
@@ -8653,7 +8693,7 @@ const openConfigModal = () => {
                                                 )}</div></div></td>
                                                 <td><strong className="packing-blue-number">{entry.orderCount}</strong><small> đơn</small></td>
                                                 <td><strong>{entry.units.toLocaleString('vi-VN')}</strong><small> SP</small></td>
-                                                <td><strong className="packing-income">{fmt(entry.income)}</strong></td>
+                                                <td><strong className="packing-income">{fmt(entry.income)}</strong>{isSinglePackingMonth && payrollOverrides[`${entry.id}_${packingPeriodKey}`]?.packingIncomeEligible === false && <small>Không nhận thu nhập tháng này</small>}</td>
                                                 <td><strong>{share}%</strong><div className="packing-meter"><i style={{ width: `${share}%` }} /></div></td>
                                                 <td><span className={entry.trend >= 0 ? 'packing-up' : 'packing-down'}>{entry.trend >= 0 ? <ArrowUpOutlined /> : <ArrowDownOutlined />} {entry.trend >= 0 ? '+' : '−'}{Math.abs(entry.trend)} đơn</span></td>
                                             </tr>;
@@ -8674,7 +8714,7 @@ const openConfigModal = () => {
                                 size="small"
                                 tableLayout="fixed"
                                 expandable={{
-                                    expandedRowRender: (record: PackingOrderLog) => <div className="packing-order-detail">{record.items.map((item, index) => {
+                                    expandedRowRender: (record: PackingOrderLog) => <div className="packing-order-detail">{!isPackingOrderPayable(record) && <Alert type="info" message="Không tính thu nhập đóng gói theo cài đặt tháng. Chi tiết dưới đây giữ đơn giá và sản lượng gốc để đối chiếu." />}{record.items.map((item, index) => {
                                         const effectiveCommission = getPackingCommissionAt(packingCommission, record.timestamp);
                                         const level = getPackingLevel(item, effectiveCommission);
                                         const levelMeta = getPackingLevelOption(effectiveCommission, level);
@@ -8706,7 +8746,7 @@ const openConfigModal = () => {
                                         const extraItems = Math.max(0, record.items.length - 1);
                                         return <div className="packing-product-summary"><Tooltip title={record.items.map(item => `${item.productName}${item.variant ? ` - ${item.variant}` : ''}`).join('\n')}><span>{productName}</span></Tooltip><small>{calcPacksFromItems(record.items, record.timestamp).toLocaleString('vi-VN')} SP{extraItems > 0 ? ` · +${extraItems} sản phẩm` : ''}</small></div>;
                                     } },
-                                    { title: 'Hoa hồng', width: 115, align: 'right' as const, render: (_: any, record: PackingOrderLog) => <strong className="packing-order-income">+{fmt(calcPackingCommission(record.items, packingCommission, record.timestamp).income)}</strong> },
+                                    { title: 'Hoa hồng', width: 115, align: 'right' as const, render: (_: any, record: PackingOrderLog) => <Tooltip title={isPackingOrderPayable(record) ? '' : 'Không nhận thu nhập đóng gói trong tháng này.'}><strong className="packing-order-income">+{fmt(isPackingOrderPayable(record) ? calcPackingCommission(record.items, packingCommission, record.timestamp).income : 0)}</strong></Tooltip> },
                                 ]}
                             />
                         </section>
@@ -9044,11 +9084,25 @@ const openConfigModal = () => {
     // TAB 3: THƯỞNG
     // ============================================
     const renderSalesBonus = () => {
+        const periodKey = overviewDateRange[0].format('YYYY-MM');
+        const periodEnd = overviewDateRange[0].endOf('month');
+        const eligibleEmployeeIds = employees
+            .filter(item => item.type === 'Official')
+            .filter(item => {
+                const endDate = employmentEndDates[normalizeAttendanceText(item.username)];
+                return !endDate || dayjs(endDate).isAfter(periodEnd, 'day');
+            })
+            .map(item => Number(item.id))
+            .filter(id => Number.isSafeInteger(id) && id > 0);
         const employee = currentEmployeePayroll
             || (isAdmin ? payrollData.find(item => item.type === 'Official') : undefined)
             || employees.find(item => matchesCurrentUserPayrollRow(item))
             || employees[0];
-        const isEligible = employee?.type === 'Official';
+        const isOfficial = employee?.type === 'Official';
+        const isEligible = Boolean(isOfficial
+            && payrollOverrides[`${employee?.id}_${overviewDateRange[0].format('YYYY-MM')}`]?.salesBonusEligible !== false
+            && (!employmentEndDates[normalizeAttendanceText(employee?.username)]
+                || dayjs(employmentEndDates[normalizeAttendanceText(employee?.username)]).isAfter(overviewDateRange[0].endOf('month'), 'day')));
         const employeeBonus = isEligible
             ? Number(isCurrentPeriodLocked ? (employee?.salesBonus || 0) : activeSalesBonusSummary.bonusAmount)
             : 0;
@@ -9058,7 +9112,14 @@ const openConfigModal = () => {
             : packingRaceLeaderFox;
 
         return (
+            <>
             <section className="att-sales-bonus">
+                {isAdmin && <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 12 }}>
+                    <Tooltip title={isCurrentPeriodLocked ? 'Mở khóa kỳ lương trước khi sửa người nhận thưởng.' : 'Chọn nhân viên được nhận thưởng doanh thu trong tháng đang xem.'}>
+                        <Button icon={<SettingOutlined />} disabled={!isCoreSnapshotReady || isCurrentPeriodLocked}
+                            onClick={() => setSalesBonusSettingsOpen(true)}>Cài đặt nhân viên nhận thưởng</Button>
+                    </Tooltip>
+                </div>}
                 {salesBonusError && !lockedSalesBonusSummary && (
                     <Alert
                         type="error"
@@ -9073,16 +9134,16 @@ const openConfigModal = () => {
                     <div className="att-sales-bonus__formula-card">
                         <div
                             className="att-sales-bonus__employee"
-                            title={`${employee?.name || 'Chưa xác định nhân viên'} · ${isEligible ? 'Nhân viên chính thức' : 'Nhân viên thời vụ'}`}
+                            title={`${employee?.name || 'Chưa xác định nhân viên'} · ${isOfficial ? 'Nhân viên chính thức' : 'Nhân viên thời vụ'}`}
                         >
                             <div className="att-sales-bonus__avatar"><img src={mascot} alt={`Ảnh đại diện ${employee?.name || 'nhân viên'}`} /></div>
                             <div className="att-sales-bonus__employee-copy">
                                 <h3>{employee?.name || 'Chưa xác định nhân viên'}</h3>
                                 <p>@{employee?.username || '—'}</p>
-                                <span className={isEligible ? 'is-official' : 'is-seasonal'}><CrownOutlined /> {isEligible ? 'Nhân viên chính thức' : 'Nhân viên thời vụ'}</span>
+                                <span className={isOfficial ? 'is-official' : 'is-seasonal'}><CrownOutlined /> {isOfficial ? 'Nhân viên chính thức' : 'Nhân viên thời vụ'}</span>
                                 <div className={`att-sales-bonus__eligibility ${isEligible ? '' : 'is-ineligible'}`}>
                                     <InfoCircleOutlined />
-                                    <span><strong>{isEligible ? 'Đủ điều kiện nhận thưởng' : 'Không thuộc đối tượng áp dụng'}</strong></span>
+                                    <span><strong>{isEligible ? 'Đủ điều kiện nhận thưởng' : isOfficial && eligibleEmployeeIds.includes(Number(employee?.id)) ? 'Không được chọn nhận thưởng tháng này' : 'Không thuộc đối tượng áp dụng'}</strong></span>
                                 </div>
                             </div>
                         </div>
@@ -9146,6 +9207,26 @@ const openConfigModal = () => {
                     </div>
                 </Spin>
             </section>
+            {isAdmin && (
+                <SalesBonusSettingsModal
+                    open={salesBonusSettingsOpen}
+                    periodKey={periodKey}
+                    eligibleEmployeeIds={eligibleEmployeeIds}
+                    onClose={() => setSalesBonusSettingsOpen(false)}
+                    onSaved={(nextOverrides) => {
+                        attendanceInitialDataCache = null;
+                        setPayrollOverrides(nextOverrides as Record<string, PayrollOverride>);
+                        if (latestSnapshotRef.current) {
+                            latestSnapshotRef.current = {
+                                ...(latestSnapshotRef.current as Record<string, any>),
+                                payrollOverrides: nextOverrides,
+                            };
+                        }
+                        setSalesBonusSettingsOpen(false);
+                    }}
+                />
+            )}
+            </>
         );
     };
 
@@ -11497,7 +11578,12 @@ const openConfigModal = () => {
                             onOk: () => {
                                 setPayrollOverrides(prev => {
                                     const next = { ...prev };
-                                    delete next[overrideKey];
+                                    const recipientFlags = Object.fromEntries((['salesBonusEligible', 'packingIncomeEligible'] as const)
+                                        .filter(field => typeof prev[overrideKey]?.[field] === 'boolean')
+                                        .map(field => [field, prev[overrideKey][field]]));
+                                    if (Object.keys(recipientFlags).length) {
+                                        next[overrideKey] = recipientFlags;
+                                    } else delete next[overrideKey];
                                     return next;
                                 });
                                 // Refresh payslip data

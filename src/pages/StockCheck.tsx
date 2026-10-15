@@ -48,6 +48,7 @@ import { useCurrentUser } from '../lib/hooks/useCurrentUser';
 import {
     STOCK_CHECK_MISSING_FINE_ENABLED,
     STOCK_CHECK_MISSING_FINE,
+    getStockCheckFineAmount,
     STOCK_CHECK_POLICY_START_DATE,
     isVietnamRestDay,
 } from '../lib/workCalendar';
@@ -909,7 +910,7 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
             width: 480,
             content: (
                 <div>
-                    <p style={{ marginBottom: 8 }}>Hệ thống sẽ ghi nhận phạt <strong style={{ color: '#dc2626' }}>50.000đ</strong> cho {todaySession.assignedName || todaySession.assignedTo}.</p>
+                    <p style={{ marginBottom: 8 }}>Hệ thống sẽ ghi nhận phạt <strong style={{ color: '#dc2626' }}>{getStockCheckFineAmount(todaySession.date).toLocaleString('vi-VN')}đ</strong> cho {todaySession.assignedName || todaySession.assignedTo}.</p>
                     <Input.TextArea
                         autoFocus
                         rows={3}
@@ -936,7 +937,7 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
                     throw new Error(result?.error || 'Không thể từ chối phiên kiểm hàng.');
                 }
                 setSessions(current => current.map(session => session.id === todaySession.id ? { ...session, ...result.session } : session));
-                message.success(`Đã từ chối phiên và ghi nhận phạt ${(result.penaltyAmount || 50000).toLocaleString('vi-VN')}đ.`);
+                message.success(`Đã từ chối phiên và ghi nhận phạt ${(result.penaltyAmount ?? getStockCheckFineAmount(todaySession.date)).toLocaleString('vi-VN')}đ.`);
             },
         });
     }, [todaySession, user?.role, isSessionSubmitted]);
@@ -3430,12 +3431,12 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
                             </Button>
                         )}
                         {user?.role === 'admin' && activeTab === 'daily' && isSessionSubmitted && todaySession?.reviewStatus !== 'rejected' && (
-                            <Tooltip title="Từ chối phiên và ghi nhận phạt 50.000đ">
+                            <Tooltip title={`Từ chối phiên và ghi nhận phạt ${getStockCheckFineAmount(todaySession.date).toLocaleString('vi-VN')}đ`}>
                                 <Button
                                     danger
                                     type="default"
                                     size="small"
-                                    aria-label="Từ chối phiên và ghi nhận phạt 50.000đ"
+                                    aria-label={`Từ chối phiên và ghi nhận phạt ${getStockCheckFineAmount(todaySession.date).toLocaleString('vi-VN')}đ`}
                                     onClick={handleRejectDailySession}
                                     style={{ paddingInline: 10, fontWeight: 700, background: '#fff1f0', borderColor: '#ff7875', color: '#cf1322' }}
                                 >
@@ -3460,7 +3461,7 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
                         type="error"
                         showIcon
                         style={{ marginBottom: 12, borderRadius: 8 }}
-                        message={`Phiên đã bị từ chối · Đã ghi nhận phạt ${(todaySession.rejectionPenaltyAmount || 50000).toLocaleString('vi-VN')}đ`}
+                        message={`Phiên đã bị từ chối · Đã ghi nhận phạt ${(todaySession.rejectionPenaltyAmount ?? getStockCheckFineAmount(todaySession.date)).toLocaleString('vi-VN')}đ`}
                         description={`${todaySession.rejectionReason || 'Không có lý do'} · Người từ chối: ${todaySession.rejectedBy || 'Admin'}`}
                     />
                 )}
