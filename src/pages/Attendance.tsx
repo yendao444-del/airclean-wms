@@ -6592,9 +6592,10 @@ export default function Attendance() {
                 if (!score) return;
                 score.orderCount += Math.max(1, Number(order.orderCount || 1));
                 score.units += packing.units;
-                if (payrollOverrides[`${employee.id}_${dayjs(order.timestamp).format('YYYY-MM')}`]?.packingIncomeEligible !== false) {
-                    score.income += packing.income;
-                }
+                // The packing dashboard is an operational production ledger.
+                // Recipient settings affect payroll only; never hide or rewrite
+                // the recorded order income used for ranking/reconciliation.
+                score.income += packing.income;
             });
         });
 
@@ -6622,7 +6623,7 @@ export default function Attendance() {
             totalUnits: allScores.reduce((sum, entry) => sum + entry.units, 0),
             totalIncome: allScores.reduce((sum, entry) => sum + entry.income, 0),
         };
-    }, [activeTab, employees, hiddenEmployeeKeys, packingDateRange, livePackingLogs, livePackingTrendLogs, packingCommission, payrollOverrides]);
+    }, [activeTab, employees, hiddenEmployeeKeys, packingDateRange, livePackingLogs, livePackingTrendLogs, packingCommission]);
     const overviewWareHousePacking = useMemo(() => {
         let totalUnits = 0;
         overviewPackingLogs.forEach(order => {
@@ -8746,7 +8747,7 @@ const openConfigModal = () => {
                                         const extraItems = Math.max(0, record.items.length - 1);
                                         return <div className="packing-product-summary"><Tooltip title={record.items.map(item => `${item.productName}${item.variant ? ` - ${item.variant}` : ''}`).join('\n')}><span>{productName}</span></Tooltip><small>{calcPacksFromItems(record.items, record.timestamp).toLocaleString('vi-VN')} SP{extraItems > 0 ? ` · +${extraItems} sản phẩm` : ''}</small></div>;
                                     } },
-                                    { title: 'Hoa hồng', width: 115, align: 'right' as const, render: (_: any, record: PackingOrderLog) => <Tooltip title={isPackingOrderPayable(record) ? '' : 'Không nhận thu nhập đóng gói trong tháng này.'}><strong className="packing-order-income">+{fmt(isPackingOrderPayable(record) ? calcPackingCommission(record.items, packingCommission, record.timestamp).income : 0)}</strong></Tooltip> },
+                                    { title: 'Hoa hồng', width: 115, align: 'right' as const, render: (_: any, record: PackingOrderLog) => <div style={{ textAlign: 'right' }}><strong className="packing-order-income">+{fmt(calcPackingCommission(record.items, packingCommission, record.timestamp).income)}</strong>{!isPackingOrderPayable(record) && <small style={{ display: 'block', color: '#8c8c8c' }}>Không tính vào lương tháng</small>}</div> },
                                 ]}
                             />
                         </section>

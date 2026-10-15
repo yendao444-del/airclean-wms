@@ -63,12 +63,8 @@ if not defined CURRENT_VERSION (
 echo Current version: v!CURRENT_VERSION!
 echo.
 
-if exist "DBYPOS-PATCH-v!CURRENT_VERSION!.zip" (
-    echo [ERROR] An earlier patch ZIP still exists. It will not be deleted.
-    echo [INFO] To continue it: updates\RELEASE-ver3.bat --resume !CURRENT_VERSION!
-    pause
-    exit /b 1
-)
+call node scripts\release-publish.cjs --prepare-existing "!CURRENT_VERSION!"
+if errorlevel 1 goto release_failed
 
 for /f %%v in ('node scripts\\release-version.cjs next-patch') do set NEW_VERSION=%%v
 if not defined NEW_VERSION (
@@ -76,12 +72,8 @@ if not defined NEW_VERSION (
     pause
     exit /b 1
 )
-if exist "DBYPOS-PATCH-v!NEW_VERSION!.zip" (
-    echo [ERROR] Target patch ZIP already exists. It will not be overwritten.
-    echo [INFO] To continue it: updates\RELEASE-ver3.bat --resume !NEW_VERSION!
-    pause
-    exit /b 1
-)
+call node scripts\release-publish.cjs --prepare-existing "!NEW_VERSION!"
+if errorlevel 1 goto release_failed
 
 echo Bump version: v!CURRENT_VERSION! -^> v!NEW_VERSION!
 echo.

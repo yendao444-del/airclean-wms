@@ -24,6 +24,11 @@ cap ZIP va `.sha256`, sau do chay tu thu muc goc:
 .\updates\RELEASE-ver3.bat --resume 1.0.488
 ```
 
+Neu lan chay bi dung khi chua tao du cap ZIP + checksum, chay BAT binh thuong.
+File le con sot (ZIP thieu checksum hoac checksum thieu ZIP) duoc tu dong chuyen
+vao thu muc rieng `tmp/release-stale-v<version>-...`, khong xoa hay ghi de,
+roi BAT build lai. Cap file day du van duoc giu nguyen de dung `--resume`.
+
 Che do nay kiem tra ZIP, version ben trong, SHA-256 va commit release da push;
 khong tang version, commit hay push. Release duoc giu o draft trong khi upload
 tung asset voi `--clobber`. Chi publish sau khi GitHub xac nhan dung kich thuoc

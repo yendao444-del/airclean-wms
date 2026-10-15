@@ -32329,8 +32329,8 @@ ipcMain.handle("attendance:updatePayrollOverride", async (event, payload = {}) =
         const payrollOverrides = { ...(current || {}) };
         let savedOverride = null;
         if (clear) {
-          // Reset monetary adjustments without opting a disabled employee
-          // back into the separately administered revenue bonus.
+          // Reset monetary adjustments without changing the separately
+          // administered sales-bonus or packing-income recipients.
           const recipientFlags = Object.fromEntries(["salesBonusEligible", "packingIncomeEligible"]
             .filter(field => typeof payrollOverrides[overrideKey]?.[field] === "boolean")
             .map(field => [field, payrollOverrides[overrideKey][field]]));

@@ -98,7 +98,7 @@ export default function SalesBonusSettingsModal({ open, periodKey, eligibleEmplo
     >
         <Alert type="info" showIcon style={{ marginBottom: 16 }} message={`Áp dụng riêng cho tháng ${periodKey.slice(5)}/${periodKey.slice(0, 4)}`}
             description={isPacking
-                ? 'Chọn nhân viên được nhận thu nhập đóng gói. Bỏ chọn để không tính khoản thu nhập này trong bảng lương, phiếu lương và Gmail của tháng này. Đơn hàng, sản lượng và bảng xếp hạng vẫn được giữ nguyên.'
+                ? 'Chọn nhân viên được nhận thu nhập đóng gói. Bỏ chọn để không tính khoản thu nhập này trong bảng lương, phiếu lương và Gmail của tháng này. Giữ nguyên đơn hàng, sản lượng, bảng xếp hạng, đơn giá và thưởng vô địch tuần. Không sửa kỳ lương đã khóa.'
                 : 'Chọn nhân viên chính thức được nhận thưởng doanh thu theo tỷ lệ hiện tại. Bỏ chọn để không tính khoản thưởng này trong bảng lương, phiếu lương và Gmail của tháng này. Không thay đổi tỷ lệ thưởng hoặc kỳ lương đã khóa.'} />
         {error && <Alert type="error" showIcon message={error} style={{ marginBottom: 12 }} />}
         <Spin spinning={loading}>

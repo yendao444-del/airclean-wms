@@ -14,6 +14,25 @@ function run(command, args, allowFailure = false) {
 
 const hash = (bytes) => crypto.createHash('sha256').update(bytes).digest('hex');
 
+function prepareExistingArtifact(version, directory = process.cwd()) {
+  if (!/^\d+\.\d+\.\d+$/.test(version)) throw new Error('Expected a version such as 1.0.488.');
+  const root = path.resolve(directory);
+  const name = `DBYPOS-PATCH-v${version}.zip`;
+  const candidates = [path.join(root, name), path.join(root, `${name}.sha256`)];
+  const existing = candidates.filter((file) => fs.existsSync(file));
+  if (!existing.length) return { status: 'none' };
+  if (existing.length === 2) return { status: 'pair' };
+  // Preserve incomplete output from an interrupted build. A fresh private
+  // directory prevents overwriting older evidence; never delete a stale ZIP.
+  if (!fs.lstatSync(existing[0]).isFile()) throw new Error(`Expected a regular release file: ${existing[0]}`);
+  const temporaryRoot = path.join(root, 'tmp');
+  fs.mkdirSync(temporaryRoot, { recursive: true });
+  const backup = fs.mkdtempSync(path.join(temporaryRoot, `release-stale-v${version}-`));
+  const destination = path.join(backup, path.basename(existing[0]));
+  fs.renameSync(existing[0], destination);
+  return { status: 'archived', destination };
+}
+
 function validateArtifact(version, archivePath) {
   if (!/^\d+\.\d+\.\d+$/.test(version)) throw new Error('Expected a version such as 1.0.488.');
   const zipPath = path.resolve(archivePath);
@@ -119,6 +138,15 @@ function publishRelease({ version, assets, target, remote }, execute = run, log 
 }
 
 function main(args) {
+  if (args[0] === '--prepare-existing') {
+    const version = args[1];
+    const result = prepareExistingArtifact(version);
+    if (result.status === 'pair') {
+      throw new Error(`ZIP and checksum already exist. To continue: updates\\RELEASE-ver3.bat --resume ${version}`);
+    }
+    if (result.status === 'archived') console.log(`[Release] Incomplete previous output preserved at ${result.destination}. Continuing fresh build.`);
+    return;
+  }
   const verifyOnly = args[0] === '--verify-only';
   if (verifyOnly) args = args.slice(1);
   const [version, archivePath] = args;
@@ -143,4 +171,4 @@ if (require.main === module) {
   }
 }
 
-module.exports = { validateArtifact, resolveTarget, publishRelease };
+module.exports = { prepareExistingArtifact, validateArtifact, resolveTarget, publishRelease };
