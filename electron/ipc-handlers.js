@@ -292,6 +292,7 @@ const { reconcilePrepackShortfallFines, isPrepackShortfallFine } = require("./pr
 const { MAX_QUANTITY: HANDLING_UNIT_MAX_QUANTITY, assertPackageQuantity, readLabelNumbers, assignLabelNumbers } = require("./handling-unit-labels.cjs");
 const { assertMergePolicy } = require("./handling-unit-merge-policy.cjs");
 const { recordShiftEvents, readShiftPolicy, reconcileShiftFines, assigneeFor: shiftAssigneeFor, dayKey: shiftDayKey } = require("./handling-unit-shift-policy.cjs");
+const autoReturns = require('./handling-unit-auto-returns.cjs');
 
 // 📦 Offline Queue — lưu scan khi mất mạng, sync lại khi có mạng
 const offlineQueue = require("./offline-queue");
@@ -576,9 +577,66 @@ setInterval(() => void cleanupExpiredPrepackEvidence().catch((error) => console.
 // is created; the attendance read layer excludes these rows immediately.
 setTimeout(() => void enqueueAttendanceMaintenance("prepack", () => reconcilePrepackShortfallFines(getPrismaDirectTx(), { now: new Date() })).catch((error) => console.warn("Prepack fine reconciliation error:", error?.message || error)), 90_000);
 setInterval(() => void enqueueAttendanceMaintenance("prepack", () => reconcilePrepackShortfallFines(getPrismaDirectTx(), { now: new Date() })).catch((error) => console.warn("Prepack fine reconciliation error:", error?.message || error)), 15 * 60 * 1000);
+let autoReturnMaintenancePromise = null;
+let autoReturnMaintenanceTimer = null;
+let autoReturnMaintenanceQueued = false;
+async function maintainAutoReturns() {
+  if (!prisma) return [];
+  if (autoReturnMaintenancePromise) return autoReturnMaintenancePromise;
+  autoReturnMaintenancePromise = (async () => {
+    const client = getPrismaDirectTx();
+    // Discover return SKUs outside the write transactions. Each SKU then gets
+    // its own short, locked transaction so one busy/invalid SKU cannot roll
+    // back an otherwise valid backlog for every other product.
+    const opened = await client.handlingUnit.findMany({
+      where: { status: 'opened' },
+      select: { sku: true, packagingName: true, remainingQuantity: true },
+    });
+    const normalizeReturnName = value => String(value || '').normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '').replace(/đ/g, 'd').trim().toLowerCase();
+    const skus = [...new Set(opened
+      .filter(row => normalizeReturnName(row.packagingName).includes('hang hoan')
+        && Number.isSafeInteger(row.remainingQuantity) && row.remainingQuantity > 0)
+      .map(row => String(row.sku || '').trim()).filter(Boolean))];
+    const transfers = [];
+    for (const sku of skus) {
+      try {
+        const batch = await client.$transaction(
+          tx => autoReturns.mergeWaitingReturns(tx, { skus: [sku] }, appendHandlingUnitsTransactions),
+          { timeout: 30000, maxWait: 5000 },
+        );
+        transfers.push(...batch);
+      } catch (error) {
+        console.warn(`Automatic return merge deferred for ${sku}:`, error?.message || error);
+      }
+    }
+    return transfers;
+  })();
+  try {
+    const transfers = await autoReturnMaintenancePromise;
+    if (transfers.length) broadcastHandlingUnitsChanged('AUTO_RETURN_MERGED', { transfers });
+    return transfers;
+  } finally {
+    autoReturnMaintenancePromise = null;
+    if (autoReturnMaintenanceQueued) { autoReturnMaintenanceQueued = false; scheduleAutoReturnMaintenance(); }
+  }
+}
+function scheduleAutoReturnMaintenance() {
+  if (autoReturnMaintenanceTimer) return;
+  if (autoReturnMaintenancePromise) { autoReturnMaintenanceQueued = true; return; }
+  autoReturnMaintenanceTimer = setTimeout(async () => {
+    autoReturnMaintenanceTimer = null;
+    try { await maintainAutoReturns(); }
+    catch (error) { console.warn('Automatic return merge:', error.message); }
+  }, 500);
+}
 async function maintainHandlingUnitShiftFines() {
   try {
-    return await enqueueAttendanceMaintenance("handling-unit-shift", () => reconcileShiftFines(getPrismaDirectTx()));
+    return await enqueueAttendanceMaintenance("handling-unit-shift", async () => {
+      try { await maintainAutoReturns(); }
+      catch (error) { console.warn('Automatic return merge:', error.message); }
+      return reconcileShiftFines(getPrismaDirectTx());
+    });
   } finally {
     invalidateAttendanceSnapshotCaches();
   }
@@ -4985,6 +5043,7 @@ ipcMain.handle("pickup:startWatch", async (event, folderPath) => {
 
 // Update stock khi export hoặc cân bằng kho
 function emitStockChanged(payload = {}) {
+  scheduleAutoReturnMaintenance();
   try {
     const { BrowserWindow } = require("electron");
     const eventPayload = { ...payload, at: new Date().toISOString() };
@@ -5298,12 +5357,20 @@ ipcMain.handle("refunds:completeAndRestore", async (event, data = {}) => {
           }
           allocationState.receivedRefund = true;
           if (data.isCustom) allocationState.hasCustomRefund = true;
-          const allocationValue = JSON.stringify(allocationState);
-          await tx.appConfig.upsert({ where: { key: allocationKey }, create: { key: allocationKey, value: allocationValue }, update: { value: allocationValue } });
 
           const returnUnits = [];
-          for (let index = 0; index < physicalReturnItems.length; index += 1) {
-            const item = physicalReturnItems[index];
+          const autoMerged = [];
+          const residualReturnItems = [];
+          for (const item of physicalReturnItems) {
+            const product = await resolveProductForHandlingSku(tx, item.sku);
+            const merge = await autoReturns.receiveIntoOpened(
+              tx, { ...item, baseUnit: product.baseUnit }, currentSession.username, reference, appendHandlingUnitsTransactions,
+            );
+            autoMerged.push(...merge.merged);
+            if (merge.remainder > 0) residualReturnItems.push({ ...item, quantity: merge.remainder });
+          }
+          for (let index = 0; index < residualReturnItems.length; index += 1) {
+            const item = residualReturnItems[index];
             const product = await resolveProductForHandlingSku(tx, item.sku);
             for (const quantity of refundPackageQuantities(item.quantity)) {
               const code = newRefundHandlingUnitCode(refund.id, item.sku, returnUnits.length + 1);
@@ -5338,13 +5405,22 @@ ipcMain.handle("refunds:completeAndRestore", async (event, data = {}) => {
             })),
           );
 
+          // Persist the receipt source map alongside its retry marker, not
+          // only in the rolling display history.
+          allocationState.receiptSources = {
+            merged: autoMerged,
+            returnUnits: returnUnits.map(unit => ({ code: unit.code, sku: unit.sku, quantity: unit.remainingQuantity })),
+          };
+          const receiptValue = JSON.stringify(allocationState);
+          await tx.appConfig.upsert({ where: { key: allocationKey }, create: { key: allocationKey, value: receiptValue }, update: { value: receiptValue } });
+
           const nextNotes =
             data.notes === undefined ? refund.notes : String(data.notes || "");
           const updatedRefund = await tx.refund.update({
             where: { id: refund.id },
             data: { status: "completed", notes: nextNotes },
           });
-          return { refund: updatedRefund, items: physicalReturnItems, reference, returnUnits };
+          return { refund: updatedRefund, items: physicalReturnItems, reference, returnUnits, autoMerged };
         },
         { timeout: 30000, maxWait: 10000 },
       ),
@@ -5363,6 +5439,7 @@ ipcMain.handle("refunds:completeAndRestore", async (event, data = {}) => {
       refundId,
       reference: response.reference,
       codes: response.returnUnits.map((unit) => unit.code),
+      autoMerged: response.autoMerged || [],
     });
     return { success: true, data: response };
   } catch (error) {
@@ -7829,7 +7906,14 @@ ipcMain.handle("handlingUnits:getWorkspace", async (_event, options = {}) => {
 
     // Finish all reads before scheduling maintenance; a refresh triggered by
     // its broadcast is coalesced and cannot start another stock transaction.
-    if (!stockCheckWorkspace) void scheduleHandlingUnitWorkspaceSync(currentSession?.username || 'System');
+    if (!stockCheckWorkspace) {
+      // Do not hold the first paint on Supabase or the global stock lock.
+      // Older return packages are drained in the background and the
+      // AUTO_RETURN_MERGED broadcast causes a fresh workspace snapshot after
+      // the transaction commits.
+      scheduleAutoReturnMaintenance();
+      void scheduleHandlingUnitWorkspaceSync(currentSession?.username || 'System');
+    }
     return {
       success: true,
       data: {
@@ -10161,6 +10245,7 @@ function clearTelegramWmsInlineKeyboard(chatId, messageId) {
 }
 
 function broadcastHandlingUnitsChanged(type, data) {
+  if (!['AUTO_RETURN_MERGED', 'QR_LABELS_ISSUED', 'QR_LABELS_PRINTED', 'MOVE'].includes(type)) scheduleAutoReturnMaintenance();
   try {
     const { BrowserWindow } = require("electron");
     BrowserWindow.getAllWindows().forEach((win) => {
@@ -12667,7 +12752,10 @@ ipcMain.handle("handlingUnits:mergeReturnUnit", async (_event, payload = {}) => 
     );
     if (!operationKey) throw new Error("Mã chống gộp kiện trùng không hợp lệ.");
 
-    const result = await prisma.$transaction(async (tx) => {
+    // Source/target balances, both ledgers and the retry marker must commit
+    // together. Use the transaction client with an explicit budget instead
+    // of Prisma's 5s default on the UI read pool.
+    const result = await getPrismaDirectTx().$transaction(async (tx) => {
       await lockHandlingUnitMutation(tx, [sourceCode, targetCode]);
       const completed = await tx.appConfig.findUnique({ where: { key: operationKey } });
       if (completed) {
@@ -12744,7 +12832,7 @@ ipcMain.handle("handlingUnits:mergeReturnUnit", async (_event, payload = {}) => 
         },
       });
       return { source: updatedSource, target: updatedTarget, quantity, duplicate: false };
-    });
+    }, { timeout: 30000, maxWait: 10000 });
 
     if (!result.duplicate) {
       broadcastHandlingUnitsChanged("RETURN_UNIT_MERGED", {

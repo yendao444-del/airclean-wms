@@ -858,6 +858,13 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
   }, [activeModuleTab]);
   const [historyScope, setHistoryScope] = useState<"units" | "prepack">(initialTab);
   const [prepackCreateRequest, setPrepackCreateRequest] = useState(0);
+  const [prepackWorkOpen, setPrepackWorkOpen] = useState(false);
+  const canCreatePrepack = canCreatePackagePacking(user?.role, isRolePreview);
+  const openPrepackWork = (create = false) => {
+    if (!canCreatePrepack) return;
+    setPrepackWorkOpen(true);
+    if (create) setPrepackCreateRequest(value => value + 1);
+  };
   const [workspace, setWorkspace] = useState(() =>
     handlingUnitsWorkspaceCache
       ? { ...emptyWorkspace, ...handlingUnitsWorkspaceCache }
@@ -1164,8 +1171,7 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
   const [shiftCheckScope, setShiftCheckScope] = useState<"all" | "mandatory">("all");
   const [shiftCheckFocusCode, setShiftCheckFocusCode] = useState<string | null>(null);
   const [shiftCheckSnapshot, setShiftCheckSnapshot] = useState<ShiftCheckCandidate[]>([]);
-  const [shiftCheckFamily, setShiftCheckFamily] = useState("");
-  const [shiftCheckColorSku, setShiftCheckColorSku] = useState("all");
+  const [shiftCheckFamily, setShiftCheckFamily] = useState("all");
   const [shiftCheckDrafts, setShiftCheckDrafts] = useState<
     Record<string, ShiftCheckDraft>
   >({});
@@ -1520,6 +1526,7 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
 
   const getTransferCandidates = (source: UnitRow) => workspace.register.filter(unit =>
     unit.skuName.trim().toUpperCase() === source.skuName.trim().toUpperCase()
+    && !isReturnHandlingUnit(unit)
     && normalizeUnitName(unit.unitName) === normalizeUnitName(source.unitName)
     && (unit.status === "Đang sử dụng" || (unit.status === "Nguyên niêm phong" && getPackageCategory(unit.packageType) === "LE"))
   );
@@ -2132,6 +2139,16 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
         // belongs here. Historic duties never bring sealed/empty rows back.
         // An opened package is counted once today even without a new movement.
         // A later withdrawal reopens the check; pending counts always remain.
+        const initialQuantity = isReturnHandlingUnit(unit)
+          ? Number(unit.initialPcs) : capacityForUnit(unit);
+        const currentQuantity = Number(unit.currentPcs);
+        const hasReducedBalance = Number.isFinite(initialQuantity) && Number.isFinite(currentQuantity)
+          ? currentQuantity < initialQuantity
+          : true;
+        // A full-capacity row can retain the legacy "opened" status after a
+        // sync. It is not the physical bag currently being used, so only a
+        // reduced opened bag (or an explicit pending check) enters this list.
+        if (!isPendingCheck && !hasReducedBalance) return null;
         if (!isPendingCheck && latestCompletedCheck > 0 && localDayKey(latestCompletedCheck) === todayKey
             && !obligationRequiredToday && withdrawals.length === 0 && !transferAfterCheck) return null;
         return {
@@ -2163,13 +2180,16 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
   const identifiedShiftCheckCandidates = useMemo(() => identifyShiftCandidates(
     shiftCheckCandidates, workspace.register, workspace.catalog,
   ), [shiftCheckCandidates, workspace.register, workspace.catalog]);
-  const selectedFamilyShiftCandidates = scopeShiftCandidates(identifiedShiftCheckCandidates, selected?.productGroup || "");
-  const shiftCheckBatchCandidates = (shiftCheckFocusCode
+  // Count across all products, at most 100 per request (the IPC limit).
+  // View filters never reduce the batch that must be counted and submitted.
+  const allShiftCheckCandidates = scopeShiftCandidates(identifiedShiftCheckCandidates, "all");
+  const shiftCheckBatchCandidates = shiftCheckFocusCode
     ? shiftCheckSnapshot
-    : scopeShiftCandidates(showShiftCheckModal ? shiftCheckSnapshot : identifiedShiftCheckCandidates,
-      showShiftCheckModal ? shiftCheckFamily : selected?.productGroup || "")).slice(0, 100);
-  const visibleShiftCheckCandidates = shiftCheckFocusCode || shiftCheckColorSku === "all"
-    ? shiftCheckBatchCandidates : shiftCheckBatchCandidates.filter(item => item.unit.skuName === shiftCheckColorSku);
+    : scopeShiftCandidates(showShiftCheckModal ? shiftCheckSnapshot : identifiedShiftCheckCandidates, "all").slice(0, 100);
+  const shiftCheckFamilies = [...new Set(shiftCheckBatchCandidates.flatMap(item => item.productGroup ? [item.productGroup] : []))].sort();
+  const visibleShiftCheckCandidates = shiftCheckFocusCode
+    ? shiftCheckBatchCandidates
+    : scopeShiftCandidates(shiftCheckBatchCandidates, shiftCheckFamily);
   const canPerformUnitCheck = !isRolePreview && (isAdmin || user?.role === 'manager' || (user?.role === 'staff' && user.username === workspace.shiftCheckPolicy?.assignedTo));
 
   const shiftCheckEnteredCount = shiftCheckBatchCandidates.filter(({ unit }) => {
@@ -2190,18 +2210,17 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
       ? mandatoryShiftCheckCandidates
       : shiftCheckCandidates;
     const identified = identifyShiftCandidates(candidates, workspace.register, workspace.catalog);
-    if (scopeShiftCandidates(identified, selected?.productGroup || "").length === 0) {
+    if (scopeShiftCandidates(identified, "all").length === 0) {
       message.info(
         scope === "mandatory"
           ? "Không có kiện nào đang chờ kiểm."
-          : "Dòng sản phẩm này không có kiện đang khui hoặc chờ kiểm cần đối chiếu.",
+          : "Không có kiện nào đang khui hoặc chờ kiểm cần đối chiếu.",
       );
       return;
     }
     setShiftCheckScope(scope);
     setShiftCheckFocusCode(null);
-    setShiftCheckFamily(selected?.productGroup || "");
-    setShiftCheckColorSku("all");
+    setShiftCheckFamily("all");
     setShiftCheckSnapshot(identified);
     setShiftCheckDrafts(
       Object.fromEntries(
@@ -2227,7 +2246,6 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
     const candidate = shiftCheckCandidates.find((entry) => entry.unit.id === unit.id) || { unit, withdrawalCount: 0, withdrawnQuantity: 0, lastWithdrawalAt: 0 };
     setShiftCheckScope("all");
     setShiftCheckFocusCode(unit.id);
-    setShiftCheckColorSku("all");
     setShiftCheckSnapshot(identifyShiftCandidates([{ ...candidate, unit: { ...unit } }], workspace.register, workspace.catalog));
     shiftCheckRequestIdRef.current = `HU-SHIFT-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     setShiftCheckDrafts({
@@ -3262,8 +3280,11 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
           </div>
           <div ref={moduleContentRef} className="hu-tab-content" id="hu-module-content" role="tabpanel" aria-labelledby={`hu-tab-${activeModuleTab}`}>
           {activeModuleTab === "history" && <div className="hu-history-scope"><Segmented value={historyScope} onChange={value => setHistoryScope(value as "units" | "prepack")} options={[{ value: "units", label: "Kiện hàng" }, { value: "prepack", label: "Đóng gói sẵn" }]} /></div>}
+          <Modal title="Phiếu đóng gói sẵn" open={prepackWorkOpen && canCreatePrepack} onCancel={() => { setPrepackWorkOpen(false); setPrepackCreateRequest(0); void loadWorkspace(true); }} footer={null} width={1200} destroyOnHidden>
+            {prepackWorkOpen && canCreatePrepack && <PrepackManagement embedded view="report" createRequest={prepackCreateRequest} onCreateHandled={() => setPrepackCreateRequest(0)} sourceUnits={workspace.register.map(unit => ({ id: unit.id, skuName: unit.skuName, unitName: unit.unitName, status: unit.status, currentPcs: unit.currentPcs, packageType: unit.packageType }))} productSkus={selected ? workspace.catalog.filter(item => item.productGroup === selected.productGroup).map(item => item.sku) : undefined} />}
+          </Modal>
           {(activeModuleTab === "prepack" || (activeModuleTab === "history" && historyScope === "prepack")) ? (
-            activeModuleTab === "history" ? <PrepackManagement view="history" createRequest={prepackCreateRequest} onCreateHandled={() => setPrepackCreateRequest(0)} sourceUnits={workspace.register.map(unit => ({ id: unit.id, skuName: unit.skuName, unitName: unit.unitName, status: unit.status, currentPcs: unit.currentPcs, packageType: unit.packageType }))} productSkus={selected ? workspace.catalog.filter(item => item.productGroup === selected.productGroup).map(item => item.sku) : undefined} /> : selected ? <PrepackInventoryView lots={workspace.packedInventory} sku={selected.sku} unitName={selected.unitName} canCreate={user?.role === "staff" && canCreatePackagePacking(user?.role, isRolePreview)} onCreate={() => setPrepackCreateRequest(value => value + 1)} /> : null
+            activeModuleTab === "history" ? <PrepackManagement view="history" sourceUnits={workspace.register.map(unit => ({ id: unit.id, skuName: unit.skuName, unitName: unit.unitName, status: unit.status, currentPcs: unit.currentPcs, packageType: unit.packageType }))} productSkus={selected ? workspace.catalog.filter(item => item.productGroup === selected.productGroup).map(item => item.sku) : undefined} /> : selected ? <PrepackInventoryView lots={workspace.packedInventory} sku={selected.sku} unitName={selected.unitName} canCreate={canCreatePrepack} onCreate={() => openPrepackWork(true)} /> : null
           ) : selected ? (
             <>
               <header className="hu-selected-header">
@@ -3309,9 +3330,9 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
                   </div>
                 </div>
                 <div className="hu-header-right hu-selected-actions">
-                  {selectedFamilyShiftCandidates.length > 0 && (
+                  {allShiftCheckCandidates.length > 0 && (
                     <Tooltip
-                      title={`${selectedFamilyShiftCandidates.length} kiện đang khui hoặc chờ kiểm của ${displayProductGroup(selected.productGroup)} cần đối chiếu.`}
+                      title={`${allShiftCheckCandidates.length} kiện đang khui hoặc chờ kiểm trên toàn bộ sản phẩm cần đối chiếu.`}
                     >
                       <Button
                         icon={<CheckCircleOutlined />}
@@ -3321,7 +3342,7 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
                       >
                         Kiểm cuối ca
                         <span className="hu-shift-check-count">
-                          {selectedFamilyShiftCandidates.length}
+                          {allShiftCheckCandidates.length}
                         </span>
                       </Button>
                     </Tooltip>
@@ -3789,7 +3810,7 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
               {detail.status === "Đã tách" || detail.status === "Chờ kiểm" || isReturnHandlingUnit(detail) ? (
                 <Typography.Text type="secondary" className="hu-detail-action-note">
                   {isReturnHandlingUnit(detail)
-                    ? "Kiện hàng hoàn: chuyển sang kiện đang khui cùng SKU hoặc chuyển vị trí."
+                    ? "Hàng hoàn tự động gộp vào kiện đang khui cùng SKU khi còn sức chứa và không có kiện chờ kiểm."
                     : detail.status === "Đã tách"
                       ? "Kiện cha đã khóa sau khi tách; theo dõi ở các kiện con."
                       : "Kiện đang chờ kiểm; bấm Kiểm kiện và nhập số đếm thực tế."}
@@ -3857,7 +3878,7 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
                   trigger={["click"]}
                   menu={{
                     items: [
-                      ...(detail.currentPcs > 0 &&
+                      ...(detail.currentPcs > 0 && !isReturnHandlingUnit(detail) &&
                         (detail.status === "Đang sử dụng" ||
                           (detail.status === "Nguyên niêm phong" && getPackageCategory(detail.packageType) === "LE"))
                         ? [{ key: "transfer", icon: <SwapOutlined />, label: "Chuyển kiện", onClick: () => openMergeReturnUnit(detail) }]
@@ -4378,9 +4399,10 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
               </small>
             </div>
             {!shiftCheckFocusCode && <ShiftFamilySearch
-              families={[...new Set(shiftCheckSnapshot.flatMap(item => !item.packed && item.productGroup ? [item.productGroup] : []))].sort()}
+              families={["all", ...shiftCheckFamilies]}
+              family={shiftCheckFamily}
               busy={isSubmittingShiftCheck}
-              onFamily={family => { setShiftCheckFamily(family); setShiftCheckColorSku("all"); }}
+              onFamily={setShiftCheckFamily}
             />}
           </div>
         }
@@ -4410,16 +4432,15 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
           items={visibleShiftCheckCandidates}
           drafts={shiftCheckDrafts}
           family={shiftCheckFamily}
-          colors={workspace.catalog.filter(item => item.productGroup === shiftCheckFamily).map(item => ({sku: item.sku, label: item.color || item.variantName}))}
-          colorSku={shiftCheckColorSku}
+          families={shiftCheckFamilies}
           entered={shiftCheckEnteredCount}
           total={shiftCheckBatchCandidates.length}
-          remaining={shiftCheckFocusCode ? 0 : Math.max(0, scopeShiftCandidates(shiftCheckSnapshot, shiftCheckFamily).length - shiftCheckBatchCandidates.length)}
+          remaining={shiftCheckFocusCode ? 0 : Math.max(0, scopeShiftCandidates(shiftCheckSnapshot, "all").length - shiftCheckBatchCandidates.length)}
           date={new Date(`${workspace.shiftCheckPolicy?.date || localDayKey(new Date())}T12:00:00+07:00`).toLocaleDateString("vi-VN")}
           reasons={SHIFT_CHECK_REASONS}
           single={!!shiftCheckFocusCode}
           busy={isSubmittingShiftCheck}
-          onColor={setShiftCheckColorSku}
+          onFamily={setShiftCheckFamily}
           onDraft={updateShiftCheckDraft}
         />
       </Modal>

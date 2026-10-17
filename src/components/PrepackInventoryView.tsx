@@ -31,7 +31,7 @@ export default function PrepackInventoryView({ lots, sku, unitName, canCreate = 
         <div className="prepack-inventory-title"><InboxOutlined /> <strong>Tồn đóng gói sẵn</strong></div>
         <p>Chỉ hiển thị số combo đang còn trong kho, đã trừ những combo đã xuất.</p>
       </div>
-      {canCreate && <button type="button" className="prepack-inventory-create" onClick={onCreate}>Tạo đóng gói</button>}
+      {canCreate && <button type="button" className="prepack-inventory-create" onClick={onCreate}>Tạo đóng gói sẵn</button>}
     </header>
     <div className="prepack-inventory-summary">
       <div><span>Combo còn lại</span><strong>{number(comboCount)} combo</strong></div>

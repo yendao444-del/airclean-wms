@@ -136,8 +136,9 @@ function applyEvents(ledger, entries) {
     const type = String(entry.type || "");
     const autoEmpty = /^chuyển chờ xuất kho TMDT/i.test(type) && !code.startsWith("PACKED:") && Number(entry.remaining) <= 0;
     const syncEmpty = /^đồng bộ (kiện|đóng sẵn) theo tồn phần mềm/i.test(type) && Number(entry.remaining) === 0 && entry.status !== "pending_check";
-    if (autoEmpty || syncEmpty || type === "Xóa kiện") {
-      resolveCode(ledger, code, timestamp, String(entry.actor || "System"), syncEmpty ? "software-sync-empty" : autoEmpty ? "auto-empty-tmdt" : "deleted");
+    const autoReturnEmpty = type === "Tự động gộp hàng hoàn - chuyển đi" && Number(entry.remaining) === 0 && entry.status === "empty";
+    if (autoEmpty || syncEmpty || autoReturnEmpty || type === "Xóa kiện") {
+      resolveCode(ledger, code, timestamp, String(entry.actor || "System"), autoReturnEmpty ? "auto-return-merged" : syncEmpty ? "software-sync-empty" : autoEmpty ? "auto-empty-tmdt" : "deleted");
     } else if (isRequired(entry)) {
       const unit = ensureDuty(ledger, date, code, timestamp);
       for (const shift of requiredShiftsFor(timestamp)) {
@@ -173,7 +174,7 @@ function applyEvents(ledger, entries) {
   return ledger;
 }
 function relevantEvent(entry) {
-  return isRequired(entry) || isCompleted(entry) || /^(chuyển chờ xuất kho TMDT|đồng bộ (kiện|đóng sẵn) theo tồn phần mềm)/i.test(String(entry.type || "")) || ["Tách kiện", "Xóa kiện"].includes(entry.type);
+  return isRequired(entry) || isCompleted(entry) || /^(chuyển chờ xuất kho TMDT|đồng bộ (kiện|đóng sẵn) theo tồn phần mềm)/i.test(String(entry.type || "")) || ["Tách kiện", "Xóa kiện", "Tự động gộp hàng hoàn - chuyển đi"].includes(entry.type);
 }
 async function recordShiftEvents(tx, entries) {
   if (!entries.some(relevantEvent)) return;
@@ -183,12 +184,25 @@ async function recordShiftEvents(tx, entries) {
   const value = JSON.stringify(ledger);
   await tx.appConfig.upsert({ where: { key: LEDGER_KEY }, create: { key: LEDGER_KEY, value }, update: { value } });
 }
-// Observe all opened/pending packages, including ones without recent exports.
-// Never infer historical activity from updatedAt or punish sealed packages.
+// Observe the physically active opened/pending packages, including ones
+// without recent exports. A stale opened status at full capacity is treated
+// as an untouched row and must not create a false end-of-shift duty.
 async function observeActiveUnits(tx, ledger, now) {
   if (dayKey(now) < EFFECTIVE_DATE) return;
-  const activeUnits = await tx.handlingUnit.findMany({
-    where: { status: { in: ["opened", "pending_check"] } }, select: { code: true },
+  const activeRows = await tx.handlingUnit.findMany({
+    where: { status: { in: ["opened", "pending_check"] } },
+    select: { code: true, status: true, remainingQuantity: true, initialQuantity: true, packagingName: true },
+  });
+  const activeUnits = activeRows.filter(unit => {
+    const isReturn = String(unit.packagingName || "").normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "").replace(/đ/g, "d").toLowerCase().includes("hang hoan");
+    // Normal legacy packages were capped to 300 without rewriting their
+    // original capacity. Returned stock remains aggregated without that cap.
+    const capacity = isReturn ? Number(unit.initialQuantity) : Math.min(300, Number(unit.initialQuantity));
+    return unit.status === "pending_check"
+      || !Number.isFinite(Number(unit.remainingQuantity))
+      || !Number.isFinite(capacity)
+      || Number(unit.remainingQuantity) < capacity;
   });
   const inventory = packing.decodeInventory(await tx.appConfig.findUnique({ where: { key: packing.INVENTORY_KEY } }));
   const packed = inventory.lots.filter(lot => ["submitted", "ready", "issued"].includes(lot.status) && lot.packedQty - (lot.issuedQty || 0) > 0);

@@ -1,6 +1,6 @@
 import { Alert, AutoComplete, Button, Empty, Input, InputNumber, Select, Space, Tag } from "antd";
 import { EnvironmentOutlined } from "@ant-design/icons";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { ShiftIdentity } from "../lib/handlingUnitShiftScope";
 
 type Unit = { id: string; skuName: string; currentPcs: number; initialPcs: number; unitName: string; status: string; packageType: string; location?: {zone?: string; rack?: string} };
@@ -10,8 +10,7 @@ type Props = {
   items: readonly ShiftChecklistItem[];
   drafts: Record<string, ShiftDraft>;
   family: string;
-  colors: Array<{sku: string; label: string}>;
-  colorSku: string;
+  families: string[];
   entered: number;
   total: number;
   remaining: number;
@@ -19,24 +18,28 @@ type Props = {
   reasons: string[];
   single: boolean;
   busy: boolean;
-  onColor: (sku: string) => void;
+  onFamily: (family: string) => void;
   onDraft: (code: string, patch: Partial<ShiftDraft>) => void;
 };
 const fmt = (n: number) => n.toLocaleString("vi-VN");
+const familyLabel = (family: string) => family === "all" ? "Toàn bộ sản phẩm" : family.replace(/^khẩu trang\s*/i, "");
 const searchText = (value: string) => value.normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/đ/gi, "d").toLocaleLowerCase("vi-VN");
 
-export function ShiftFamilySearch({ families, busy, onFamily }: { families: string[]; busy: boolean; onFamily: (value: string) => void }) {
+export function ShiftFamilySearch({ families, family, busy, onFamily }: { families: string[]; family: string; busy: boolean; onFamily: (value: string) => void }) {
   const [search, setSearch] = useState("");
   const [open, setOpen] = useState(false);
   const [filterOnTyping, setFilterOnTyping] = useState(false);
+  useEffect(() => { setSearch(family === "all" ? "" : familyLabel(family)); setFilterOnTyping(false); }, [family]);
+  const availableFamilies = [...new Set(["all", ...families])];
   const query = filterOnTyping ? searchText(search).trim() : "";
-  const matches = families.filter(family => !query || searchText(family).includes(query));
+  const matches = availableFamilies.filter(value => !query || searchText(familyLabel(value)).includes(query));
   const showFamilies = () => { if (!busy) { setFilterOnTyping(false); setOpen(true); } };
-  const selectFamily = (value: string) => { onFamily(value); setSearch(value.replace(/^khẩu trang\s*/i, "")); setFilterOnTyping(false); setOpen(false); };
+  const selectFamily = (value: string) => { onFamily(value); setSearch(familyLabel(value)); setFilterOnTyping(false); setOpen(false); };
   const submit = (value: string) => {
     const term = searchText(value).trim();
-    const searchMatches = families.filter(family => searchText(family).includes(term));
-    const exact = families.find(family => searchText(family) === term || searchText(family.replace(/^khẩu trang\s*/i, "")) === term);
+    if (!term) { selectFamily("all"); return; }
+    const searchMatches = availableFamilies.filter(value => searchText(familyLabel(value)).includes(term));
+    const exact = availableFamilies.find(value => searchText(value) === term || searchText(familyLabel(value)) === term);
     if (exact) selectFamily(exact);
     else if (term && searchMatches.length === 1) selectFamily(searchMatches[0]);
     else { setFilterOnTyping(Boolean(term)); setOpen(true); }
@@ -45,9 +48,9 @@ export function ShiftFamilySearch({ families, busy, onFamily }: { families: stri
     <Space.Compact block>
     <AutoComplete value={search} open={open} disabled={busy}
       onOpenChange={nextOpen => { if (!nextOpen) setOpen(false); }}
-      onChange={value => { setSearch(value); setFilterOnTyping(true); setOpen(true); }}
+      onChange={value => { setSearch(value); setFilterOnTyping(true); setOpen(true); if (!value) onFamily("all"); }}
       onSelect={selectFamily} onFocus={showFamilies}
-      options={matches.map(value => ({value, label: value.replace(/^khẩu trang\s*/i, "")}))}
+      options={matches.map(value => ({value, label: familyLabel(value)}))}
       notFoundContent="Không có dòng sản phẩm cần kiểm phù hợp" popupMatchSelectWidth={true}>
       <Input aria-label="Tìm dòng sản phẩm cần kiểm" placeholder="Tìm 5D Thịnh Phát, 3D Monji..." allowClear
         onClick={showFamilies}
@@ -67,19 +70,17 @@ export default function HandlingUnitShiftChecklist(props: Props) {
   const visibleItems = props.items;
   return <div className="hu-shift-workspace">
     {!props.single && <div className="hu-shift-toolbar">
-      <span className="hu-shift-current-family">Dòng sản phẩm <b>{props.family.replace(/^khẩu trang\s*/i, "")}</b></span>
-      <div className="hu-shift-color-filters" role="group" aria-label="Lọc màu trong dòng sản phẩm">
-        {[{sku: "all", label: "Tất cả"}, ...props.colors].map(color => <button type="button" key={color.sku}
-          disabled={props.busy} aria-pressed={props.colorSku === color.sku} onClick={() => props.onColor(color.sku)}>{color.label}</button>)}
+      <span className="hu-shift-current-family">Đang xem <b>{familyLabel(props.family)}</b></span>
+      <div className="hu-shift-group-filters" role="group" aria-label="Lọc nhóm sản phẩm cần kiểm">
+        {["all", ...props.families].map(family => <button type="button" key={family}
+          disabled={props.busy} aria-pressed={props.family === family} onClick={() => props.onFamily(family)}>{family === "all" ? "Tất cả" : familyLabel(family)}</button>)}
       </div>
       <span className="hu-shift-progress">{props.date} · Đã nhập <b>{props.entered}/{props.total}</b></span>
     </div>}
-    <Alert type="info" showIcon title="Nhập số lượng đếm thực tế theo từng kiện"
-      description={`${props.single ? "Kiểm lại đúng kiện được chọn." : "Chỉ kiểm kiện đang khui hoặc chờ kiểm chốt."} Số kiện theo từng màu khớp với danh sách bên ngoài; mã kiện giúp xác định đúng kiện. Số đếm để trống đến khi bạn đếm xong.`} />
-    {!props.single && <p className="hu-shift-scope-note">Đang xem {visibleItems.length}/{props.total} kiện của {props.family.replace(/^khẩu trang\s*/i, "")}. Hoàn tất kiểm sẽ lưu tất cả màu của dòng này; chuyển màu để nhập những kiện còn lại.</p>}
+    {!props.single && <p className="hu-shift-scope-note">Đang hiển thị {visibleItems.length}/{props.total} kiện. Bộ lọc chỉ đổi danh sách đang xem; hãy nhập đủ {props.total} kiện của toàn bộ sản phẩm trong đợt này trước khi hoàn tất.</p>}
     {props.remaining > 0 && <Alert type="warning" showIcon title={`Đợt này kiểm ${props.total} kiện. Còn ${props.remaining} kiện; hoàn tất rồi mở Kiểm cuối ca để kiểm tiếp.`} />}
     <div className="hu-shift-checklist" aria-label="Các kiện cần kiểm">
-      {visibleItems.length === 0 && <Empty description="Màu này không có kiện đang khui hoặc chờ kiểm cần đối chiếu" />}
+      {visibleItems.length === 0 && <Empty description="Nhóm sản phẩm này không có kiện đang khui hoặc chờ kiểm cần đối chiếu" />}
       {visibleItems.map(item => {
         const {unit} = item;
         const draft = props.drafts[unit.id];

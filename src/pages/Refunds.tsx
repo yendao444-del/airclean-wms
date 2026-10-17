@@ -489,13 +489,15 @@ export default function RefundsPage() {
 
             const restoredItems = result.data?.items || [];
             const returnUnits = result.data?.returnUnits || [];
+            const autoMerged = result.data?.autoMerged || [];
+            const autoMergedQuantity = autoMerged.reduce((sum: number, item: any) => sum + Number(item.quantity || 0), 0);
             const reference = result.data?.reference || refundRecord.orderNumber || refundRecord.refundCode || `P.Hoan ${refundRecord.id}`;
             setRefunds(prev => prev.map(refund => refund.id === refundRecord.id ? { ...refund, status: 'completed' } : refund));
             setStockLog(prev => [
                 ...restoredItems.map((item: any) => ({ sku: item.sku, name: item.name || '', qty: item.quantity, orderId: reference, time: dayjs().format('HH:mm:ss DD/MM') })),
                 ...prev,
             ]);
-            message.success(`Đã cộng ${restoredItems.reduce((sum: number, item: any) => sum + Number(item.quantity || 0), 0)} SP vào kho và tạo ${returnUnits.length} kiện Hàng hoàn.`);
+            message.success(`Đã cộng ${restoredItems.reduce((sum: number, item: any) => sum + Number(item.quantity || 0), 0)} SP vào kho${autoMergedQuantity ? ` và tự động gộp ${autoMergedQuantity} SP vào kiện đang khui` : ""}${returnUnits.length ? `; còn tạo ${returnUnits.length} kiện Hàng hoàn` : ""}.`);
             playSuccess();
         } catch (error: any) {
             console.error('Confirm full error:', error);
@@ -534,13 +536,15 @@ export default function RefundsPage() {
             const reference = result.data?.reference || refundRecord.orderNumber || refundRecord.refundCode || `P.Hoan ${refundRecord.id}`;
             const restoredItems = result.data?.items || [];
             const returnUnits = result.data?.returnUnits || [];
+            const autoMerged = result.data?.autoMerged || [];
+            const autoMergedQuantity = autoMerged.reduce((sum: number, item: any) => sum + Number(item.quantity || 0), 0);
             setRefunds(prev => prev.map(refund => refund.id === refundRecord.id ? { ...refund, status: 'completed', notes } : refund));
             setStockLog(prev => [
                 ...restoredItems.map((item: any) => ({ sku: item.sku, name: item.name || '', qty: item.quantity, orderId: reference, time: dayjs().format('HH:mm:ss DD/MM') })),
                 ...prev,
             ]);
             setMismatchOpen(prev => { const next = new Set(prev); next.delete(refundRecord.id); return next; });
-            message.success(`Đã cộng kho theo số lượng thực nhận và tạo ${returnUnits.length} kiện Hàng hoàn.`);
+            message.success(`Đã cộng kho theo số lượng thực nhận${autoMergedQuantity ? ` và tự động gộp ${autoMergedQuantity} SP vào kiện đang khui` : ""}${returnUnits.length ? `; còn tạo ${returnUnits.length} kiện Hàng hoàn` : ""}.`);
             playSuccess();
         } catch (error: any) {
             console.error('Confirm custom error:', error);

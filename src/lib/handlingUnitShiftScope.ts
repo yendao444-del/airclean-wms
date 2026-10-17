@@ -1,10 +1,11 @@
 import { compareHandlingUnitPickOrder } from "../../electron/handling-unit-pick-order.mjs";
 
-type Unit = { id: string; skuName: string; status: string; currentPcs: number; createdAt?: string };
+type Unit = { id: string; skuName: string; status: string; currentPcs: number; sequenceNumber?: number; createdAt?: string };
 type Catalog = { sku: string; productGroup: string; color?: string; variantName: string };
 export type ShiftIdentity = { packageNumber?: number; productGroup?: string; color?: string; displayName?: string };
 
-// Use the entire active color queue, not the filtered checklist or barcode suffix.
+// Preserve the physical label identity. Only old rows without a stored number
+// or numeric code suffix fall back to their position in the active color queue.
 export function shiftPackageNumbers(units: readonly Unit[]) {
   const bySku = new Map<string, Unit[]>();
   units.filter(unit => !["Đã hết", "empty", "Đã tách", "split"].includes(unit.status)).forEach(unit => {
@@ -14,7 +15,13 @@ export function shiftPackageNumbers(units: readonly Unit[]) {
   const view = (unit: Unit) => ({ code: unit.id, quantity: unit.currentPcs, createdAt: unit.createdAt,
     status: unit.status === "Đang sử dụng" ? "opened" : unit.status === "Nguyên niêm phong" ? "sealed" : unit.status });
   bySku.forEach(queue => queue.sort((a, b) => compareHandlingUnitPickOrder(view(a), view(b)))
-    .forEach((unit, index) => result.set(unit.id, index + 1)));
+    .forEach((unit, index) => {
+      const stored = Number(unit.sequenceNumber);
+      const legacy = Number(String(unit.id).match(/-(\d+)$/)?.[1]);
+      result.set(unit.id, Number.isSafeInteger(stored) && stored > 0
+        ? stored
+        : Number.isSafeInteger(legacy) && legacy > 0 ? legacy : index + 1);
+    }));
   return result;
 }
 
@@ -33,6 +40,6 @@ export function identifyShiftCandidates<T extends { unit: Unit; packed?: boolean
 export function scopeShiftCandidates<T extends { unit: { skuName: string }; packed?: boolean; productGroup?: string }>(
   candidates: readonly T[], family: string, sku = "all",
 ) {
-  return candidates.filter(candidate => !candidate.packed && candidate.productGroup === family &&
+  return candidates.filter(candidate => !candidate.packed && (family === "all" || candidate.productGroup === family) &&
     (sku === "all" || candidate.unit.skuName === sku));
 }
