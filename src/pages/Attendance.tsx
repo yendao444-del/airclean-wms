@@ -1,6 +1,7 @@
 import { useState, useMemo, useCallback, useRef, useEffect, useTransition, forwardRef, useImperativeHandle, cloneElement, isValidElement } from 'react';
 import AttendancePackingChart from '../components/AttendancePackingChart';
 import SalesBonusSettingsModal from '../components/SalesBonusSettingsModal';
+import { fineBulkSelectionKey, fineBulkDeleteItem, applyBulkFineDeletions } from '../lib/attendanceFineBulkDelete';
 import { groupPayslipFines } from '../lib/payslipFineGroups';
 import { isApprovedDayOff, isExcusedDailyWorkFine, dailyFineWorkDate } from '../../electron/attendance-workday-policy.mjs';
 import { awaitPackingRequest, packingRequestIdentity } from '../lib/packingRequest';
@@ -4197,6 +4198,10 @@ export default function Attendance() {
     // on the employee's payslip without affecting net pay.
     const [fineWaivers, setFineWaivers] = useState<FineWaiverRecord[]>([]);
     const [fineEmployeeFilter, setFineEmployeeFilter] = useState<number | 'all'>('all');
+    const [selectedFineKeys, setSelectedFineKeys] = useState<string[]>([]);
+    const [bulkFineDeleting, setBulkFineDeleting] = useState(false);
+    const bulkFineDeleteBusyRef = useRef(false);
+    const bulkFineDeleteConfirmRef = useRef(false);
     const [editingFine, setEditingFine] = useState<{
         isManual: boolean;
         manualIndex: number;
@@ -6634,6 +6639,9 @@ export default function Attendance() {
 
     // Kỳ hiện tại có bị khóa không?
     const isCurrentPeriodLocked = Boolean(currentLockedPeriod);
+    useEffect(() => {
+        setSelectedFineKeys([]);
+    }, [overviewDateRange[0].format('YYYY-MM-DD'), overviewDateRange[1].format('YYYY-MM-DD'), fineEmployeeFilter, isAdmin, isCurrentPeriodLocked, activeTab]);
     const overviewAttendanceExpectedKey = `${overviewDateRange[0].year()}-${String(overviewDateRange[0].month() + 1).padStart(2, '0')}`;
     const salesBonusExpectedKey = `${overviewDateRange[0].startOf('day').valueOf()}-${overviewDateRange[1].endOf('day').valueOf()}`;
     const overviewAttendanceLogsReady = overviewAttendanceLogsKey === overviewAttendanceExpectedKey;
@@ -7745,6 +7753,63 @@ const openConfigModal = () => {
             },
         });
     }, [employees, fineAuditActor, fineAuditLog, fineOverrides, handleDeleteFine, isAdmin, persistAttendanceSnapshotNow]);
+
+    const handleBulkDeleteFines = (rows: any[]) => {
+        if (!isAdmin || checkLocked() || bulkFineDeleteBusyRef.current || bulkFineDeleteConfirmRef.current) return;
+        if (!rows.length || rows.length > 200) {
+            message.warning('Chọn từ 1 đến 200 khoản phạt mỗi lần xóa.');
+            return;
+        }
+        const items = rows.map(fineBulkDeleteItem);
+        const from = overviewDateRange[0].format('YYYY-MM-DD');
+        const to = overviewDateRange[1].format('YYYY-MM-DD');
+        const amount = rows.reduce((sum, row) => sum + Number(row.amount || 0), 0);
+        bulkFineDeleteConfirmRef.current = true;
+        Modal.confirm({
+            className: 'attendance-fine-delete-confirm',
+            title: `Xác nhận xóa ${items.length} khoản phạt`,
+            width: 560, centered: true, maskClosable: false,
+            okText: `Xóa ${items.length} khoản`, cancelText: 'Hủy', okType: 'danger',
+            content: <div>
+                <p>Tổng tiền các khoản đã chọn: <Text strong type="danger">{fmt(amount)}</Text>.</p>
+                <p>Chỉ xóa các khoản bên dưới, không xóa đơn hàng hay dữ liệu công ty. Mỗi khoản vẫn được lưu lịch sử xóa.</p>
+                <div style={{ maxHeight: 240, overflowY: 'auto', overflowWrap: 'anywhere' }}>
+                    {rows.map(row => <div key={fineBulkSelectionKey(row)} style={{ padding: '6px 0', borderBottom: '1px solid #f0f0f0' }}>
+                        <Text strong>{row.empName || `Nhân viên #${row.empId}`}</Text> · {row.type} · {fmt(row.amount)}
+                        <div><Text type="secondary">{row.detail}</Text></div>
+                    </div>)}
+                </div>
+            </div>,
+            afterClose: () => { bulkFineDeleteConfirmRef.current = false; },
+            onOk: async () => {
+                if (bulkFineDeleteBusyRef.current) return;
+                bulkFineDeleteBusyRef.current = true;
+                setBulkFineDeleting(true);
+                try {
+                    const api = window.electronAPI?.attendance;
+                    if (!api?.bulkDeleteFines) throw new Error('Vui lòng đóng/mở lại ứng dụng để cập nhật chức năng xóa nhiều khoản phạt.');
+                    const response = await api.bulkDeleteFines({ from, to, items });
+                    if (!response.success || !Array.isArray(response.data?.deleted) || response.data.deleted.length !== items.length) {
+                        throw new Error(response.error || 'Chưa xác nhận được kết quả xóa. Hãy tải lại danh sách trước khi thử lại.');
+                    }
+                    const deleted = response.data.deleted;
+                    setExtraFines(current => applyBulkFineDeletions({ extraFines: current }, deleted).extraFines);
+                    setFineOverrides(current => applyBulkFineDeletions({ fineOverrides: current }, deleted).fineOverrides);
+                    setFineAuditLog(current => applyBulkFineDeletions({ fineAuditLog: current }, deleted).fineAuditLog);
+                    if (latestSnapshotRef.current) latestSnapshotRef.current = applyBulkFineDeletions(latestSnapshotRef.current as Record<string, any>, deleted);
+                    attendanceInitialDataCache = null;
+                    setSelectedFineKeys([]);
+                    message.success(`Đã xóa ${deleted.length} khoản phạt và lưu lịch sử.`);
+                } catch (error) {
+                    message.error(error instanceof Error ? error.message : 'Không xóa được các khoản phạt.');
+                    throw error;
+                } finally {
+                    bulkFineDeleteBusyRef.current = false;
+                    setBulkFineDeleting(false);
+                }
+            },
+        });
+    };
 
     // === Thêm/Sửa Giao dịch Quỹ handler ===
     const handleAddFundTx = useCallback(() => {
@@ -9819,6 +9884,10 @@ const openConfigModal = () => {
                 return getFineSortTime(right) - getFineSortTime(left);
             });
         })();
+        const bulkSelectableRows = tableFines.filter(row => fineBulkSelectionKey(row) !== null);
+        const bulkSelectableKeys = new Set(bulkSelectableRows.map(row => fineBulkSelectionKey(row)!));
+        const selectedFineRows = bulkSelectableRows.filter(row => selectedFineKeys.includes(fineBulkSelectionKey(row)!));
+        const selectedFineTotal = selectedFineRows.reduce((sum, row) => sum + Number(row.amount || 0), 0);
         const selectedFineEmployeeName = canViewAllPayroll
             ? (effectiveFineEmployeeFilter === 'all'
                 ? ''
@@ -9915,6 +9984,7 @@ const openConfigModal = () => {
                             type="primary"
                             danger
                             icon={<PlusOutlined />}
+                            disabled={bulkFineDeleting}
                             onClick={() => { setEditingFine(null); fineForm.resetFields(); fineForm.setFieldsValue({ date: dayjs() }); setFineModalOpen(true); }}
                             style={{ fontWeight: 700 }}
                         >
@@ -9941,10 +10011,35 @@ const openConfigModal = () => {
                     <Text strong style={{ color: '#cf1322', fontSize: 18 }}>- {fmt(totalFineAmount)}</Text>
                 </div>
 
+                {isAdmin && !isCurrentPeriodLocked && (
+                    <Space wrap>
+                        <Button danger icon={<DeleteOutlined />} loading={bulkFineDeleting}
+                            disabled={!selectedFineRows.length || selectedFineRows.length > 200}
+                            onClick={() => handleBulkDeleteFines(selectedFineRows)}>
+                            Xóa các khoản đã chọn ({selectedFineRows.length})
+                        </Button>
+                        <Button disabled={!selectedFineRows.length || bulkFineDeleting} onClick={() => setSelectedFineKeys([])}>Bỏ chọn</Button>
+                        <Text type="secondary">{selectedFineRows.length
+                            ? `Đã chọn ${selectedFineRows.length} khoản · ${fmt(selectedFineTotal)}`
+                            : 'Tích ô để chọn nhiều khoản phạt; có thể chọn qua nhiều trang (tối đa 200 khoản/lần).'}</Text>
+                    </Space>
+                )}
                 <Card bodyStyle={{ padding: 0 }} style={{ borderTop: '3px solid #ff4d4f' }}>
                     <Table
                         className="att-fines-table"
                         dataSource={tableFines}
+                        rowKey={(record: any) => fineBulkSelectionKey(record) || String(record.key)}
+                        loading={bulkFineDeleting}
+                        rowSelection={isAdmin && !isCurrentPeriodLocked ? {
+                            columnWidth: 44,
+                            selectedRowKeys: selectedFineRows.map(row => fineBulkSelectionKey(row)!),
+                            preserveSelectedRowKeys: true,
+                            onChange: keys => setSelectedFineKeys(keys.map(String).filter(key => bulkSelectableKeys.has(key))),
+                            getCheckboxProps: (record: any) => ({
+                                disabled: bulkFineDeleting || !fineBulkSelectionKey(record),
+                                'aria-label': `Chọn khoản phạt của ${record.empName || `nhân viên #${record.empId}`}`,
+                            }),
+                        } : undefined}
                         pagination={{ pageSize: 10, size: 'small', showTotal: () => `Tổng ${filteredFines.length} khoản · ${tableFines.length} dòng` }}
                         size="middle"
                         tableLayout="fixed"
@@ -10270,6 +10365,7 @@ const openConfigModal = () => {
                                                     type="text"
                                                     size="small"
                                                     icon={<EditOutlined style={{ fontSize: 14 }} />}
+                                                    disabled={bulkFineDeleting}
                                                     onClick={() => handleEditFineRecord(record)}
                                                 />
                                             </Tooltip>
@@ -10279,6 +10375,7 @@ const openConfigModal = () => {
                                                     size="small"
                                                     danger
                                                     icon={<DeleteOutlined style={{ fontSize: 14 }} />}
+                                                    disabled={bulkFineDeleting}
                                                     onClick={() => handleDeleteFineRecord(record)}
                                                 />
                                             </Tooltip>

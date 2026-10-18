@@ -72,6 +72,7 @@ const DATA_SAFETY_ALLOWED_CHANNELS = new Set([
   "attendance:updatePackingCommission",
   "attendance:createFine",
   "attendance:deleteFine",
+  "attendance:bulkDeleteFines",
   "attendance:updateFine",
   // Combo deletion is an isolated, audited row delete used to remove
   // redundant one-component combo records without touching base products.
@@ -271,6 +272,7 @@ const workdayPolicyPromise = import("./attendance-workday-policy.mjs");
 const { updateAttendanceBranches } = require("./attendance-branch-store.cjs");
 const { readSalesBonusSettings, saveSalesBonusSettings, readPackingIncomeSettings, savePackingIncomeSettings } = require("./attendance-sales-bonus-settings.cjs");
 const { saveAttendanceAutosave } = require("./attendance-autosave-store.cjs");
+const { deleteAttendanceFines } = require("./attendance-bulk-delete-fines.cjs");
 const {
   CUTOFF_HOUR: ATTENDANCE_SCHEDULE_CUTOFF_HOUR,
   deadlineFor: attendanceScheduleDeadlineFor,
@@ -8166,7 +8168,10 @@ ipcMain.handle("handlingUnits:createUnits", async (_event, records = []) => {
       };
     });
 
-    const createResult = await prisma.$transaction(async (tx) => {
+    // Creation includes allocation checks, label numbering and durable history.
+    // Use the transaction pool and an explicit budget instead of Prisma's 5s
+    // default, which can expire before the final history write on a slow link.
+    const createResult = await getPrismaDirectTx().$transaction(async (tx) => {
       await lockGlobalInventoryMutation(tx);
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${packagePackingModule.INVENTORY_KEY}))`;
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('handling-units-create'))`;
@@ -8185,7 +8190,7 @@ ipcMain.handle("handlingUnits:createUnits", async (_event, records = []) => {
             && Number(existing.initialQuantity) === Number(item.initialQuantity);
         });
         if (existingUnits.length === createRows.length && isExactRetry) {
-          return { duplicate: true };
+          return { duplicate: true, numbers: await readLabelNumbers(tx) };
         }
         throw new Error("Một hoặc nhiều mã kiện đã tồn tại với dữ liệu khác.");
       }
@@ -8204,7 +8209,7 @@ ipcMain.handle("handlingUnits:createUnits", async (_event, records = []) => {
         stockBySku,
       });
       await tx.handlingUnit.createMany({ data: createRows });
-      await assignLabelNumbers(tx, createRows);
+      const numbers = await assignLabelNumbers(tx, createRows);
       await appendHandlingUnitsTransactions(
         tx,
         units.map((item) => ({
@@ -8218,8 +8223,8 @@ ipcMain.handle("handlingUnits:createUnits", async (_event, records = []) => {
             `Tạo kiện mới ${item.code} tại ${toHandlingUnitLocationCode(item.location)}`,
         })),
       );
-      return { duplicate: false };
-    });
+      return { duplicate: false, numbers: { units: numbers } };
+    }, { timeout: 60000, maxWait: 10000 });
 
     if (!createResult.duplicate) {
       broadcastHandlingUnitsChanged("UNITS_CREATED", {
@@ -8227,7 +8232,7 @@ ipcMain.handle("handlingUnits:createUnits", async (_event, records = []) => {
         codes: createRows.map((item) => item.code),
       });
     }
-    const numbers = await readLabelNumbers(prisma);
+    const numbers = createResult.numbers;
     return { success: true, data: records.map((item) => ({ ...item, sequenceNumber: numbers.units[String(item.id || item.code).toUpperCase()]?.number, sequenceCycle: numbers.units[String(item.id || item.code).toUpperCase()]?.cycle })), duplicate: createResult.duplicate };
   } catch (error) {
     console.error("Create handling units error:", error);
@@ -8877,7 +8882,7 @@ ipcMain.handle("handlingUnits:quickReceive", async (_event, payload = {}) => {
               const product = productBySku.get(line.sku);
               const purchaseItem = savedItemsBySku.get(line.sku);
               const label = line.source === "QR" ? labelByCode.get(line.qrCode) : {
-                code: `HU-${crypto.randomUUID()}`,
+                code: `HU-${crypto.randomUUID().toUpperCase()}`,
                 packagingName: line.packagingName || "Hàng lẻ",
                 baseUnit: line.baseUnit,
                 conversionFactor: line.quantity,
@@ -9394,7 +9399,9 @@ ipcMain.handle("handlingUnits:splitUnit", async (_event, payload = {}) => {
     requireRole("admin", "manager");
     await requireHandlingUnitsFoundation();
 
-    const code = String(payload.code || "").trim().toUpperCase();
+    // The workspace supplies the persisted identifier. Older quick receipts
+    // used lowercase UUIDs; PostgreSQL code equality is case-sensitive.
+    const code = String(payload.code || "").trim();
     const childQuantities = (Array.isArray(payload.childQuantities)
       ? payload.childQuantities
       : []
@@ -12736,11 +12743,13 @@ ipcMain.handle("handlingUnits:mergeReturnUnit", async (_event, payload = {}) => 
     requireRole("admin", "manager");
     if (!prisma) throw new Error("Không kết nối được cơ sở dữ liệu kiện hàng.");
 
-    const sourceCode = String(payload.sourceCode || "").trim().toUpperCase();
-    const targetCode = String(payload.targetCode || "").trim().toUpperCase();
+    // Keep the persisted physical identifiers exact. Legacy quick receipts
+    // may contain lowercase UUIDs and PostgreSQL comparisons are case-sensitive.
+    const sourceCode = String(payload.sourceCode || "").trim();
+    const targetCode = String(payload.targetCode || "").trim();
     const quantity = Number(payload.quantity || 0);
     const idempotencyKey = String(payload.idempotencyKey || "").trim();
-    if (!sourceCode || !targetCode || sourceCode === targetCode)
+    if (!sourceCode || !targetCode || sourceCode.toUpperCase() === targetCode.toUpperCase())
       throw new Error("Kiện nguồn và kiện đích không hợp lệ.");
     if (!Number.isInteger(quantity) || quantity <= 0)
       throw new Error("Số lượng gộp phải là số nguyên lớn hơn 0.");
@@ -12773,7 +12782,9 @@ ipcMain.handle("handlingUnits:mergeReturnUnit", async (_event, payload = {}) => 
       if (!source) throw new Error(`Không tìm thấy kiện nguồn [${sourceCode}].`);
       if (!target) throw new Error(`Không tìm thấy kiện đích [${targetCode}].`);
 
-      const { isReturnSource } = assertMergePolicy(source, target, quantity);
+      const { isReturnSource } = assertMergePolicy(source, target, quantity, {
+        allowLooseRepack: payload.allowLooseRepack === true,
+      });
       const pendingConflict = await tx.handlingUnit.findFirst({
         where: {
           sku: source.sku,
@@ -12787,6 +12798,11 @@ ipcMain.handle("handlingUnits:mergeReturnUnit", async (_event, payload = {}) => 
       }
       const nextSourceQuantity = Number(source.remainingQuantity) - quantity;
       const nextTargetQuantity = Number(target.remainingQuantity) + quantity;
+      // Repacking a normal loose bag may enlarge its original quantity. Keep
+      // its physical identity, and update the count ceiling in this same tx.
+      const repackedLoose = payload.allowLooseRepack === true && !isReturnSource
+        && getHandlingUnitPackageCategory(target.packagingName) === "LE"
+        && nextTargetQuantity > Number(target.initialQuantity);
       const [updatedSource, updatedTarget] = await Promise.all([
         tx.handlingUnit.update({
           where: { code: sourceCode },
@@ -12798,7 +12814,9 @@ ipcMain.handle("handlingUnits:mergeReturnUnit", async (_event, payload = {}) => 
         }),
         tx.handlingUnit.update({
           where: { code: targetCode },
-          data: { remainingQuantity: nextTargetQuantity, status: "opened", updatedAt: new Date() },
+          data: { remainingQuantity: nextTargetQuantity, status: "opened", updatedAt: new Date(),
+            ...(repackedLoose ? { initialQuantity: nextTargetQuantity, conversionFactor: nextTargetQuantity } : {}),
+          },
         }),
       ]);
 
@@ -12822,7 +12840,8 @@ ipcMain.handle("handlingUnits:mergeReturnUnit", async (_event, payload = {}) => 
           remaining: nextTargetQuantity,
           actor,
           reference: sourceCode,
-          note: `Nhận ${quantity} ${target.baseUnit} từ kiện ${sourceCode}`,
+          requiresPhysicalCheck: repackedLoose,
+          note: `Nhận ${quantity} ${target.baseUnit} từ kiện ${sourceCode}${repackedLoose ? `; gom lại kiện lẻ, mức chứa từ ${target.initialQuantity} thành ${nextTargetQuantity}` : ""}`,
         },
       ]);
       await tx.appConfig.create({
@@ -13130,7 +13149,11 @@ ipcMain.handle("handlingUnits:finalizeShiftCheck", async (_event, payload = {}) 
       ? payload.shift
       : currentShift;
     const normalizedItems = items.map((item) => ({
-      code: String(item?.code || "").trim().toUpperCase(),
+      // Preserve physical package identity, including legacy lowercase UUIDs.
+      // PACKED identifiers are virtual and retain their existing normalization.
+      code: /^PACKED:/i.test(String(item?.code || "").trim())
+        ? String(item.code).trim().toUpperCase()
+        : String(item?.code || "").trim(),
       expectedQuantity: item?.expectedQuantity,
       actualQuantity: item?.actualQuantity,
       expectedUpdatedAt: item?.expectedUpdatedAt,
@@ -13148,7 +13171,7 @@ ipcMain.handle("handlingUnits:finalizeShiftCheck", async (_event, payload = {}) 
     ) {
       throw new Error("Số lượng kiểm cuối ca không hợp lệ.");
     }
-    if (new Set(normalizedItems.map((item) => item.code)).size !== normalizedItems.length) {
+    if (new Set(normalizedItems.map((item) => item.code.toUpperCase())).size !== normalizedItems.length) {
       throw new Error("Danh sách kiểm có mã kiện bị trùng.");
     }
     const operationKey = buildRendererHandlingOperationKey(
@@ -32035,6 +32058,29 @@ ipcMain.handle("attendance:updateFine", async (event, payload = {}) => {
   } catch (error) {
     console.error("❌ attendance:updateFine error:", error);
     return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle("attendance:bulkDeleteFines", async (_event, payload = {}) => {
+  try {
+    requireRole("admin");
+    if (!prisma) throw new Error("Prisma not available");
+    const actor = { username: currentSession.username, fullName: currentSession.fullName };
+    const data = await enqueueAttendanceDataWrite(() => deleteAttendanceFines(getPrismaDirectTx(), payload, {
+      actor, parsePatches: parseAttendanceFinePatches,
+    }), { priority: true, maxQueueWaitMs: 3000 });
+    invalidateAttendanceSnapshotCaches();
+    void logActivity({
+      module: "attendance", action: "BULK_DELETE_FINES", severity: "WARNING",
+      recordName: data.batchId, userName: actor.username,
+      description: `Xóa ${data.deleted.length} khoản phạt từ ${payload.from} đến ${payload.to}`,
+    }).catch(error => console.warn("Không thể ghi audit xóa nhiều phạt:", error.message));
+    return { success: true, data };
+  } catch (error) {
+    console.error("❌ attendance:bulkDeleteFines error:", error);
+    return { success: false, error: isAttendanceFineDeleteRetryableError(error) || error?.code === "P2028"
+      ? "Database Bảng công đang bận. Vui lòng tải lại danh sách trước khi thử xóa lại."
+      : error.message };
   }
 });
 

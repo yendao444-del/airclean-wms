@@ -103,7 +103,8 @@ function carryDuties(ledger, now) {
       const unit = normalizeUnit(raw, date);
       if (!unit.requiredShifts.some(shift => isOutstanding(unit, shift))) continue;
       const next = nextDay(date);
-      ensureDuty(ledger, next, code, new Date(`${next}T00:00:00+07:00`).toISOString());
+      const nextUnit = ensureDuty(ledger, next, code, new Date(`${next}T00:00:00+07:00`).toISOString());
+      if (unit.requiresPhysicalCheck) nextUnit.requiresPhysicalCheck = true;
     }
   }
   return ledger;
@@ -141,6 +142,7 @@ function applyEvents(ledger, entries) {
       resolveCode(ledger, code, timestamp, String(entry.actor || "System"), autoReturnEmpty ? "auto-return-merged" : syncEmpty ? "software-sync-empty" : autoEmpty ? "auto-empty-tmdt" : "deleted");
     } else if (isRequired(entry)) {
       const unit = ensureDuty(ledger, date, code, timestamp);
+      if (entry.requiresPhysicalCheck === true) unit.requiresPhysicalCheck = true;
       for (const shift of requiredShiftsFor(timestamp)) {
         if (!unit.requiredShifts.includes(shift)) unit.requiredShifts.push(shift);
         unit.shiftRequiredAt[shift] = timestamp;
@@ -189,6 +191,10 @@ async function recordShiftEvents(tx, entries) {
 // as an untouched row and must not create a false end-of-shift duty.
 async function observeActiveUnits(tx, ledger, now) {
   if (dayKey(now) < EFFECTIVE_DATE) return;
+  // An explicit loose repack proves physical opening even at its new full
+  // quantity; legacy full rows with only a stale opened status stay excluded.
+  const repackedChecks = new Set(Object.values(ledger.days).flatMap(day =>
+    Object.entries(day.units).filter(([, unit]) => unit.requiresPhysicalCheck).map(([code]) => code)));
   const activeRows = await tx.handlingUnit.findMany({
     where: { status: { in: ["opened", "pending_check"] } },
     select: { code: true, status: true, remainingQuantity: true, initialQuantity: true, packagingName: true },
@@ -200,6 +206,7 @@ async function observeActiveUnits(tx, ledger, now) {
     // original capacity. Returned stock remains aggregated without that cap.
     const capacity = isReturn ? Number(unit.initialQuantity) : Math.min(300, Number(unit.initialQuantity));
     return unit.status === "pending_check"
+      || repackedChecks.has(String(unit.code).toUpperCase())
       || !Number.isFinite(Number(unit.remainingQuantity))
       || !Number.isFinite(capacity)
       || Number(unit.remainingQuantity) < capacity;
@@ -216,7 +223,11 @@ async function observeActiveUnits(tx, ledger, now) {
       unit.shiftChecks = { midday: null, evening: null };
     }
   }
-  for (const unit of activeUnits) ensureDuty(ledger, date, unit.code.toUpperCase(), new Date(now).toISOString());
+  for (const unit of activeUnits) {
+    const code = unit.code.toUpperCase();
+    const duty = ensureDuty(ledger, date, code, new Date(now).toISOString());
+    if (repackedChecks.has(code)) duty.requiresPhysicalCheck = true;
+  }
   for (const lot of packed) ensureDuty(ledger, date, `PACKED:${lot.assignmentId}`.toUpperCase(), new Date(now).toISOString());
 }
 function policySnapshot(ledger, now = new Date()) {
@@ -228,7 +239,8 @@ function policySnapshot(ledger, now = new Date()) {
   for (const day of Object.values(ledger.days)) for (const code of Object.keys(day.units)) trackedCodes.add(code);
   for (const [code, raw] of Object.entries(ledger.days[date]?.units || {})) {
     const unit = normalizeUnit(raw, date);
-    if (isOutstanding(unit, shift)) outstanding.push({ code, requiredAt: unit.shiftRequiredAt[shift], date });
+    if (isOutstanding(unit, shift)) outstanding.push({ code, requiredAt: unit.shiftRequiredAt[shift], date,
+      ...(unit.requiresPhysicalCheck ? { requiresPhysicalCheck: true } : {}) });
   }
   return {
     date, effectiveDate: EFFECTIVE_DATE, fineAmount: FINE_AMOUNT,

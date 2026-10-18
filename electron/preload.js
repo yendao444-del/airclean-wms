@@ -610,6 +610,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
         updatePackingCommission: (data) => ipcRenderer.invoke('attendance:updatePackingCommission', data),
         createFine: (data) => ipcRenderer.invoke('attendance:createFine', data),
         deleteFine: (data) => ipcRenderer.invoke('attendance:deleteFine', data),
+        bulkDeleteFines: (data) => ipcRenderer.invoke('attendance:bulkDeleteFines', data),
         updateFine: (data) => ipcRenderer.invoke('attendance:updateFine', data),
         reconcileLateFines: (filters) => ipcRenderer.invoke('attendance:reconcileLateFines', filters),
         getProfiles: () => ipcRenderer.invoke('attendance:getProfiles'),

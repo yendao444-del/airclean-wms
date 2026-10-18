@@ -583,6 +583,7 @@ export interface ElectronAPI {
       sourceCode: string;
       targetCode: string;
       quantity: number;
+      allowLooseRepack?: boolean;
       idempotencyKey: string;
     }) => Promise<{ success: boolean; data?: any; error?: string }>;
     requestFinalCheck: (data: {
@@ -1578,6 +1579,18 @@ export interface ElectronAPI {
     }) => Promise<{
       success: boolean;
       data?: { extraFines: any[]; fineOverrides: Record<string, any>; fineAuditLog: any[] };
+      error?: string;
+    }>;
+    bulkDeleteFines: (data: {
+      from: string;
+      to: string;
+      items: Array<{ kind: 'manual' | 'system'; fine: any; fineId?: string; overrideKey?: string }>;
+    }) => Promise<{
+      success: boolean;
+      data?: { batchId: string; deleted: Array<{
+        kind: 'manual' | 'system'; fineId: string; overrideKey: string;
+        deletedFine: any; disabledFine: any; audit: any;
+      }> };
       error?: string;
     }>;
     deleteFine: (data: {

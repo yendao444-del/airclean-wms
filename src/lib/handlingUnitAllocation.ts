@@ -57,3 +57,12 @@ export function suggestHandlingUnitAllocation(available: number, packageSize: nu
   const fullPackages = Math.floor(quantity / size);
   return { size, fullPackages, looseQuantity: quantity % size };
 }
+
+// Offer the short final bag explicitly alongside full packages. A deliberately
+// smaller batch must not silently allocate every other package still in stock.
+export function looseRemainderForAllocation(available: number, planned: number, packageSize: number, include: boolean) {
+  const remainder = available - planned;
+  return include && [available, planned, packageSize].every(Number.isSafeInteger)
+    && planned > 0 && packageSize > 0 && packageSize <= 300
+    && remainder > 0 && remainder < packageSize ? remainder : 0;
+}

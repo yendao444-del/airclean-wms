@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Alert,
   Button,
+  Checkbox,
   Dropdown,
   Empty,
   Flex,
@@ -51,7 +52,7 @@ import { Warehouse2DMap } from "../components/Warehouse2DMap";
 import Modal from "../components/HandlingUnitModal";
 import HandlingUnitPrintLabel from "../components/HandlingUnitPrintLabel";
 import { buildHandlingUnitSequenceMap, prepareHandlingUnitPrintUnits } from "../lib/handlingUnitPrintNumbers";
-import { packedStockForSku, summarizeHandlingUnitAllocation, summarizePackedInventory, suggestHandlingUnitAllocation } from "../lib/handlingUnitAllocation";
+import { packedStockForSku, summarizeHandlingUnitAllocation, summarizePackedInventory, suggestHandlingUnitAllocation, looseRemainderForAllocation } from "../lib/handlingUnitAllocation";
 import HandlingUnitPackedStock from "../components/HandlingUnitPackedStock";
 import HandlingUnitShiftChecklist, { ShiftFamilySearch } from "../components/HandlingUnitShiftChecklist";
 import { identifyShiftCandidates, scopeShiftCandidates, type ShiftIdentity } from "../lib/handlingUnitShiftScope";
@@ -155,7 +156,7 @@ type Workspace = {
     shiftLabel?: string;
     deadlines?: Record<string, string>;
     todayRemaining: number;
-    outstanding: Array<{ code: string; requiredAt: string; date: string }>;
+    outstanding: Array<{ code: string; requiredAt: string; date: string; requiresPhysicalCheck?: boolean }>;
     trackedCodes: string[];
   };
 };
@@ -1149,6 +1150,9 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
 
   const [mergeReturnUnit, setMergeReturnUnit] = useState<UnitRow | null>(null);
   const [mergeTargetCode, setMergeTargetCode] = useState("");
+  const [transferPairOnly, setTransferPairOnly] = useState(false);
+  const [dragSourceCode, setDragSourceCode] = useState("");
+  const [dragOverUnitCode, setDragOverUnitCode] = useState("");
   const [mergeQuantity, setMergeQuantity] = useState<number | null>(null);
   const [isMergingReturnUnit, setIsMergingReturnUnit] = useState(false);
   const mergeReturnOperationKeyRef = useRef("");
@@ -1531,6 +1535,15 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
     && (unit.status === "Đang sử dụng" || (unit.status === "Nguyên niêm phong" && getPackageCategory(unit.packageType) === "LE"))
   );
 
+  const canTransferUnit = (unit: UnitRow) =>
+    Number(unit.currentPcs || 0) > 0
+    && !isReturnHandlingUnit(unit)
+    && (unit.status === "Đang sử dụng"
+      || (unit.status === "Nguyên niêm phong" && getPackageCategory(unit.packageType) === "LE"));
+
+  const transferCapacityForUnit = (unit: UnitRow) =>
+    getPackageCategory(unit.packageType) === "LE" && !isReturnHandlingUnit(unit) ? 300 : capacityForUnit(unit);
+
   const getReturnMergeTargets = (source: UnitRow) =>
     workspace.register.filter((candidate) =>
       candidate.id.trim().toUpperCase() !== source.id.trim().toUpperCase()
@@ -1538,18 +1551,18 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
       && (candidate.status === "Đang sử dụng" || (candidate.status === "Nguyên niêm phong" && getPackageCategory(candidate.packageType) === "LE"))
       && !isReturnHandlingUnit(candidate)
       && normalizeUnitName(candidate.unitName) === normalizeUnitName(source.unitName)
-      && capacityForUnit(candidate) > Number(candidate.currentPcs || 0)
+      && transferCapacityForUnit(candidate) > Number(candidate.currentPcs || 0)
     );
 
   const getTransferMaximumQuantity = (source: UnitRow | null, targetCode: string) => {
     if (!source || !targetCode) return 0;
     const target = getReturnMergeTargets(source).find(unit => unit.id === targetCode);
     return target
-      ? Math.min(Number(source.currentPcs), Math.max(0, capacityForUnit(target) - Number(target.currentPcs)))
+      ? Math.min(Number(source.currentPcs), Math.max(0, transferCapacityForUnit(target) - Number(target.currentPcs)))
       : 0;
   };
 
-  const openMergeReturnUnit = (source: UnitRow) => {
+  const openMergeReturnUnit = (source: UnitRow, preferredTargetCode?: string) => {
     const pendingConflict = getPendingCheckConflict(source, workspace.register);
     if (pendingConflict) {
       message.warning(pendingCheckBlockText(source, pendingConflict, "chuyển kiện"), 8);
@@ -1567,15 +1580,24 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
       message.warning(
         sameSkuOpened
           ? `SKU ${source.skuName} có kiện đang khui nhưng khác đơn vị ${source.unitName} hoặc đã hết sức chứa. Hãy chọn kiện đích phù hợp rồi thử chuyển lại.`
-          : `SKU ${source.skuName} chưa có kiện lẻ hoặc kiện đã khui còn sức chứa. Kiện nguyên phải khui trước; kiện đích không vượt số lượng ban đầu và tối đa 300.`,
+          : `SKU ${source.skuName} chưa có kiện lẻ hoặc kiện đã khui còn sức chứa. Kiện nguyên phải khui trước; kiện lẻ gom thủ công tối đa 300.`,
       );
       return;
     }
     setMergeReturnUnit(source);
-    setMergeTargetCode(candidates.length === 2 ? candidates.find(unit => unit.id !== source.id)?.id || "" : "");
-    setMergeQuantity(null);
+    const targetCode = preferredTargetCode || (candidates.length === 2 ? candidates.find(unit => unit.id !== source.id)?.id || "" : "");
+    setMergeTargetCode(targetCode);
+    setTransferPairOnly(Boolean(preferredTargetCode));
+    setMergeQuantity(preferredTargetCode ? getTransferMaximumQuantity(source, targetCode) : null);
     mergeReturnOperationKeyRef.current = `merge-return-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
   };
+
+  const dragSource = dragSourceCode ? workspace.register.find(unit => unit.id === dragSourceCode) : undefined;
+  const canDropTransfer = (target: UnitRow) => Boolean(dragSource
+    && (isAdmin || user?.role === "manager")
+    && canTransferUnit(dragSource)
+    && !getPendingCheckConflict(dragSource, workspace.register)
+    && getTransferMaximumQuantity(dragSource, target.id) > 0);
 
   const handleMergeReturnUnit = async () => {
     if (!mergeReturnUnit || !mergeTargetCode || !Number.isSafeInteger(mergeQuantity) || !mergeQuantity || isMergingReturnUnit) return;
@@ -1594,6 +1616,7 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
         sourceCode: mergeReturnUnit.id,
         targetCode: target.id,
         quantity: mergeQuantity,
+        allowLooseRepack: getPackageCategory(target.packageType) === "LE",
         idempotencyKey: mergeReturnOperationKeyRef.current,
       });
       if (!result?.success) throw new Error(result?.error || "Không thể chuyển kiện.");
@@ -1857,6 +1880,12 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
     return index;
   }, [workspace.register]);
 
+  const activeUnitCountBySku = useMemo(() => new Map(
+    [...unitsBySku].map(([sku, units]) => [sku, units.filter(
+      unit => unit.status !== "Đã hết" && unit.status !== "Đã tách",
+    ).length]),
+  ), [unitsBySku]);
+
   const packedSummary = useMemo(() => summarizePackedInventory(workspace.packedInventory), [workspace.packedInventory]);
   const packedBySku = packedSummary.quantityBySku;
   const packedComboBySku = packedSummary.comboCountBySku;
@@ -2068,9 +2097,9 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
 
   const displayedUnits = useMemo(() => {
     if (statusFilter === "all")
-      return orderedSelectedUnits.filter((u) => u.status !== "Đã hết");
+      return activeSelectedUnits;
     return orderedSelectedUnits.filter((u) => u.status === statusFilter);
-  }, [orderedSelectedUnits, statusFilter]);
+  }, [orderedSelectedUnits, activeSelectedUnits, statusFilter]);
 
   useEffect(() => {
     setVisibleUnitLimit(100);
@@ -2148,7 +2177,7 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
         // A full-capacity row can retain the legacy "opened" status after a
         // sync. It is not the physical bag currently being used, so only a
         // reduced opened bag (or an explicit pending check) enters this list.
-        if (!isPendingCheck && !hasReducedBalance) return null;
+        if (!isPendingCheck && !hasReducedBalance && !obligation?.requiresPhysicalCheck && !transferAfterCheck) return null;
         if (!isPendingCheck && latestCompletedCheck > 0 && localDayKey(latestCompletedCheck) === todayKey
             && !obligationRequiredToday && withdrawals.length === 0 && !transferAfterCheck) return null;
         return {
@@ -2350,6 +2379,7 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
   const watchAllocFactor =
     Form.useWatch("conversionFactor", allocationForm) ?? 1200;
   const watchAllocLooseQty = Form.useWatch("looseQty", allocationForm) ?? 50;
+  const watchAllocRemainder = Form.useWatch("includeLooseRemainder", allocationForm) === true;
 
   const currentAllocProduct = useMemo(() => {
     const targetSku = watchAllocSku || selected?.sku;
@@ -2388,7 +2418,7 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
   }, [currentAllocProduct, currentAllocAllocated]);
   const currentAllocAvailable = Math.max(0, -currentAllocDifference);
 
-  const totalCalculatedQuantity = useMemo(() => {
+  const baseCalculatedQuantity = useMemo(() => {
     if (watchAllocMethod === "LE") {
       return Math.max(1, Number(watchAllocLooseQty || 0));
     }
@@ -2397,6 +2427,10 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
       Math.max(1, Number(watchAllocFactor || 0))
     );
   }, [watchAllocMethod, watchAllocCount, watchAllocFactor, watchAllocLooseQty]);
+  const availableLooseRemainder = watchAllocMethod === "LE" ? 0
+    : looseRemainderForAllocation(currentAllocAvailable, baseCalculatedQuantity, Number(watchAllocFactor), true);
+  const includedLooseRemainder = watchAllocRemainder ? availableLooseRemainder : 0;
+  const totalCalculatedQuantity = baseCalculatedQuantity + includedLooseRemainder;
 
   const allocateUnits = async () => {
     try {
@@ -2510,10 +2544,20 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
         ];
       }
 
-      const totalPcs = created.reduce((s, u) => s + u.currentPcs, 0);
       const available = summarizeHandlingUnitAllocation(
         Number(targetSku.stock || 0), unitsBySku.get(targetSku.sku) || [], packedBySku.get(targetSku.sku) || 0,
       ).unallocatedQuantity;
+      const remainder = method === "LE" ? 0 : looseRemainderForAllocation(available,
+        created.reduce((sum, unit) => sum + unit.currentPcs, 0), Number(values.conversionFactor || spec?.conversionFactor),
+        values.includeLooseRemainder === true);
+      if (remainder > 0) created.push({
+        ...unitIdentity, id: nextUnitCode(), receiptCode, skuName: targetSku.sku,
+        packageType: "Túi lẻ", packageLabel: `Hàng túi lẻ · ${fmt(remainder)} ${unitName}`,
+        unitName, status: "Nguyên niêm phong", location: { zone, rack: rack || undefined },
+        initialPcs: remainder, currentPcs: remainder,
+        note: note || `Phân phần dư từ phiếu ${receiptCode}`,
+      });
+      const totalPcs = created.reduce((s, u) => s + u.currentPcs, 0);
       if (totalPcs > available) {
         throw new Error(`Chỉ còn ${fmt(available)} ${unitName} chưa phân kiện; không thể tạo thêm ${fmt(totalPcs)} ${unitName}. Nếu số kiểm thực tế cao hơn tồn phần mềm, hãy đối chiếu kiểm kho trước.`);
       }
@@ -2587,6 +2631,7 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
       packageCount: useAvailable ? Math.max(1, suggestion.fullPackages) : 1,
       conversionFactor: suggestion.size,
       looseQty: useAvailable && method === "LE" ? Math.min(300, available) : undefined,
+      includeLooseRemainder: useAvailable,
       zone: "A1",
     });
     setShowAllocation(true);
@@ -3170,7 +3215,7 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
                 const groupUnitsCount = group.children.reduce(
                   (acc, c) =>
                     acc +
-                    (unitsBySku.get(c.sku) || []).length,
+                    (activeUnitCountBySku.get(c.sku) || 0),
                   0,
                 );
                 const groupUnallocatedCount = group.children.filter(
@@ -3201,8 +3246,7 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
                     {isOpen && (
                       <div className="hu-sku-group-children">
                         {group.children.map((item) => {
-                          const unitCount = (unitsBySku.get(item.sku) || [])
-                            .length;
+                          const unitCount = activeUnitCountBySku.get(item.sku) || 0;
                           const colorInfo = getColorDot(item.color, item.sku);
                           const missingQuantity = Number(allocationGapBySku.get(item.sku) || 0);
                           const packedQuantity = Number(packedBySku.get(item.sku) || 0);
@@ -3401,7 +3445,7 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
               <div className="hu-physical-toolbar">
                 <div className="hu-toolbar-left">
                   <span className="hu-toolbar-title">
-                    <b>{selectedUnits.length}</b> kiện đang quản lý
+                    <b>{activeSelectedUnits.length}</b> kiện đang hoạt động
                   </span>
                   <div className="hu-filter-tabs">
                     <button
@@ -3409,7 +3453,7 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
                       className={`hu-filter-tab ${statusFilter === "all" ? "active" : ""}`}
                       onClick={() => setStatusFilter("all")}
                     >
-                      Tất cả ({selectedUnits.length})
+                      Tất cả ({activeSelectedUnits.length})
                     </button>
                     <button
                       type="button"
@@ -3456,6 +3500,16 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
                   </div>
                 </div>
                 <div className="hu-toolbar-right">
+                  {activeModuleTab === "units" && (isAdmin || user?.role === "manager") && (
+                    <Button size="small" icon={<SwapOutlined />}
+                      disabled={!selectedUnits.some(canTransferUnit)}
+                      onClick={() => {
+                        const source = selectedUnits.filter(canTransferUnit).sort((a, b) => a.currentPcs - b.currentPcs)[0];
+                        if (source) openMergeReturnUnit(source);
+                      }}>
+                      Chuyển kiện
+                    </Button>
+                  )}
                   {(isAdmin || user?.role === "manager") && activeSelectedUnits.length > 0 && (
                     <Tooltip title={`In toàn bộ ${activeSelectedUnits.length} kiện đang hoạt động của SKU này · mỗi kiện một trang PDF ${printLabelSize}`}>
                       <Button
@@ -3475,6 +3529,9 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
                       <LockOutlined /> <b>Ít hàng trước</b> · {activeSequenceCount} kiện đang hoạt động
                     </span>
                   )}
+                  {activeModuleTab === "units" && (isAdmin || user?.role === "manager") && activeSelectedUnits.length > 1 && (
+                    <span className="hu-drag-hint">Kéo kiện sang kiện nhận → xác nhận</span>
+                  )}
                 </div>
               </div>
               <div
@@ -3484,18 +3541,42 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
                     const deleteLocked = unit.status === "Đã tách" || isReturnHandlingUnit(unit) || (!isAdmin && unitHasWithdrawalHistory(unit));
                     return (
                     <article
-                      className={`hu-package-card ${unit.status === "Đang sử dụng" ? "opened" : ""} ${unit.status === "Chờ kiểm" ? "pending-check" : ""} ${unit.status === "Đã hết" ? "empty" : ""} ${unit.status === "Đã tách" ? "split" : ""}`}
+                      className={`hu-package-card ${unit.status === "Đang sử dụng" ? "opened" : ""} ${unit.status === "Chờ kiểm" ? "pending-check" : ""} ${unit.status === "Đã hết" ? "empty" : ""} ${unit.status === "Đã tách" ? "split" : ""} ${dragSourceCode === unit.id ? "hu-is-dragging" : ""} ${dragSourceCode && canDropTransfer(unit) ? "hu-can-drop" : ""} ${dragOverUnitCode === unit.id ? "hu-drag-over" : ""}`}
+                      draggable={(isAdmin || user?.role === "manager") && canTransferUnit(unit) && !isMergingReturnUnit && !getPendingCheckConflict(unit, workspace.register)}
+                      onDragStart={(event) => {
+                        if ((event.target as HTMLElement).closest("button, input, a") || !canTransferUnit(unit)) {
+                          event.preventDefault(); return;
+                        }
+                        event.dataTransfer.effectAllowed = "move";
+                        event.dataTransfer.setData("application/x-dby-handling-unit", unit.id);
+                        setDragSourceCode(unit.id);
+                      }}
+                      onDragOver={(event) => {
+                        if (!canDropTransfer(unit)) return;
+                        event.preventDefault();
+                        event.dataTransfer.dropEffect = "move";
+                        setDragOverUnitCode(unit.id);
+                      }}
+                      onDragLeave={(event) => {
+                        if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDragOverUnitCode("");
+                      }}
+                      onDragEnd={() => { setDragSourceCode(""); setDragOverUnitCode(""); }}
+                      onDrop={(event) => {
+                        event.preventDefault(); event.stopPropagation();
+                        if (dragSource && canDropTransfer(unit)) openMergeReturnUnit(dragSource, unit.id);
+                        setDragSourceCode(""); setDragOverUnitCode("");
+                      }}
                       key={unit.id}
                       role="button"
                       tabIndex={0}
                       onClick={() => setDetail(unit)}
-                      onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); setDetail(unit); } }}
+                      onKeyDown={(event) => { if (event.target === event.currentTarget && (event.key === "Enter" || event.key === " ")) { event.preventDefault(); setDetail(unit); } }}
                     >
                       <header>
                         <div className="hu-card-heading">
                           <span className="hu-sequence-badge" title={unit.sequenceCycle && unit.sequenceCycle > 1 ? `Số kiện cố định theo tem · Đợt ${unit.sequenceCycle}` : "Số kiện cố định theo tem"}>{displaySequenceByUnitId.get(unit.id) || "—"}</span>
                           <div className="hu-card-title-group">
-                            <b className="hu-unit-code">{unit.id}</b>
+                            <b className="hu-unit-code" title={unit.id}>{unit.id}</b>
                             <span className="hu-unit-spec-tag">
                               {unit.packageType}
                             </span>
@@ -3508,7 +3589,7 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
                         </div>
                         <div className="hu-card-header-actions">
                           {statusFor(unit.status)}
-                          {isAdmin && (
+                          {isAdmin && unit.status !== "Đã tách" && (
                             <Tooltip title={unit.status === "Đã tách" ? "Kiện cha đã tách phải được giữ lại để tra cứu lịch sử và QR cũ" : isReturnHandlingUnit(unit) ? "Kiện hàng hoàn phải chuyển sang kiện khác để bảo toàn tồn kho, không được xóa" : deleteLocked ? "Kiện đã có lịch sử rút hàng — chỉ admin được xóa" : "Xóa kiện"}>
                               <button
                                 type="button"
@@ -3526,11 +3607,29 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
                           )}
                         </div>
                       </header>
-                      <img src={imageFor(unit)} alt={`Minh hoạ ${unit.id}`} />
+                      {unit.status !== "Đã tách" && <img src={imageFor(unit)} draggable={false} alt={`Minh hoạ ${unit.id}`} />}
                       <div className="hu-package-number">
                         <small>{unit.status === "Đã tách" ? "Đã chuyển sang kiện con" : `${unit.unitName} còn lại`}</small>
                         <strong>{unit.status === "Đã tách" ? `${unit.childUnits?.length || 0} kiện` : `${fmt(unit.currentPcs)} ${unit.unitName}`}</strong>
                       </div>
+                      {unit.status === "Đã tách" && (
+                        <>
+                          <p className="hu-split-card-note">Kiện cha chỉ để tra cứu, không kéo chuyển. Chọn kiện con còn hàng để thao tác.</p>
+                          <div className="hu-split-children">
+                            {unit.childUnits?.map((child) => {
+                              const childUnit = workspace.register.find(candidate => candidate.id === child.code);
+                              return (
+                                <button type="button" className="hu-split-child" key={child.code}
+                                  disabled={!childUnit} title={child.code}
+                                  onClick={(event) => { event.stopPropagation(); if (childUnit) setDetail(childUnit); }}>
+                                  <span>Kiện {displaySequenceByUnitId.get(child.code) || child.code}</span>
+                                  <b>{childUnit ? `${fmt(childUnit.currentPcs)} ${childUnit.unitName}` : "Chưa tải"} ›</b>
+                                </button>
+                              );
+                            })}
+                          </div>
+                        </>
+                      )}
                       <div className="hu-package-meta">
                         <div className="hu-meta-row">
                           <span>Vị trí</span>
@@ -3547,7 +3646,7 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
                         {unit.parentUnitCode && (
                           <div className="hu-meta-row">
                             <span>Tách từ kiện</span>
-                            <b>{unit.parentUnitCode}</b>
+                            <b title={unit.parentUnitCode}>{displaySequenceByUnitId.has(unit.parentUnitCode) ? `Kiện ${displaySequenceByUnitId.get(unit.parentUnitCode)}` : unit.parentUnitCode}</b>
                           </div>
                         )}
                       </div>
@@ -3629,9 +3728,18 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
                                   <ScissorOutlined /> Tách kiện
                                 </button>
                               )}
+                            {(isAdmin || user?.role === "manager") && canTransferUnit(unit) && (
+                              <button
+                                className="hu-action-btn transfer"
+                                title="Chuyển một phần tồn sang kiện cùng SKU còn sức chứa"
+                                onClick={() => openMergeReturnUnit(unit)}
+                              >
+                                <SwapOutlined /> Chuyển kiện
+                              </button>
+                            )}
                           </div>
                         )}
-                        <button
+                        {unit.status !== "Đã tách" && <button
                           type="button"
                           className="hu-card-location-btn"
                           onClick={(event) => {
@@ -3640,7 +3748,7 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
                           }}
                         >
                           <EnvironmentOutlined /> Xem vị trí trên sơ đồ
-                        </button>
+                        </button>}
                       </footer>
                     </article>
                     );
@@ -3776,7 +3884,7 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
                           if (childUnit) setDetail(childUnit);
                         }}
                       >
-                        {child.code} · {fmt(child.quantity)} {detail.unitName}
+                        Kiện {displaySequenceByUnitId.get(child.code) || child.code} · {fmt(workspace.register.find(unit => unit.id === child.code)?.currentPcs ?? child.quantity)} {detail.unitName}
                       </Button>
                     ))}
                   </Flex>
@@ -5249,6 +5357,10 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
               </Form.Item>
             )}
 
+            {availableLooseRemainder > 0 && <Form.Item name="includeLooseRemainder" valuePropName="checked" style={{ marginBottom: 10 }}>
+              <Checkbox>Tạo thêm 1 kiện lẻ {fmt(availableLooseRemainder)} {currentAllocUnitName} để phân hết phần còn lại (xác nhận đã đếm thực tế)</Checkbox>
+            </Form.Item>}
+
             {/* 4. TÍNH TOÁN QUY ĐỔI RA ĐƠN VỊ CƠ SỞ CỦA SKU */}
             <div className="hu-alloc-calc-banner">
               <div className="hu-alloc-calc-text">
@@ -5258,7 +5370,7 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
                 <b className="hu-calc-total">
                   {watchAllocMethod === "LE"
                     ? `${fmt(watchAllocLooseQty)} ${currentAllocUnitName}`
-                    : `${watchAllocCount} kiện × ${fmt(watchAllocFactor)} ${currentAllocUnitName} = ${fmt(totalCalculatedQuantity)} ${currentAllocUnitName}`}
+                    : `${watchAllocCount} kiện × ${fmt(watchAllocFactor)}${includedLooseRemainder ? ` + 1 kiện lẻ ${fmt(includedLooseRemainder)}` : ""} = ${fmt(totalCalculatedQuantity)} ${currentAllocUnitName}`}
                 </b>
               </div>
               <Tag color="green" style={{ fontSize: 13, padding: "4px 10px" }}>
@@ -5288,7 +5400,7 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
       </Modal>
 
       <Modal
-        title="Chuyển kiện"
+        title={transferPairOnly ? "Xác nhận chuyển kiện" : "Chuyển kiện"}
         className="hu-transfer-modal"
         open={!!mergeReturnUnit}
         onCancel={() => {
@@ -5315,7 +5427,7 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
             .sort((a, b) => (displaySequenceByUnitId.get(a.id) || a.sequenceNumber || Number.MAX_SAFE_INTEGER)
               - (displaySequenceByUnitId.get(b.id) || b.sequenceNumber || Number.MAX_SAFE_INTEGER)
               || a.id.localeCompare(b.id));
-          const compact = candidates.length === 2;
+          const compact = transferPairOnly || candidates.length === 2;
           const selectedTarget = candidates.find(unit => unit.id === mergeTargetCode);
           const maximumQuantity = getTransferMaximumQuantity(mergeReturnUnit, mergeTargetCode);
           const swapDirection = () => {
@@ -5331,7 +5443,7 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
               <img src={imageFor(unit)} alt="" />
               <span className="hu-transfer-card-main">
                 <strong>Kiện {displaySequenceByUnitId.get(unit.id) || unit.sequenceNumber || unit.id}</strong>
-                <span><b>{fmt(unit.currentPcs)}</b> {unit.unitName} <small>/ {fmt(capacityForUnit(unit))}</small></span>
+                <span><b>{fmt(unit.currentPcs)}</b> {unit.unitName} <small>/ {fmt(transferCapacityForUnit(unit))}</small></span>
                 <small className="hu-transfer-code">{unit.id}</small>
               </span>
             </div>
@@ -5367,7 +5479,7 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
                 <img src={imageFor(unit)} alt="" />
                 <span className="hu-transfer-card-main">
                   <strong>{sequence ? `Kiện ${sequence}` : unit.id}</strong>
-                  <span><b>{fmt(unit.currentPcs)}</b> {unit.unitName} <small>/ {fmt(capacityForUnit(unit))}</small></span>
+                  <span><b>{fmt(unit.currentPcs)}</b> {unit.unitName} <small>/ {fmt(transferCapacityForUnit(unit))}</small></span>
                   <small className="hu-transfer-code">{unit.id}</small>
                 </span>
                 <span className="hu-transfer-radio" aria-hidden="true" />
@@ -5399,7 +5511,7 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
                   <div className="hu-transfer-list">{candidates.map(unit => card(unit, "target"))}</div>
                 </section>
               </div>}
-              <div className="hu-transfer-sku">Chỉ chuyển cùng SKU: <strong>{mergeReturnUnit.skuName}</strong></div>
+              <div className="hu-transfer-sku">Chỉ chuyển cùng SKU: <strong>{mergeReturnUnit.skuName}</strong>. Kiện lẻ có thể gom tối đa 300 {mergeReturnUnit.unitName}; kiện cha đã tách chỉ dùng tra cứu.</div>
               {selectedTarget && maximumQuantity <= 0 && <Alert type="warning" showIcon message={isReturnHandlingUnit(selectedTarget)
                 ? "Kiện hàng hoàn chỉ được chuyển đi. Bấm đổi chiều để chọn kiện nhận phù hợp."
                 : Number(mergeReturnUnit.currentPcs) <= 0 ? "Kiện chuyển đi đã hết hàng."
@@ -5413,6 +5525,8 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
                   addonAfter={mergeReturnUnit.unitName} placeholder="Nhập số lượng" />
                 <button type="button" disabled={maximumQuantity <= 0 || isMergingReturnUnit} onClick={() => setMergeQuantity(Math.min(maximumQuantity, Number(mergeQuantity || 0) + 1))}>+</button>
                 <div className="hu-transfer-presets">
+                  <button type="button" disabled={maximumQuantity <= 0 || isMergingReturnUnit}
+                    onClick={() => setMergeQuantity(maximumQuantity)}>Tối đa ({fmt(maximumQuantity)})</button>
                   {[10, 30, 50].map(quantity => <button type="button" key={quantity}
                     className={mergeQuantity === quantity ? "is-selected" : ""}
                     disabled={!selectedTarget || quantity > maximumQuantity || isMergingReturnUnit}
