@@ -293,7 +293,7 @@ const { isEcommerceOrderFine } = require("./ecommerce-order-fines");
 const { reconcilePrepackShortfallFines, isPrepackShortfallFine } = require("./prepack-fines");
 const { MAX_QUANTITY: HANDLING_UNIT_MAX_QUANTITY, assertPackageQuantity, readLabelNumbers, assignLabelNumbers } = require("./handling-unit-labels.cjs");
 const { assertMergePolicy } = require("./handling-unit-merge-policy.cjs");
-const { recordShiftEvents, readShiftPolicy, reconcileShiftFines, assigneeFor: shiftAssigneeFor, dayKey: shiftDayKey } = require("./handling-unit-shift-policy.cjs");
+const { recordShiftEvents, readShiftPolicy, reconcileShiftFines, saveShiftScope, assigneeFor: shiftAssigneeFor, dayKey: shiftDayKey } = require("./handling-unit-shift-policy.cjs");
 const autoReturns = require('./handling-unit-auto-returns.cjs');
 
 // 📦 Offline Queue — lưu scan khi mất mạng, sync lại khi có mạng
@@ -307,7 +307,7 @@ try {
 // Set Prisma environment variables from runtime-only configuration.
 const isPostgresUrl = (value) =>
   typeof value === "string" && /^postgres(?:ql)?:\/\//i.test(value.trim());
-const { desktopPrismaUrl, withDatabaseReadDeadline, withIsolatedReadFallback, createPrismaReadRecovery } = require('./prisma-pool-policy.cjs');
+const { desktopPrismaUrl, supabaseSessionPoolUrl, createSwitchableClient, withDatabaseReadDeadline, withIsolatedReadFallback, createPrismaReadRecovery } = require('./prisma-pool-policy.cjs');
 // A shell or another local project can leave DATABASE_URL/DIRECT_URL behind.
 // Never pass a non-PostgreSQL value to Prisma; use the packaged fallback instead.
 const databaseUrl = isPostgresUrl(config.DATABASE_URL)
@@ -1519,12 +1519,18 @@ async function ensureRuntimePerformanceIndexes() {
 function getPrismaDirectTx() {
   if (!prismaDirectTx) {
     console.time("âš¡ lazy-init prismaDirectTx");
-    prismaDirectTx = new PrismaClient({
+    const createDirect = (url) => new PrismaClient({
       log: ["error", "warn"],
-      datasources: { db: { url: desktopPrismaUrl(directDatabaseUrl, { transactions: true }) } },
+      datasources: { db: { url: desktopPrismaUrl(url, { transactions: true }) } },
     });
-    prismaDirectTx
-      .$connect()
+    // Interactive transactions pay the pooler cost on every statement; prefer
+    // the session pooler and keep the configured URL as the fallback.
+    const sessionUrl = supabaseSessionPoolUrl(directDatabaseUrl);
+    const direct = sessionUrl
+      ? createSwitchableClient({ primary: createDirect(sessionUrl), fallback: () => createDirect(directDatabaseUrl), label: "Prisma Direct" })
+      : { client: createDirect(directDatabaseUrl), connect: null };
+    prismaDirectTx = direct.client;
+    (direct.connect ? direct.connect() : prismaDirectTx.$connect())
       .then(() => console.log("✅ Connected Prisma Direct (for transactions)"))
       .catch((err) =>
         console.error("⚠️ Prisma Direct connect failed:", err.message),
@@ -1579,28 +1585,38 @@ try {
   })();
   console.log("   DATABASE_HOST:", databaseHost);
 
-  prisma = new PrismaClient({
-    log: ["error", "warn"],
-    datasources: {
-      db: {
-        url: desktopPrismaUrl(databaseUrl),
+  const createMainPrisma = (url) => {
+    const client = new PrismaClient({
+      log: ["error", "warn"],
+      datasources: {
+        db: {
+          url: desktopPrismaUrl(url),
+        },
       },
-    },
-  });
-  prisma.$use(createPrismaReadRecovery({
-    // Match the effective pool even when runtime configuration requests fewer
-    // connections. Leave one connection available for mutations/session work.
-    concurrency: Math.max(1, Number(new URL(desktopPrismaUrl(databaseUrl)).searchParams.get("connection_limit")) - 1),
-    replay: params => {
-      const delegate = params.model[0].toLowerCase() + params.model.slice(1);
-      return prisma[delegate][params.action](params.args);
-    },
-  }));
-  console.log("✅ Prisma Client initialized successfully");
+    });
+    client.$use(createPrismaReadRecovery({
+      // Match the effective pool even when runtime configuration requests fewer
+      // connections. Leave one connection available for mutations/session work.
+      concurrency: Math.max(1, Number(new URL(desktopPrismaUrl(url)).searchParams.get("connection_limit")) - 1),
+      replay: params => {
+        const delegate = params.model[0].toLowerCase() + params.model.slice(1);
+        return client[delegate][params.action](params.args);
+      },
+    }));
+    return client;
+  };
+  // Prefer the Supabase session pooler (one round trip per query). If this
+  // workstation cannot reach it or its slots are full, fall back to the
+  // configured transaction pooler (the session pooler is retried later).
+  const mainSessionUrl = supabaseSessionPoolUrl(databaseUrl);
+  const mainPrisma = mainSessionUrl
+    ? createSwitchableClient({ primary: createMainPrisma(mainSessionUrl), fallback: () => createMainPrisma(databaseUrl), label: "Prisma" })
+    : { client: createMainPrisma(databaseUrl), connect: null };
+  prisma = mainPrisma.client;
+  console.log("✅ Prisma Client initialized successfully", mainSessionUrl ? "(session pooler)" : "");
 
   // Test connection - REQUIRED
-  prisma
-    .$connect()
+  (mainPrisma.connect ? mainPrisma.connect() : prisma.$connect())
     .then(() => {
       console.log("✅ Connected to Supabase PostgreSQL");
       if (!DATA_SAFETY_MODE) {
@@ -10252,7 +10268,7 @@ function clearTelegramWmsInlineKeyboard(chatId, messageId) {
 }
 
 function broadcastHandlingUnitsChanged(type, data) {
-  if (!['AUTO_RETURN_MERGED', 'QR_LABELS_ISSUED', 'QR_LABELS_PRINTED', 'MOVE'].includes(type)) scheduleAutoReturnMaintenance();
+  if (!['AUTO_RETURN_MERGED', 'QR_LABELS_ISSUED', 'QR_LABELS_PRINTED', 'MOVE', 'SHIFT_CHECK_SCOPE'].includes(type)) scheduleAutoReturnMaintenance();
   try {
     const { BrowserWindow } = require("electron");
     BrowserWindow.getAllWindows().forEach((win) => {
@@ -13127,6 +13143,36 @@ const isHandlingUnitCompletedCheckHistory = (item) =>
   );
 
 const { finalizeCountsInTx } = require('./handling-unit-count.cjs');
+
+ipcMain.handle("handlingUnits:getCheckHistory", async (_event, { sku } = {}) => {
+  try {
+    requireInventoryLedgerReadAccess();
+    if (!prisma) throw new Error("Không kết nối được cơ sở dữ liệu kiện hàng.");
+    const normalizedSku = String(sku || "").trim();
+    if (!normalizedSku || normalizedSku.length > 200) throw new Error("SKU không hợp lệ.");
+    const data = await require('./handling-unit-check-history.cjs').loadCheckHistory(prisma, normalizedSku);
+    return { success: true, data };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+// Admin chooses which products the end-of-shift count covers. null = all.
+ipcMain.handle("handlingUnits:setShiftCheckScope", async (_event, payload = {}) => {
+  try {
+    requireRole("admin");
+    if (!prisma) throw new Error("Không kết nối được cơ sở dữ liệu kiện hàng.");
+    const productIds = payload.productIds === null ? null : payload.productIds;
+    if (Array.isArray(productIds) && productIds.length === 0) {
+      throw new Error("Hãy chọn ít nhất một sản phẩm cần kiểm.");
+    }
+    const entry = await prisma.$transaction((tx) => saveShiftScope(tx, productIds, currentSession?.username || "admin"));
+    broadcastHandlingUnitsChanged("SHIFT_CHECK_SCOPE", entry);
+    return { success: true, data: entry };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
 
 ipcMain.handle("handlingUnits:finalizeShiftCheck", async (_event, payload = {}) => {
   const idempotencyKey = String(payload.idempotencyKey || "").trim();

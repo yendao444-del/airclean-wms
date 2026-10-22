@@ -6,6 +6,7 @@ const revision = value => value ? new Date(value).getTime() : NaN;
 // The caller owns the global stock lock, packed-inventory lock and package row
 // locks. Counts, SKU deltas, inventory logs and check history commit together.
 async function finalizeCountsInTx(tx, items, { actor, packedInventory, updateStock, appendHistory, reference }) {
+  const checkedAt = new Date().toISOString();
   const checked = [];
   const history = [];
   const deltas = new Map();
@@ -28,7 +29,7 @@ async function finalizeCountsInTx(tx, items, { actor, packedInventory, updateSto
       if (!lot || !['submitted', 'ready', 'issued'].includes(lot.status)) throw new Error('Lô đóng sẵn chưa gửi xác nhận hoặc đã trả lại để sửa.');
       const result = packing.checkPackedCount(packedInventory, item, actor.username);
       checked.push(result.checked);
-      history.push({ ...result.history, reference, note, shift: item.shift });
+      history.push({ ...result.history, components: lot.components.map(component => ({ ...component })), reference, note, shift: item.shift });
       if (variance) for (const component of lot.components) {
         if (!Number.isSafeInteger(component.quantity) || component.quantity <= 0) throw new Error('Thành phần đóng sẵn không hợp lệ.');
         addDelta(component.sku, variance * component.quantity, note);
@@ -62,6 +63,12 @@ async function finalizeCountsInTx(tx, items, { actor, packedInventory, updateSto
     const value = JSON.stringify(packedInventory);
     await tx.appConfig.upsert({ where: { key: packing.INVENTORY_KEY }, create: { key: packing.INVENTORY_KEY, value }, update: { value } });
   }
+  // Keep the exact count audit in the existing durable retry record as well as
+  // the rolling movement buffer. A busy sales day must not erase check history.
+  history.forEach((entry, index) => {
+    entry.createdAt = checkedAt;
+    checked[index].audit = { ...entry };
+  });
   await appendHistory(tx, history);
   return { items: checked, stockChanges };
 }

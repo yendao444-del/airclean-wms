@@ -503,6 +503,7 @@ export interface ElectronAPI {
     }>;
   };
   handlingUnits: {
+    getCheckHistory: (options: { sku: string }) => Promise<{ success: boolean; data?: import('../lib/handlingUnitHistory').HandlingUnitHistoryEntry[]; error?: string }>;
     getReconciliation: (sku: string) => Promise<{ success: boolean; data?: import('./handlingUnitReconciliation').ReconciliationPreview; error?: string }>;
     confirmReconciliation: (data: import('./handlingUnitReconciliation').ReconciliationPayload) => Promise<{ success: boolean; data?: { duplicate?: boolean }; error?: string }>;
     getWorkspace: (options?: { purpose?: 'stock-check' }) => Promise<{
@@ -609,6 +610,9 @@ export interface ElectronAPI {
       }>;
       shift?: "midday" | "evening";
       idempotencyKey?: string;
+    }) => Promise<{ success: boolean; data?: any; error?: string }>;
+    setShiftCheckScope: (data: {
+      productIds: number[] | null;
     }) => Promise<{ success: boolean; data?: any; error?: string }>;
     moveUnit: (data: {
       code: string;

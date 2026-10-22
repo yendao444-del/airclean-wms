@@ -12,6 +12,7 @@ export type HandlingUnitHistoryEntry = {
   reason?: string;
   note?: string;
   reference?: string;
+  shift?: string;
   components?: readonly { sku: string; quantity: number }[];
 };
 

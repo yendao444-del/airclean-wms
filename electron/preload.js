@@ -194,6 +194,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
         getImportReceiptPreviewData: (purchaseId) => ipcRenderer.invoke('purchases:getImportReceiptPreviewData', { purchaseId }),
     },
     handlingUnits: {
+        getCheckHistory: (options) => ipcRenderer.invoke('handlingUnits:getCheckHistory', options),
         getWorkspace: (options) => ipcRenderer.invoke('handlingUnits:getWorkspace', options),
         getReconciliation: (sku) => ipcRenderer.invoke('handlingUnits:getReconciliation', sku),
         confirmReconciliation: (data) => ipcRenderer.invoke('handlingUnits:confirmReconciliation', data),
@@ -213,6 +214,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
         requestFinalCheck: (data) => ipcRenderer.invoke('handlingUnits:requestFinalCheck', data),
         finalizePick: (data) => ipcRenderer.invoke('handlingUnits:finalizePick', data),
         finalizeShiftCheck: (data) => ipcRenderer.invoke('handlingUnits:finalizeShiftCheck', data),
+        setShiftCheckScope: (data) => ipcRenderer.invoke('handlingUnits:setShiftCheckScope', data),
         moveUnit: (data) => ipcRenderer.invoke('handlingUnits:move', data),
         updateUnit: (data) => ipcRenderer.invoke('handlingUnits:updateUnit', data),
         deleteUnit: (data) => ipcRenderer.invoke('handlingUnits:deleteUnit', data),

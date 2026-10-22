@@ -6,10 +6,94 @@
 const { isTransientDatabaseConnectionError } = require('./login-deadline');
 const { AsyncLocalStorage } = require('node:async_hooks');
 
+function isSupabaseSessionPooler(url) {
+  return /\.pooler\.supabase\.com$/i.test(url.hostname) && url.port === '5432' && !url.searchParams.has('pgbouncer');
+}
+
+// Prisma in pgbouncer mode needs several round trips per query through the
+// Supabase transaction pooler (6543); the session pooler on the same host
+// (5432) needs one. Measured from the shop: ~555 ms vs ~111 ms per query.
+// Returns null for any URL that is not a Supabase transaction pooler.
+function supabaseSessionPoolUrl(value) {
+  try {
+    const url = new URL(value);
+    if (!/\.pooler\.supabase\.com$/i.test(url.hostname) || url.port !== '6543') return null;
+    url.port = '5432';
+    url.searchParams.delete('pgbouncer');
+    return url.toString();
+  } catch {
+    return null;
+  }
+}
+
+// Only failures that happen before a statement reaches the database: the
+// session port is blocked on this workstation, or every session slot is taken.
+// Retrying such an operation on the transaction pooler cannot duplicate it.
+function isSessionPoolUnavailable(error) {
+  if (['P1001'].includes(error?.code || error?.errorCode)) return true;
+  return /can't reach database server|max client|maxclientsinsessionmode|emaxconn|too many clients|remaining connection slots/i.test(
+    `${error?.message || ''} ${error?.meta?.message || ''}`,
+  );
+}
+
+// One stable object for the whole app (handlers and modules capture it at
+// startup) that forwards to the session client until it proves unavailable,
+// then to the transaction-pooler client. Full session slots free up, so that
+// case retries after a cooldown; a blocked port stays on the fallback until
+// restart instead of stalling every retry on the connect timeout.
+function createSwitchableClient({ primary, fallback, label = 'Prisma', log = console, retryPrimaryMs = 10 * 60 * 1000 }) {
+  let active = primary;
+  let fallbackClient = null;
+  const useFallback = (error) => {
+    if (!fallback || active !== primary) return false;
+    fallbackClient ||= fallback();
+    active = fallbackClient;
+    const unreachable = (error?.code || error?.errorCode) === 'P1001' || /can't reach database server/i.test(String(error?.message || ''));
+    log.warn?.(`[${label}] Session pooler unavailable; using transaction pooler${unreachable ? ' until restart' : ' for now'}:`, error?.message || error);
+    if (!unreachable) setTimeout(() => { active = primary; }, retryPrimaryMs).unref?.();
+    return true;
+  };
+  if (fallback) {
+    // Model operations that fail to obtain a session connection are retried
+    // once on the transaction pooler. Interactive transaction steps and raw
+    // statements are not replayed; their next call uses the fallback.
+    primary.$use(async (params, next) => {
+      try {
+        return await next(params);
+      } catch (error) {
+        if (!isSessionPoolUnavailable(error) || !useFallback(error)) throw error;
+        if (params.runInTransaction || !params.model) throw error;
+        const delegate = params.model[0].toLowerCase() + params.model.slice(1);
+        return fallbackClient[delegate][params.action](params.args);
+      }
+    });
+  }
+  const client = new Proxy({}, {
+    get(_target, property) {
+      const value = active[property];
+      return typeof value === 'function' ? value.bind(active) : value;
+    },
+    has(_target, property) {
+      return property in active;
+    },
+  });
+  return {
+    client,
+    useFallback,
+    isFallback: () => active !== primary,
+    connect: () => primary.$connect().catch(async (error) => {
+      if (!isSessionPoolUnavailable(error) || !useFallback(error)) throw error;
+      await active.$connect();
+    }),
+  };
+}
+
 function desktopPrismaUrl(value, { transactions = false } = {}) {
   const url = new URL(value);
   const limits = {
-    connection_limit: transactions ? 2 : 4,
+    // Session pooler slots are dedicated per connection (shared by every
+    // desktop): 3 main + 2 transaction connections per workstation.
+    connection_limit: transactions ? 2 : isSupabaseSessionPooler(url) ? 3 : 4,
     pool_timeout: 10,
     connect_timeout: 10,
     // A JS deadline does not cancel Prisma's engine request. Bound the socket
@@ -151,4 +235,4 @@ function createPrismaReadRecovery({ concurrency = 3, timeoutMs = 15000, queueTim
   };
 }
 
-module.exports = { desktopPrismaUrl, withDatabaseReadDeadline, withIsolatedReadFallback, createPrismaReadRecovery, rawQueryText };
+module.exports = { desktopPrismaUrl, supabaseSessionPoolUrl, isSessionPoolUnavailable, createSwitchableClient, withDatabaseReadDeadline, withIsolatedReadFallback, createPrismaReadRecovery, rawQueryText };

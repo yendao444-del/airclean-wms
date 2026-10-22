@@ -55,6 +55,7 @@ import { buildHandlingUnitSequenceMap, prepareHandlingUnitPrintUnits } from "../
 import { packedStockForSku, summarizeHandlingUnitAllocation, summarizePackedInventory, suggestHandlingUnitAllocation, looseRemainderForAllocation } from "../lib/handlingUnitAllocation";
 import HandlingUnitPackedStock from "../components/HandlingUnitPackedStock";
 import HandlingUnitShiftChecklist, { ShiftFamilySearch } from "../components/HandlingUnitShiftChecklist";
+import HandlingUnitShiftScopeModal from "../components/HandlingUnitShiftScopeModal";
 import { identifyShiftCandidates, scopeShiftCandidates, type ShiftIdentity } from "../lib/handlingUnitShiftScope";
 import HandlingUnitUnifiedHistory from "../components/HandlingUnitUnifiedHistory";
 import { useAuth } from "../contexts/AuthContext";
@@ -158,6 +159,9 @@ type Workspace = {
     todayRemaining: number;
     outstanding: Array<{ code: string; requiredAt: string; date: string; requiresPhysicalCheck?: boolean }>;
     trackedCodes: string[];
+    checkProductIds?: number[] | null;
+    checkScopeUpdatedBy?: string;
+    checkScopeUpdatedAt?: string;
   };
 };
 type ShiftCheckCandidate = ShiftIdentity & {
@@ -1172,6 +1176,7 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
   const isFinalizingCheckRef = useRef(false);
   const finalPickVerification = Form.useWatch("finalVerification", finalCheckForm);
   const [showShiftCheckModal, setShowShiftCheckModal] = useState(false);
+  const [showShiftScopeModal, setShowShiftScopeModal] = useState(false);
   const [shiftCheckScope, setShiftCheckScope] = useState<"all" | "mandatory">("all");
   const [shiftCheckFocusCode, setShiftCheckFocusCode] = useState<string | null>(null);
   const [shiftCheckSnapshot, setShiftCheckSnapshot] = useState<ShiftCheckCandidate[]>([]);
@@ -2127,6 +2132,9 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
   const shiftCheckCandidates = useMemo<ShiftCheckCandidate[]>(() => {
     const todayKey = workspace.shiftCheckPolicy?.date || localDayKey(new Date());
     const outstanding = new Map((workspace.shiftCheckPolicy?.outstanding || []).map((entry) => [entry.code, entry]));
+    // Admin may limit the count to selected products; null keeps every product.
+    const scopeIds = workspace.shiftCheckPolicy?.checkProductIds;
+    const checkScope = Array.isArray(scopeIds) ? new Set(scopeIds.map(Number)) : null;
     const packedCandidates: ShiftCheckCandidate[] = workspace.packedInventory.flatMap(lot => {
       const code = `PACKED:${lot.assignmentId}`.toUpperCase();
       const duty = outstanding.get(code);
@@ -2136,16 +2144,13 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
     return workspace.register
       .map((unit) => {
         if (!["Đang sử dụng", "opened", "Chờ kiểm", "pending_check"].includes(unit.status)) return null;
+        if (checkScope && unit.productId != null && !checkScope.has(Number(unit.productId))) return null;
         const code = unit.id.trim().toUpperCase();
         const obligation = outstanding.get(code);
         const history = transactionsByUnitId.get(unit.id.trim().toUpperCase()) || [];
         const isPendingCheck = unit.status === "Chờ kiểm" || unit.status === "pending_check";
-        const obligationRequiredToday = Boolean(
-          obligation && obligation.date === todayKey,
-        );
         const latestCompletedCheck = history
-          .filter(item => isCompletedCheckTransaction(item) && (!workspace.shiftCheckPolicy?.currentShift
-            || (item.shift || (new Date(item.createdAt) <= new Date(`${localDayKey(item.createdAt)}T12:30:00+07:00`) ? "midday" : "evening")) === workspace.shiftCheckPolicy.currentShift))
+          .filter(item => isCompletedCheckTransaction(item))
           .reduce(
             (latest, item) =>
               Math.max(latest, new Date(item.createdAt || 0).getTime() || 0),
@@ -2166,8 +2171,8 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
         );
         // Only an opened physical package or an explicit pending final count
         // belongs here. Historic duties never bring sealed/empty rows back.
-        // An opened package is counted once today even without a new movement.
-        // A later withdrawal reopens the check; pending counts always remain.
+        // Opened status alone never creates a daily check. A later movement
+        // reopens the check; explicit pending and durable real duties remain.
         const initialQuantity = isReturnHandlingUnit(unit)
           ? Number(unit.initialPcs) : capacityForUnit(unit);
         const currentQuantity = Number(unit.currentPcs);
@@ -2178,8 +2183,10 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
         // sync. It is not the physical bag currently being used, so only a
         // reduced opened bag (or an explicit pending check) enters this list.
         if (!isPendingCheck && !hasReducedBalance && !obligation?.requiresPhysicalCheck && !transferAfterCheck) return null;
-        if (!isPendingCheck && latestCompletedCheck > 0 && localDayKey(latestCompletedCheck) === todayKey
-            && !obligationRequiredToday && withdrawals.length === 0 && !transferAfterCheck) return null;
+        if (!isPendingCheck && !obligation && withdrawals.length === 0 && !transferAfterCheck) return null;
+        if (!isPendingCheck && latestCompletedCheck > 0
+            && (!obligation || latestCompletedCheck >= Date.parse(obligation.requiredAt))
+            && withdrawals.length === 0 && !transferAfterCheck) return null;
         return {
           unit,
           withdrawalCount: withdrawals.length,
@@ -2199,6 +2206,20 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
       .sort((a, b) => b.lastWithdrawalAt - a.lastWithdrawalAt);
   }, [workspace.register, workspace.packedInventory, workspace.shiftCheckPolicy, transactionsByUnitId]);
 
+  const shiftScopeProducts = useMemo(() => {
+    const products = new Map<number, { productId: number; name: string; openedCount: number }>();
+    workspace.catalog.forEach((item) => {
+      if (item.productId != null && !products.has(item.productId)) {
+        products.set(item.productId, { productId: item.productId, name: item.productGroup, openedCount: 0 });
+      }
+    });
+    workspace.register.forEach((unit) => {
+      const product = unit.productId != null ? products.get(unit.productId) : undefined;
+      if (product && ["Đang sử dụng", "opened", "Chờ kiểm", "pending_check"].includes(unit.status)) product.openedCount += 1;
+    });
+    return [...products.values()].sort((a, b) => b.openedCount - a.openedCount || a.name.localeCompare(b.name, "vi"));
+  }, [workspace.catalog, workspace.register]);
+
   const mandatoryShiftCheckCandidates = useMemo(
     () => shiftCheckCandidates.filter(({ unit }) => unit.status === "Chờ kiểm" || unit.status === "pending_check"),
     [shiftCheckCandidates],
@@ -2215,7 +2236,10 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
   const shiftCheckBatchCandidates = shiftCheckFocusCode
     ? shiftCheckSnapshot
     : scopeShiftCandidates(showShiftCheckModal ? shiftCheckSnapshot : identifiedShiftCheckCandidates, "all").slice(0, 100);
-  const shiftCheckFamilies = [...new Set(shiftCheckBatchCandidates.flatMap(item => item.productGroup ? [item.productGroup] : []))].sort();
+  const shiftCheckFamilies = [...new Set([
+    ...(shiftCheckFamily === "all" ? [] : [shiftCheckFamily]),
+    ...shiftCheckBatchCandidates.flatMap(item => item.productGroup ? [item.productGroup] : []),
+  ])].sort();
   const visibleShiftCheckCandidates = shiftCheckFocusCode
     ? shiftCheckBatchCandidates
     : scopeShiftCandidates(shiftCheckBatchCandidates, shiftCheckFamily);
@@ -2243,14 +2267,19 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
       message.info(
         scope === "mandatory"
           ? "Không có kiện nào đang chờ kiểm."
-          : "Không có kiện nào đang khui hoặc chờ kiểm cần đối chiếu.",
+          : "Không có biến động mới hoặc kiện chờ kiểm cần đối chiếu.",
       );
       return;
     }
     setShiftCheckScope(scope);
     setShiftCheckFocusCode(null);
-    setShiftCheckFamily("all");
-    setShiftCheckSnapshot(identified);
+    const initialFamily = selected?.productGroup || "all";
+    setShiftCheckFamily(initialFamily);
+    // Keep the current family in the first batch when more than 100 are due.
+    setShiftCheckSnapshot(initialFamily === "all" ? identified : [
+      ...identified.filter(item => item.productGroup === initialFamily),
+      ...identified.filter(item => item.productGroup !== initialFamily),
+    ]);
     setShiftCheckDrafts(
       Object.fromEntries(
         candidates.map(({ unit }) => [
@@ -3170,6 +3199,15 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
                 </svg>
               </button>
             </Popover>
+          )}
+          {isAdmin && !isRolePreview && workspace.shiftCheckPolicy && (
+            <Tooltip title="Chọn sản phẩm nhân viên phải kiểm cuối ca (chỉ admin)">
+              <Button size="small" icon={<CheckCircleOutlined />} onClick={() => setShowShiftScopeModal(true)}>
+                {Array.isArray(workspace.shiftCheckPolicy.checkProductIds)
+                  ? `SP cần kiểm: ${workspace.shiftCheckPolicy.checkProductIds.length}`
+                  : "SP cần kiểm: Tất cả"}
+              </Button>
+            </Tooltip>
           )}
           <Tooltip title="Sơ đồ 2D & quản lý vị trí khu vực kho">
             <Button
@@ -4503,7 +4541,7 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
               <small>
                 {shiftCheckFocusCode ? `Kiểm lại kiện ${shiftCheckFocusCode}, không phụ thuộc phát sinh xuất hàng` : shiftCheckScope === "mandatory"
                   ? "Chỉ gồm các kiện đang ở trạng thái Chờ kiểm"
-                  : `Đối chiếu kiện đang khui và kiện chờ kiểm · ${workspace.shiftCheckPolicy?.shiftLabel || "ca hiện tại"} · hạn ${workspace.shiftCheckPolicy?.currentShift === "midday" ? "12:30" : "19:00"}`}
+                  : `Đối chiếu kiện có biến động và kiện chờ kiểm · ${workspace.shiftCheckPolicy?.shiftLabel || "ca hiện tại"} · hạn ${workspace.shiftCheckPolicy?.currentShift === "midday" ? "12:30" : "19:00"}`}
               </small>
             </div>
             {!shiftCheckFocusCode && <ShiftFamilySearch
@@ -4552,6 +4590,18 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
           onDraft={updateShiftCheckDraft}
         />
       </Modal>
+
+      {isAdmin && (
+        <HandlingUnitShiftScopeModal
+          open={showShiftScopeModal}
+          products={shiftScopeProducts}
+          selectedIds={workspace.shiftCheckPolicy?.checkProductIds ?? null}
+          updatedBy={workspace.shiftCheckPolicy?.checkScopeUpdatedBy}
+          updatedAt={workspace.shiftCheckPolicy?.checkScopeUpdatedAt}
+          onClose={() => setShowShiftScopeModal(false)}
+          onSaved={() => void loadWorkspace(true)}
+        />
+      )}
 
       <Modal
         title={

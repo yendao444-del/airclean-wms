@@ -5,7 +5,7 @@ export type UnifiedHistoryRow = {
   key: string;
   createdAt: string;
   actor: string;
-  kind: "package" | "stock";
+  kind: "package" | "stock" | "check";
   type: string;
   reference?: string;
   quantity: number | null;
@@ -13,11 +13,24 @@ export type UnifiedHistoryRow = {
   after: number | null;
   packageLines: Array<{ code?: string; quantity: number | null; before: number | null; after: number | null; type?: string; note?: string }>;
   note?: string;
+  shift?: string;
 };
 
 const finite = (value: unknown) => typeof value === "number" && Number.isFinite(value) ? value : null;
 const ref = (value?: string) => String(value || "").trim();
 const codeKey = (value?: string) => ref(value).toUpperCase();
+export const isCheckHistory = (entry: { type?: string }) => /^(kiểm cuối ca|kiểm khớp - chốt hết kiện|kiểm lệch - cập nhật tồn thực tế)/i.test(String(entry.type || ''));
+
+export function mergeCheckHistory(physical: readonly HandlingUnitHistoryEntry[], checks: readonly HandlingUnitHistoryEntry[]) {
+  const rows = new Map<string, HandlingUnitHistoryEntry>();
+  for (const entry of [...physical, ...checks]) {
+    const key = isCheckHistory(entry) && entry.reference && entry.unitId
+      ? `check:${entry.reference}:${codeKey(entry.unitId)}`
+      : entry.id || JSON.stringify([entry.unitId, entry.createdAt, entry.type, entry.quantity]);
+    rows.set(key, entry);
+  }
+  return [...rows.values()];
+}
 type HistoryUnit = { id: string; skuName: string; sequenceNumber?: number; sequenceCycle?: number; unitName?: string };
 
 export function historyPackageIdentity(code: string | undefined, units: readonly HistoryUnit[], _currentNumbers: ReadonlyMap<string, number>) {
@@ -51,12 +64,13 @@ export function buildUnifiedHistory(
     if (quantity == null || !Number.isSafeInteger(quantity * perCombo)) return [];
     // Packed movements are recorded in combos; component stock cards are in
     // base SKU units. Project the recorded composition, never guess from names.
-    return [{ ...entry, sku, quantity: quantity * perCombo, remaining: undefined, expectedQuantity: undefined, actualQuantity: undefined }];
+    const projectCount = (value: unknown) => isCheckHistory(entry) && finite(value) != null ? Number(value) * perCombo : undefined;
+    return [{ ...entry, sku, quantity: quantity * perCombo, remaining: projectCount(entry.remaining), expectedQuantity: projectCount(entry.expectedQuantity), actualQuantity: projectCount(entry.actualQuantity) }];
   });
   const packageRows = handlingUnitHistory(projected, sku, units, undefined, true).map(row => ({
     ...row,
     actor: row.actor || "Hệ thống",
-    kind: "package" as const,
+    kind: isCheckHistory(row) ? "check" as const : "package" as const,
     key: `package-${row.key}`,
     createdAt: row.createdAt || "",
     type: row.type || "Thao tác kiện",
@@ -107,6 +121,17 @@ export function buildUnifiedHistory(
   }));
   const used = new Set<string>();
   const merged = stockRows.map((stockRow, index) => {
+    if (stockRow.type === 'KIEM_KIEN' && ref(stockRow.reference)) {
+      const checks = packageRows.filter(row => row.kind === 'check' && ref(row.reference) === ref(stockRow.reference));
+      const ledgerMatches = stockRows.filter(row => row.type === 'KIEM_KIEN' && ref(row.reference) === ref(stockRow.reference));
+      if (ledgerMatches.length === 1 && checks.length && checks.every(row => row.quantity != null)
+          && checks.reduce((sum, row) => sum + (row.quantity || 0), 0) === stockRow.quantity) {
+        checks.forEach(row => used.add(row.key));
+        return { ...stockRow, type: 'Kiểm cuối ca - điều chỉnh', packageLines: checks.flatMap(row => row.packageLines),
+          shift: checks.every(row => row.shift === checks[0].shift) ? checks[0].shift : undefined,
+          note: [...new Set([stockRow.note, ...checks.map(row => row.note)].filter(Boolean))].join('\n') };
+      }
+    }
     if (stockRow.packageLines.length) {
       // Durable order sources survive eviction of the 500-entry movement
       // buffer. Hide matching movement details without guessing missing ones.

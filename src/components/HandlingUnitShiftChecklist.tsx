@@ -97,7 +97,7 @@ export default function HandlingUnitShiftChecklist(props: Props) {
             <div className="hu-shift-identity-tags"><Tag color="green">{identity}</Tag><Tag color={pending ? "orange" : "blue"}>{pending ? "Chờ kiểm chốt" : ["sealed", "Nguyên niêm phong"].includes(unit.status) ? "Nguyên niêm phong" : "Đang khui"}</Tag></div>
             <p>Mã kiện: <b>{unit.id}</b></p>
             <small>{unit.skuName} · {unit.packageType} · <EnvironmentOutlined /> {unit.location?.zone || "Chưa phân khu"}{unit.location?.rack ? ` / ${unit.location.rack}` : ""}</small>
-            <small className="hu-shift-movement">{item.withdrawalCount > 0 ? `Đã lấy ${fmt(item.withdrawnQuantity)} ${unit.unitName} · ${item.withdrawalCount} lần` : "Không phát sinh lấy hàng mới"}</small>
+            <small className="hu-shift-movement">{item.withdrawalCount > 0 ? `Đã lấy ${fmt(item.withdrawnQuantity)} ${unit.unitName} · ${item.withdrawalCount} lần` : unit.status === 'Chờ kiểm' || unit.status === 'pending_check' ? 'Chờ xác nhận số đếm thực tế' : 'Có biến động chưa được kiểm'}</small>
           </div>
           <div className="hu-shift-expected"><span>Tồn dự kiến</span><strong>{fmt(unit.currentPcs)}</strong><small>{unit.unitName}</small></div>
           <label className="hu-shift-actual">Đếm thực tế<InputNumber aria-label={`Đếm thực tế ${identity}`} disabled={props.busy} min={0} max={unit.initialPcs} precision={0}

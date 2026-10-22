@@ -1,4 +1,5 @@
 const LEDGER_KEY = "handlingUnitShiftChecksV1";
+const SCOPE_KEY = "handlingUnitShiftScopeV1";
 const EFFECTIVE_DATE = "2026-10-14";
 const FINE_AMOUNT = 50000;
 const ROTATION = ["nguyendinhtoan", "nguyenvankhanh"];
@@ -95,15 +96,25 @@ function freezeDeadlines(ledger, now) {
 function carryDuties(ledger, now) {
   const today = dayKey(now);
   // Never synthesize duties for the old, paused policy. Only unresolved new
-  // policy duties carry. Active opened units are separately observed daily.
+  // policy duties with a real movement/pending count carry. Merely retaining
+  // an opened status is no longer a reason to create a fresh daily obligation.
   const dates = Object.keys(ledger.days).filter(date => date >= EFFECTIVE_DATE && date <= today).sort();
   if (!dates.length) return ledger;
   for (let date = dates[0]; date < today; date = nextDay(date)) {
     for (const [code, raw] of Object.entries(ledger.days[date]?.units || {})) {
       const unit = normalizeUnit(raw, date);
       if (!unit.requiredShifts.some(shift => isOutstanding(unit, shift))) continue;
+      const requiredAt = unit.activityRequiredAt || new Date(Math.max(Date.parse(unit.requiredAt),
+        ...Object.values(unit.shiftRequiredAt).map(value => Date.parse(value) || 0))).toISOString();
+      // Older ledgers did not distinguish daily observations from movements.
+      // Keep an unresolved PRIOR-day duty conservatively when its buffer has
+      // gone, but never carry it past a later physical count. Today's unproven
+      // daily observation is removed by observeActiveUnits instead.
+      if (!unit.pendingCheck && lastCountAt(ledger, code) >= Date.parse(requiredAt)) continue;
       const next = nextDay(date);
       const nextUnit = ensureDuty(ledger, next, code, new Date(`${next}T00:00:00+07:00`).toISOString());
+      nextUnit.activityRequiredAt = requiredAt;
+      if (unit.pendingCheck) nextUnit.pendingCheck = true;
       if (unit.requiresPhysicalCheck) nextUnit.requiresPhysicalCheck = true;
     }
   }
@@ -142,6 +153,7 @@ function applyEvents(ledger, entries) {
       resolveCode(ledger, code, timestamp, String(entry.actor || "System"), autoReturnEmpty ? "auto-return-merged" : syncEmpty ? "software-sync-empty" : autoEmpty ? "auto-empty-tmdt" : "deleted");
     } else if (isRequired(entry)) {
       const unit = ensureDuty(ledger, date, code, timestamp);
+      unit.activityRequiredAt = timestamp;
       if (entry.requiresPhysicalCheck === true) unit.requiresPhysicalCheck = true;
       for (const shift of requiredShiftsFor(timestamp)) {
         if (!unit.requiredShifts.includes(shift)) unit.requiredShifts.push(shift);
@@ -150,7 +162,6 @@ function applyEvents(ledger, entries) {
       }
     } else if (isCompleted(entry)) {
       // Counts are assigned from trusted server time, not a client timestamp.
-      const shift = SHIFT_KEYS.includes(entry.shift) ? entry.shift : shiftForTimestamp(timestamp);
       // A manual check may precede the first maintenance observation. Record
       // it now so that observation cannot make an already-counted ca due again.
       if (!["sealed", "Nguyên niêm phong", "empty"].includes(entry.status)) {
@@ -159,18 +170,23 @@ function applyEvents(ledger, entries) {
       for (const [oldDate, day] of Object.entries(ledger.days)) {
         if (oldDate > date || !day.units[code]) continue;
         const unit = day.units[code] = normalizeUnit(day.units[code], oldDate);
-        const completed = oldDate < date ? unit.requiredShifts : [shift];
+        // One physical count covers every movement before it, including a
+        // later checkpoint with no new movement. Future movements reopen it.
+        const completed = unit.requiredShifts;
         for (const key of completed) {
           if (!unit.requiredShifts.includes(key) || timestamp < unit.shiftRequiredAt[key]) continue;
           unit.shiftChecks[key] ||= { checkedAt: timestamp, checkedBy: String(entry.actor || "") };
         }
+        unit.pendingCheck = false;
       }
       if (Number(entry.remaining) === 0 && entry.status === "empty") resolveCode(ledger, code, timestamp, String(entry.actor || ""), "counted-empty");
     } else if (type === "Tách kiện" && entry.childUnitCodes?.length) {
       // Retain parent duties/fines for audit; children start only from this
       // split timestamp, never inherit a deadline that already passed.
       resolveCode(ledger, code, timestamp, String(entry.actor || ""), "split");
-      if (ledger.days[date]?.units[code]) for (const child of entry.childUnitCodes) ensureDuty(ledger, date, String(child).toUpperCase(), timestamp);
+      if (ledger.days[date]?.units[code]) for (const child of entry.childUnitCodes) {
+        ensureDuty(ledger, date, String(child).toUpperCase(), timestamp).activityRequiredAt = timestamp;
+      }
     }
   }
   return ledger;
@@ -186,9 +202,14 @@ async function recordShiftEvents(tx, entries) {
   const value = JSON.stringify(ledger);
   await tx.appConfig.upsert({ where: { key: LEDGER_KEY }, create: { key: LEDGER_KEY, value }, update: { value } });
 }
-// Observe the physically active opened/pending packages, including ones
-// without recent exports. A stale opened status at full capacity is treated
-// as an untouched row and must not create a false end-of-shift duty.
+function lastCountAt(ledger, code) {
+  return Math.max(0, ...Object.values(ledger.days).flatMap(day =>
+    Object.values(day.units[code]?.shiftChecks || {}).map(check => Date.parse(check?.checkedAt) || 0)));
+}
+
+// Observe pending counts, and retain only duties backed by an actual movement.
+// Legacy daily observations have no activity marker; recover evidence from the
+// movement buffer, without replaying checks or overwriting historical fines.
 async function observeActiveUnits(tx, ledger, now) {
   if (dayKey(now) < EFFECTIVE_DATE) return;
   // An explicit loose repack proves physical opening even at its new full
@@ -199,6 +220,22 @@ async function observeActiveUnits(tx, ledger, now) {
     where: { status: { in: ["opened", "pending_check"] } },
     select: { code: true, status: true, remainingQuantity: true, initialQuantity: true, packagingName: true },
   });
+  const eventsRow = await tx.appConfig.findUnique({ where: { key: 'handlingUnitsTransactionsJson' } });
+  let events;
+  try { events = JSON.parse(eventsRow?.value || '[]'); } catch { throw new Error('Lịch sử biến động kiện không hợp lệ.'); }
+  if (!Array.isArray(events)) throw new Error('Lịch sử biến động kiện không hợp lệ.');
+  const today = dayKey(now);
+  for (const entry of events) {
+    if (!isRequired(entry) || !Number.isFinite(Date.parse(entry.createdAt)) || new Date(entry.createdAt) > new Date(now)) continue;
+    const date = dayKey(entry.createdAt);
+    if (date < EFFECTIVE_DATE) continue;
+    const code = String(entry.unitId || '').trim().toUpperCase();
+    const existing = ledger.days[date]?.units[code];
+    if (!existing && (date !== today || lastCountAt(ledger, code) >= Date.parse(entry.createdAt))) continue;
+    const duty = existing || ensureDuty(ledger, date, code, entry.createdAt);
+    if (!duty.activityRequiredAt || Date.parse(duty.activityRequiredAt) < Date.parse(entry.createdAt)) duty.activityRequiredAt = entry.createdAt;
+  }
+  carryDuties(ledger, now);
   const activeUnits = activeRows.filter(unit => {
     const isReturn = String(unit.packagingName || "").normalize("NFD")
       .replace(/[\u0300-\u036f]/g, "").replace(/đ/g, "d").toLowerCase().includes("hang hoan");
@@ -218,19 +255,81 @@ async function observeActiveUnits(tx, ledger, now) {
   // If a stale ledger still mentions a sealed/retired package, the current
   // physical state wins for today's checklist. Prior deadline facts remain.
   for (const [code, unit] of Object.entries(ledger.days[date]?.units || {})) {
-    if (!codes.has(code)) {
+    const pending = activeRows.some(row => row.status === 'pending_check' && row.code.toUpperCase() === code);
+    unit.pendingCheck = pending;
+    if (!codes.has(code) || (!pending && !unit.activityRequiredAt && !unit.requiresPhysicalCheck)) {
       unit.requiredShifts = [];
-      unit.shiftChecks = { midday: null, evening: null };
+    } else if (!pending && unit.activityRequiredAt && lastCountAt(ledger, code) >= Date.parse(unit.activityRequiredAt)) {
+      const checkedAt = new Date(lastCountAt(ledger, code)).toISOString();
+      for (const shift of unit.requiredShifts) unit.shiftChecks[shift] ||= { checkedAt, resolution: 'already-counted' };
     }
   }
   for (const unit of activeUnits) {
+    if (unit.status !== 'pending_check') continue;
     const code = unit.code.toUpperCase();
     const duty = ensureDuty(ledger, date, code, new Date(now).toISOString());
+    if (!duty.requiredShifts.length) {
+      duty.requiredShifts = requiredShiftsFor(now);
+      if (!duty.requiredShifts.length) duty.requiredShifts = [currentShift(now)];
+      for (const shift of duty.requiredShifts) duty.shiftRequiredAt[shift] = new Date(now).toISOString();
+    }
+    duty.pendingCheck = true;
     if (repackedChecks.has(code)) duty.requiresPhysicalCheck = true;
   }
-  for (const lot of packed) ensureDuty(ledger, date, `PACKED:${lot.assignmentId}`.toUpperCase(), new Date(now).toISOString());
 }
-function policySnapshot(ledger, now = new Date()) {
+// Admin-selected products that must be counted. History is kept so a later
+// change never creates or removes fines for a deadline that already passed.
+// productIds === null means every product (the original policy).
+function parseScope(row) {
+  let data;
+  try { data = JSON.parse(row?.value || '{"history":[]}'); } catch { data = { history: [] }; }
+  const history = (Array.isArray(data?.history) ? data.history : []).filter(entry =>
+    isRecord(entry) && Number.isFinite(Date.parse(entry.effectiveAt))
+    && (entry.productIds === null || Array.isArray(entry.productIds)));
+  return { history: history.sort((a, b) => Date.parse(a.effectiveAt) - Date.parse(b.effectiveAt)) };
+}
+function scopeAt(scope, at) {
+  let entry = null;
+  for (const candidate of scope.history) if (Date.parse(candidate.effectiveAt) <= new Date(at).getTime()) entry = candidate;
+  return entry?.productIds ? new Set(entry.productIds.map(Number)) : null;
+}
+async function readShiftScope(tx) {
+  return parseScope(await tx.appConfig.findUnique({ where: { key: SCOPE_KEY } }));
+}
+async function saveShiftScope(tx, productIds, actor, now = new Date()) {
+  if (productIds !== null && (!Array.isArray(productIds)
+    || productIds.some(id => !Number.isSafeInteger(Number(id)) || Number(id) <= 0))) {
+    throw new Error("Danh sách sản phẩm cần kiểm không hợp lệ.");
+  }
+  await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${SCOPE_KEY}))`;
+  const scope = await readShiftScope(tx);
+  const entry = {
+    effectiveAt: new Date(now).toISOString(),
+    productIds: productIds === null ? null : [...new Set(productIds.map(Number))].sort((a, b) => a - b),
+    updatedBy: String(actor || ""),
+  };
+  const value = JSON.stringify({ history: [...scope.history, entry].slice(-200) });
+  await tx.appConfig.upsert({ where: { key: SCOPE_KEY }, create: { key: SCOPE_KEY, value }, update: { value } });
+  return entry;
+}
+// PACKED combos and rows without a product mapping keep the original policy.
+async function productIdsByCode(tx, codes) {
+  const physical = [...new Set(codes)].filter(code => !code.startsWith("PACKED:"));
+  if (!physical.length) return new Map();
+  const rows = await tx.handlingUnit.findMany({
+    where: { code: { in: physical, mode: "insensitive" } }, select: { code: true, productId: true },
+  });
+  return new Map(rows.map(row => [String(row.code).toUpperCase(), Number(row.productId)]));
+}
+function scopeFilter(scope, productIds) {
+  return (code, at) => {
+    const allowed = scopeAt(scope, at);
+    if (!allowed) return true;
+    const productId = productIds.get(code);
+    return productId === undefined || allowed.has(productId);
+  };
+}
+function policySnapshot(ledger, now = new Date(), inScope = () => true, scope = { history: [] }) {
   carryDuties(ledger, now);
   const date = dayKey(now);
   const shift = currentShift(now);
@@ -239,9 +338,10 @@ function policySnapshot(ledger, now = new Date()) {
   for (const day of Object.values(ledger.days)) for (const code of Object.keys(day.units)) trackedCodes.add(code);
   for (const [code, raw] of Object.entries(ledger.days[date]?.units || {})) {
     const unit = normalizeUnit(raw, date);
-    if (isOutstanding(unit, shift)) outstanding.push({ code, requiredAt: unit.shiftRequiredAt[shift], date,
+    if (isOutstanding(unit, shift) && inScope(code, now)) outstanding.push({ code, requiredAt: unit.shiftRequiredAt[shift], date,
       ...(unit.requiresPhysicalCheck ? { requiresPhysicalCheck: true } : {}) });
   }
+  const latestScope = scope.history.filter(entry => Date.parse(entry.effectiveAt) <= new Date(now).getTime()).at(-1);
   return {
     date, effectiveDate: EFFECTIVE_DATE, fineAmount: FINE_AMOUNT,
     assignedTo: assigneeFor(date), nextAssignedTo: assigneeFor(nextDay(date)),
@@ -249,20 +349,27 @@ function policySnapshot(ledger, now = new Date()) {
     deadline: deadlineFor(date, shift).toISOString(),
     deadlines: Object.fromEntries(SHIFT_KEYS.map(key => [key, deadlineFor(date, key).toISOString()])),
     outstanding, trackedCodes: [...trackedCodes], todayRemaining: outstanding.length,
+    checkProductIds: latestScope?.productIds ?? null,
+    checkScopeUpdatedBy: latestScope?.updatedBy || "",
+    checkScopeUpdatedAt: latestScope?.effectiveAt || "",
   };
 }
 async function readShiftPolicy(tx, now = new Date()) {
   const ledger = parseLedger(await tx.appConfig.findUnique({ where: { key: LEDGER_KEY } }));
   carryDuties(ledger, now);
   await observeActiveUnits(tx, ledger, now);
-  return policySnapshot(ledger, now);
+  const scope = await readShiftScope(tx);
+  const productIds = scopeAt(scope, now)
+    ? await productIdsByCode(tx, Object.keys(ledger.days[dayKey(now)]?.units || {}))
+    : new Map();
+  return policySnapshot(ledger, now, scopeFilter(scope, productIds), scope);
 }
 function employeeFor(data, username) {
   const matches = (data.employees || []).filter(employee => String(employee.username || "").trim().toLowerCase() === username);
   if (matches.length !== 1 || !Number.isSafeInteger(Number(matches[0].id)) || Number(matches[0].id) <= 0) return null;
   return Number(matches[0].id);
 }
-function buildFines(ledger, data = {}, now = new Date()) {
+function buildFines(ledger, data = {}, now = new Date(), inScope = () => true) {
   const today = dayKey(now);
   if (!today || today < EFFECTIVE_DATE) return [];
   freezeDeadlines(ledger, now);
@@ -275,7 +382,9 @@ function buildFines(ledger, data = {}, now = new Date()) {
     if (!empId) continue;
     for (const shift of SHIFT_KEYS) {
       if (new Date(now) <= deadlineFor(date, shift)) continue;
-      const missingUnits = Object.entries(day.units).filter(([, raw]) => normalizeUnit(raw, date).missedShifts[shift]).map(([code]) => code).sort();
+      const missingUnits = Object.entries(day.units)
+        .filter(([code, raw]) => normalizeUnit(raw, date).missedShifts[shift] && inScope(code, deadlineFor(date, shift)))
+        .map(([code]) => code).sort();
       if (!missingUnits.length) continue;
       fines.push({
         id: `fine-hu-shift-${date}-${shift}-${assignedTo}`, empId,
@@ -330,7 +439,12 @@ async function reconcileShiftFines(prisma, { now = new Date() } = {}) {
       for (const audit of data.fineAuditLog || []) if (audit.action === "delete" && audit.before?.id) deletedIds.add(String(audit.before.id));
       const existing = data.extraFines || [];
       const ids = new Set(existing.map(fine => String(fine.id)));
-      const allFines = buildFines(ledger, data, now);
+      const scope = await readShiftScope(tx);
+      const missedCodes = scope.history.some(entry => entry.productIds)
+        ? Object.values(ledger.days).flatMap(day => Object.entries(day.units)
+          .filter(([, raw]) => Object.keys(raw.missedShifts || {}).length).map(([code]) => code))
+        : [];
+      const allFines = buildFines(ledger, data, now, scopeFilter(scope, await productIdsByCode(tx, missedCodes)));
       const created = allFines.filter(fine => !ids.has(fine.id) && !deletedIds.has(fine.id));
       const audit = [...(data.fineAuditLog || []), ...created.map(fine => ({
         id: `create-${fine.id}`, action: "create", timestamp: new Date(now).toLocaleString("vi-VN", { timeZone: "Asia/Bangkok" }),
@@ -354,4 +468,4 @@ async function reconcileShiftFines(prisma, { now = new Date() } = {}) {
     throw error;
   }
 }
-module.exports = { LEDGER_KEY, EFFECTIVE_DATE, FINE_AMOUNT, SHIFTS, assigneeFor, deadlineFor, shiftForTimestamp, currentShift, dayKey, applyEvents, policySnapshot, recordShiftEvents, readShiftPolicy, buildFines, reconcileShiftFines, isHandlingUnitShiftFine };
+module.exports = { LEDGER_KEY, SCOPE_KEY, readShiftScope, saveShiftScope, scopeAt, scopeFilter, EFFECTIVE_DATE, FINE_AMOUNT, SHIFTS, assigneeFor, deadlineFor, shiftForTimestamp, currentShift, dayKey, applyEvents, policySnapshot, recordShiftEvents, readShiftPolicy, buildFines, reconcileShiftFines, isHandlingUnitShiftFine };

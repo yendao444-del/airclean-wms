@@ -2,7 +2,8 @@ import { useMemo, useState } from "react";
 import { Alert, Button, Empty, Input, Select, Table, Tag, Tooltip } from "antd";
 import { HistoryOutlined, ReloadOutlined, SearchOutlined } from "@ant-design/icons";
 import { useSkuStockLedger } from "../lib/hooks/useSkuStockLedger";
-import { buildUnifiedHistory, historyPackageIdentity, type UnifiedHistoryRow } from "../lib/handlingUnitUnifiedHistory";
+import { useHandlingUnitCheckHistory } from "../lib/hooks/useHandlingUnitCheckHistory";
+import { buildUnifiedHistory, historyPackageIdentity, mergeCheckHistory, isCheckHistory, type UnifiedHistoryRow } from "../lib/handlingUnitUnifiedHistory";
 import type { HandlingUnitHistoryEntry } from "../lib/handlingUnitHistory";
 
 type Props = {
@@ -21,20 +22,22 @@ const codeKey = (value?: string) => String(value || "").trim().toUpperCase();
 
 export default function HandlingUnitUnifiedHistory({ sku, unitCode, entries, units, currentNumbers, packedLots, onReloadSources }: Props) {
   const { rows: stockRows, loading, error, reload } = useSkuStockLedger(sku);
+  const [checkRevision, setCheckRevision] = useState(0);
+  const checks = useHandlingUnitCheckHistory(sku, checkRevision);
   const [search, setSearch] = useState("");
   const [selectedOnly, setSelectedOnly] = useState(false);
   const [typeFilter, setTypeFilter] = useState("all");
   const [fromDate, setFromDate] = useState("");
   const [toDate, setToDate] = useState("");
   const [expanded, setExpanded] = useState<React.Key[]>([]);
-  const rows = useMemo(() => buildUnifiedHistory(entries, stockRows, sku, units, packedLots), [entries, stockRows, sku, units, packedLots]);
+  const rows = useMemo(() => buildUnifiedHistory(mergeCheckHistory(entries, checks.rows), stockRows, sku, units, packedLots), [entries, checks.rows, stockRows, sku, units, packedLots]);
   const sourceError = stockRows.find(row => row.handlingUnitSourceError)?.handlingUnitSourceError;
   const identity = (code?: string) => historyPackageIdentity(code, units, currentNumbers);
   const selectedLabel = identity(unitCode).label;
   const types = [...new Set(rows.map(row => row.type))].sort();
   const visible = rows.filter(row => {
     if (selectedOnly && !row.packageLines.some(line => codeKey(line.code) === codeKey(unitCode))) return false;
-    if (typeFilter !== "all" && row.type !== typeFilter) return false;
+    if (typeFilter === "checks" ? !isCheckHistory(row) : typeFilter !== "all" && row.type !== typeFilter) return false;
     const createdAt = Date.parse(row.createdAt);
     if (fromDate && !(createdAt >= Date.parse(`${fromDate}T00:00:00+07:00`))) return false;
     if (toDate && !(createdAt <= Date.parse(`${toDate}T23:59:59.999+07:00`))) return false;
@@ -55,7 +58,7 @@ export default function HandlingUnitUnifiedHistory({ sku, unitCode, entries, uni
     {row.packageLines.length ? row.packageLines.map((line, index) => {
       const source = identity(line.code);
       return <div key={`${row.key}-${index}`} className={codeKey(line.code) === codeKey(unitCode) ? "is-selected" : ""}>
-        <b>{line.quantity != null && line.quantity < 0 ? "Trừ " : line.quantity != null && line.quantity > 0 ? "Cộng " : ""}{source.label}</b>
+        <b>{isCheckHistory(line) ? "Kiểm " : line.quantity != null && line.quantity < 0 ? "Trừ " : line.quantity != null && line.quantity > 0 ? "Cộng " : ""}{source.label}</b>
         <span className={Number(line.quantity) < 0 ? "is-negative" : "is-positive"}>{signed(line.quantity)} {source.unitName} · {number(line.before)} → {number(line.after)}</span>
         <small>{line.code || "—"}</small>
       </div>;
@@ -66,15 +69,16 @@ export default function HandlingUnitUnifiedHistory({ sku, unitCode, entries, uni
       <header className="hu-unit-stock-history-header">
         <div>
           <h3><HistoryOutlined /> Lịch sử · {sku}</h3>
-          <p>Lịch sử mới nhất ở trên. Tồn đầu / cuối là tồn toàn SKU; kiện nguồn là số tem đã trừ. Xem ghi chú để đối chiếu mã kiện và số lượng.</p>
+          <p>Tồn đầu / cuối là tồn toàn SKU. Lần kiểm cuối ca có số sổ, số thực đếm và chênh lệch riêng của kiện trong ghi chú.</p>
         </div>
-        <Button icon={<ReloadOutlined />} size="small" onClick={() => { reload(); void onReloadSources?.(); }} loading={loading}>Tải lại</Button>
+        <Button icon={<ReloadOutlined />} size="small" onClick={() => { reload(); setCheckRevision(value => value + 1); void onReloadSources?.(); }} loading={loading || checks.loading}>Tải lại</Button>
       </header>
       {error && <Alert type="warning" showIcon message={error} description="Phần thẻ kho chưa tải đầy đủ. Vẫn hiển thị thao tác kiện đã có; bấm Tải lại để thử lại." style={{ marginBottom: 10 }} />}
       {sourceError && <Alert type="warning" showIcon message={sourceError} style={{ marginBottom: 10 }} />}
+      {checks.error && <Alert type="warning" showIcon message={checks.error} style={{ marginBottom: 10 }} />}
       <div className="hu-movement-history-filters">
         <Input allowClear prefix={<SearchOutlined />} placeholder="Tìm kiện số, mã kiện, chứng từ, nhân viên..." value={search} onChange={event => setSearch(event.target.value)} />
-        <Select aria-label="Loại giao dịch" value={typeFilter} onChange={setTypeFilter} options={[{ value: "all", label: "Tất cả thao tác" }, ...types.map(type => ({ value: type, label: type }))]} style={{ width: 185 }} />
+        <Select aria-label="Loại giao dịch" value={typeFilter} onChange={setTypeFilter} options={[{ value: "all", label: "Tất cả thao tác" }, { value: "checks", label: "Kiểm cuối ca" }, ...types.map(type => ({ value: type, label: type }))]} style={{ width: 185 }} />
         <Input aria-label="Từ ngày" type="date" value={fromDate} onChange={event => setFromDate(event.target.value)} style={{ width: 140 }} />
         <Input aria-label="Đến ngày" type="date" value={toDate} onChange={event => setToDate(event.target.value)} style={{ width: 140 }} />
         {unitCode && <Button type={selectedOnly ? "primary" : "default"} aria-pressed={selectedOnly} onClick={() => setSelectedOnly(value => !value)}>Chỉ {selectedLabel.toLocaleLowerCase("vi")}</Button>}
@@ -101,13 +105,16 @@ export default function HandlingUnitUnifiedHistory({ sku, unitCode, entries, uni
           </div>,
         }}
         columns={[
-          { title: "Thời điểm / NV", width: 145, render: (_, row) => <div className="hu-history-ledger-meta"><span>{time(row.createdAt)}</span><span>{row.actor}</span></div> },
+          { title: "Thời điểm / NV", width: 145, render: (_, row) => <div className="hu-history-ledger-meta"><span>{time(row.createdAt)}</span><span>{row.actor}</span>{row.shift && <small>{row.shift === 'midday' ? 'Ca trưa' : 'Ca chiều'}</small>}</div> },
           { title: "Chứng từ", width: 230, render: (_, row) => <div className="hu-unit-stock-history-document"><Tag color={row.kind === "stock" ? "green" : "blue"} title={row.type}>{row.type}</Tag><Tooltip title={row.reference}><span>{row.reference || "—"}</span></Tooltip></div> },
           { title: "Tồn đầu", width: 85, align: "right", render: (_, row) => row.kind === "stock" ? number(row.before) : "—" },
-          { title: "±", width: 85, align: "right", render: (_, row) => row.kind === "stock" ? <b className={Number(row.quantity) < 0 ? "is-negative" : "is-positive"}>{signed(row.quantity)}</b> : "—" },
+          { title: "±", width: 85, align: "right", render: (_, row) => row.kind !== "package" ? <b className={Number(row.quantity) < 0 ? "is-negative" : "is-positive"}>{signed(row.quantity)}</b> : "—" },
           { title: "Tồn cuối", width: 85, align: "right", render: (_, row) => row.kind === "stock" ? number(row.after) : "—" },
           { title: "Kiện nguồn", width: 150, align: "center", render: (_, row) => <Tooltip title={row.packageLines.length ? row.packageLines.map(line => `${identity(line.code).label} · ${line.code}`).join("; ") : "Chưa xác định được kiện nguồn"}><b className="hu-history-source-number">{sourceNumbers(row)}</b></Tooltip> },
-          { title: "Ghi chú", width: 130, render: (_, row) => <Button type="link" size="small" aria-expanded={expanded.includes(row.key)} onClick={() => setExpanded(keys => keys.includes(row.key) ? keys.filter(key => key !== row.key) : [...keys, row.key])}>{expanded.includes(row.key) ? "Thu gọn" : "Xem ghi chú"}</Button> },
+          { title: "Ghi chú", width: 155, render: (_, row) => <div>
+            {row.packageLines.filter(isCheckHistory).map((line, index) => <small key={index} style={{ display: 'block' }}>{row.packageLines.length > 1 ? `${identity(line.code).label}: ` : ''}Sổ {number(line.before)} · Đếm {number(line.after)}</small>)}
+            <Button type="link" size="small" aria-expanded={expanded.includes(row.key)} onClick={() => setExpanded(keys => keys.includes(row.key) ? keys.filter(key => key !== row.key) : [...keys, row.key])}>{expanded.includes(row.key) ? "Thu gọn" : "Xem ghi chú"}</Button>
+          </div> },
         ]}
       />
     </section>
