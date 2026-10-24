@@ -217,7 +217,7 @@ async function restore(tx, sku, quantity, reference, actor, recordTransfers, opt
     if (entry.untracked) continue;
     await tx.$queryRaw`SELECT "id" FROM "HandlingUnit" WHERE "code" = ${entry.code} FOR UPDATE`;
     const unit = await tx.handlingUnit.findUnique({ where: { code: entry.code } });
-    if (!unit || unit.sku !== entry.sku || !['opened', 'pending_check', 'empty'].includes(unit.status) || unit.remainingQuantity + entry.quantity > Math.min(300, unit.initialQuantity)) throw new Error(`Không thể hoàn về kiện ${entry.code}; kiện đã thay đổi hoặc vượt sức chứa.`);
+    if (!unit || unit.sku !== entry.sku || !['opened', 'pending_check', 'empty'].includes(unit.status) || unit.remainingQuantity + entry.quantity > (unit.initialQuantity > 500 ? 300 : unit.initialQuantity)) throw new Error(`Không thể hoàn về kiện ${entry.code}; kiện đã thay đổi hoặc vượt sức chứa.`);
     const balance = unit.remainingQuantity + entry.quantity;
     await tx.handlingUnit.update({ where: { code: entry.code }, data: { remainingQuantity: balance, status: 'opened' } });
     history.push({ unitId: entry.code, sku: entry.sku, type: 'Hoàn xuất TMDT', quantity: entry.quantity, remaining: balance, actor, reference });

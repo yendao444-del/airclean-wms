@@ -52,7 +52,7 @@ export function summarizeHandlingUnitAllocation(
 
 export function suggestHandlingUnitAllocation(available: number, packageSize: number) {
   const size = Number.isSafeInteger(packageSize) && packageSize > 0
-    ? Math.min(300, packageSize) : 300;
+    ? Math.min(500, packageSize) : 500;
   const quantity = Math.max(0, Math.floor(available));
   const fullPackages = Math.floor(quantity / size);
   return { size, fullPackages, looseQuantity: quantity % size };
@@ -63,6 +63,6 @@ export function suggestHandlingUnitAllocation(available: number, packageSize: nu
 export function looseRemainderForAllocation(available: number, planned: number, packageSize: number, include: boolean) {
   const remainder = available - planned;
   return include && [available, planned, packageSize].every(Number.isSafeInteger)
-    && planned > 0 && packageSize > 0 && packageSize <= 300
+    && planned > 0 && packageSize > 0 && packageSize <= 500
     && remainder > 0 && remainder < packageSize ? remainder : 0;
 }

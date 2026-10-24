@@ -239,9 +239,9 @@ async function observeActiveUnits(tx, ledger, now) {
   const activeUnits = activeRows.filter(unit => {
     const isReturn = String(unit.packagingName || "").normalize("NFD")
       .replace(/[\u0300-\u036f]/g, "").replace(/đ/g, "d").toLowerCase().includes("hang hoan");
-    // Normal legacy packages were capped to 300 without rewriting their
+    // Normal legacy packages (above the 500 limit) were capped to 300 without rewriting their
     // original capacity. Returned stock remains aggregated without that cap.
-    const capacity = isReturn ? Number(unit.initialQuantity) : Math.min(300, Number(unit.initialQuantity));
+    const capacity = isReturn ? Number(unit.initialQuantity) : Number(unit.initialQuantity) > 500 ? 300 : Number(unit.initialQuantity);
     return unit.status === "pending_check"
       || repackedChecks.has(String(unit.code).toUpperCase())
       || !Number.isFinite(Number(unit.remainingQuantity))

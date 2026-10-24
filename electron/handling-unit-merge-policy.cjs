@@ -6,8 +6,10 @@ function category(value) {
 }
 const isReturn = unit => String(unit.packagingName || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().includes('hang hoan');
 function mergeCapacity(unit, { allowLooseRepack = false } = {}) {
-  if (allowLooseRepack && category(unit.packagingName) === 'LE' && !isReturn(unit)) return 300;
-  return Math.min(300, Math.max(0, Number(unit.initialQuantity || unit.conversionFactor || 0)));
+  if (allowLooseRepack && category(unit.packagingName) === 'LE' && !isReturn(unit)) return 500;
+  // Packages above the 500 limit predate it and were physically capped at 300.
+  const quantity = Math.max(0, Number(unit.initialQuantity || unit.conversionFactor || 0));
+  return quantity > 500 ? 300 : quantity;
 }
 function assertMergePolicy(source, target, quantity, { allowLooseRepack = false } = {}) {
   if (!source || !target) throw new Error('Không tìm thấy đủ kiện nguồn và kiện đích.');
@@ -23,7 +25,7 @@ function assertMergePolicy(source, target, quantity, { allowLooseRepack = false 
   if (normalize(source.baseUnit) !== normalize(target.baseUnit)) throw new Error('Hai kiện khác đơn vị cơ sở.');
   if (quantity > Number(source.remainingQuantity)) throw new Error('Số gộp vượt số lượng còn lại của kiện nguồn.');
   const available = mergeCapacity(target, { allowLooseRepack: allowLooseRepack && !isReturn(source) }) - Number(target.remainingQuantity);
-  if (quantity > available) throw new Error(`Kiện đích [${target.code}] chỉ còn sức chứa ${Math.max(0, available)} ${target.baseUnit}; kiện thường không vượt quy cách, kiện lẻ gom thủ công tối đa 300.`);
+  if (quantity > available) throw new Error(`Kiện đích [${target.code}] chỉ còn sức chứa ${Math.max(0, available)} ${target.baseUnit}; kiện thường không vượt quy cách, kiện lẻ gom thủ công tối đa 500.`);
   return { isReturnSource: isReturn(source) };
 }
 module.exports = { assertMergePolicy, mergeCapacity };

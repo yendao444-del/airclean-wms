@@ -401,8 +401,11 @@ const normalizeUnitName = (value?: string) =>
     .trim()
     .toLocaleLowerCase("vi-VN");
 
-const capacityForUnit = (unit: Pick<UnitRow, "initialPcs" | "conversionFactor">) =>
-  Math.min(300, Math.max(0, Number(unit.initialPcs || unit.conversionFactor || 0)));
+// Packages above the 500 limit predate it and were physically capped at 300.
+const capacityForUnit = (unit: Pick<UnitRow, "initialPcs" | "conversionFactor">) => {
+  const quantity = Math.max(0, Number(unit.initialPcs || unit.conversionFactor || 0));
+  return quantity > 500 ? 300 : quantity;
+};
 
 const packagingMethodForSpec = (spec?: any): "TAI" | "THUNG" | "LE" =>
   getPackageCategory(spec?.name) === "THUNG"
@@ -1392,8 +1395,8 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
       return;
     }
     const defaultTarget =
-      unit.currentPcs > 300
-        ? 300
+      unit.currentPcs > 500
+        ? 500
         : Math.max(1, Math.floor(unit.currentPcs / 2));
     setSplitTargetSize(defaultTarget);
     splitOperationKeyRef.current = `split-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
@@ -1547,7 +1550,7 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
       || (unit.status === "Nguyên niêm phong" && getPackageCategory(unit.packageType) === "LE"));
 
   const transferCapacityForUnit = (unit: UnitRow) =>
-    getPackageCategory(unit.packageType) === "LE" && !isReturnHandlingUnit(unit) ? 300 : capacityForUnit(unit);
+    getPackageCategory(unit.packageType) === "LE" && !isReturnHandlingUnit(unit) ? 500 : capacityForUnit(unit);
 
   const getReturnMergeTargets = (source: UnitRow) =>
     workspace.register.filter((candidate) =>
@@ -1585,7 +1588,7 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
       message.warning(
         sameSkuOpened
           ? `SKU ${source.skuName} có kiện đang khui nhưng khác đơn vị ${source.unitName} hoặc đã hết sức chứa. Hãy chọn kiện đích phù hợp rồi thử chuyển lại.`
-          : `SKU ${source.skuName} chưa có kiện lẻ hoặc kiện đã khui còn sức chứa. Kiện nguyên phải khui trước; kiện lẻ gom thủ công tối đa 300.`,
+          : `SKU ${source.skuName} chưa có kiện lẻ hoặc kiện đã khui còn sức chứa. Kiện nguyên phải khui trước; kiện lẻ gom thủ công tối đa 500.`,
       );
       return;
     }
@@ -2659,7 +2662,7 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
       packageMethod: method,
       packageCount: useAvailable ? Math.max(1, suggestion.fullPackages) : 1,
       conversionFactor: suggestion.size,
-      looseQty: useAvailable && method === "LE" ? Math.min(300, available) : undefined,
+      looseQty: useAvailable && method === "LE" ? Math.min(500, available) : undefined,
       includeLooseRemainder: useAvailable,
       zone: "A1",
     });
@@ -2841,8 +2844,8 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
       playQuickScanSound("fail");
       return;
     }
-    if (factor > 300 && label.packagingName !== "Lẻ") {
-      setQuickScanError(`Kiện ${label.code} có ${factor} ${label.baseUnit}; tối đa 300. Hãy tách kiện trước khi nhập.`);
+    if (factor > 500 && label.packagingName !== "Lẻ") {
+      setQuickScanError(`Kiện ${label.code} có ${factor} ${label.baseUnit}; tối đa 500. Hãy tách kiện trước khi nhập.`);
       playQuickScanSound("fail");
       return;
     }
@@ -2889,8 +2892,8 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
       message.error("Số lượng hàng thủ công phải lớn hơn 0.");
       return;
     }
-    if (quantity > 300) {
-      message.error("Mỗi kiện tối đa 300. Hãy tách thực tế và thêm riêng từng kiện (ví dụ 300, 300, 300, 100).");
+    if (quantity > 500) {
+      message.error("Mỗi kiện tối đa 500. Hãy tách thực tế và thêm riêng từng kiện (ví dụ 500, 500, 500, 100).");
       return;
     }
     if (!supplier) {
@@ -3475,7 +3478,7 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
                       ? `${activeSelectedUnits.length} kiện đang hoạt động chứa ${fmt(selectedAllocation.packagedQuantity)} ${selected.unitName}${selectedAllocation.packedQuantity > 0 ? `; hàng đóng sẵn dùng ${fmt(selectedAllocation.packedQuantity)} ${selected.unitName}` : ""}. Phần còn lại chưa có mã kiện. Tạo kiện theo số đếm thực tế; nếu khác tồn phần mềm, cần đối chiếu kiểm kho.`
                       : "Kiểm tra tồn trong kiện và hàng đóng sẵn trước khi tạo thêm kiện."}
                     action={selectedAllocation.unallocatedQuantity > 0 ? <Button size="small" onClick={() => openCreatePackageModal(selected.sku, true)}>
-                      {selectedAllocation.unallocatedQuantity < 300 ? `Phân ${fmt(selectedAllocation.unallocatedQuantity)} ${selected.unitName} còn lại` : "Phân phần tồn còn lại"}
+                      {selectedAllocation.unallocatedQuantity < 500 ? `Phân ${fmt(selectedAllocation.unallocatedQuantity)} ${selected.unitName} còn lại` : "Phân phần tồn còn lại"}
                     </Button> : undefined}
                   />
                 </div>
@@ -4901,8 +4904,8 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
                     ]}
                   />
                 </Form.Item>
-                <Form.Item name="conversionFactor" label="Quy đổi về đơn vị nhỏ nhất" rules={[{ required: true, message: "Nhập hệ số quy đổi" }, { type: "number", max: 300, message: "Mỗi kiện tối đa 300 đơn vị" }]}>
-                  <InputNumber min={1} max={300} precision={0} style={{ width: "100%" }} addonAfter="đơn vị" />
+                <Form.Item name="conversionFactor" label="Quy đổi về đơn vị nhỏ nhất" rules={[{ required: true, message: "Nhập hệ số quy đổi" }, { type: "number", max: 500, message: "Mỗi kiện tối đa 500 đơn vị" }]}>
+                  <InputNumber min={1} max={500} precision={0} style={{ width: "100%" }} addonAfter="đơn vị" />
                 </Form.Item>
                 <Form.Item name="baseUnit" label="Đơn vị nhỏ nhất" rules={[{ required: true, message: "Nhập đơn vị cơ sở" }]}>
                   <Input placeholder="Ví dụ: gói, hộp, cái" />
@@ -4986,7 +4989,7 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
       >
         <div className="hu-quick-create">
           <section className="hu-quick-scan-workspace">
-            <div className="hu-quick-entry-guide"><b>Tách hàng trước khi nhập</b><p>Ví dụ 1.000 gói: nhập lần lượt 300, 300, 300 và 100. Hệ thống tạo từng kiện và in tem số thứ tự sau khi xác nhận.</p><Button size="small" type="link" onClick={() => setShowLegacyQrEntry(value => !value)}>{showLegacyQrEntry ? 'Ẩn ô quét QR' : 'Hiện ô quét QR'}</Button></div>
+            <div className="hu-quick-entry-guide"><b>Tách hàng trước khi nhập</b><p>Ví dụ 1.200 gói: nhập lần lượt 500, 500 và 200. Hệ thống tạo từng kiện và in tem số thứ tự sau khi xác nhận.</p><Button size="small" type="link" onClick={() => setShowLegacyQrEntry(value => !value)}>{showLegacyQrEntry ? 'Ẩn ô quét QR' : 'Hiện ô quét QR'}</Button></div>
             {showLegacyQrEntry && <>
             <div className="hu-quick-scan-head">
               <div>
@@ -5140,7 +5143,7 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
             {quickReceiptFileName && <div className="hu-quick-file"><CheckCircleOutlined /> {quickReceiptFileName}<span>Sẽ upload Cloudflare R2</span></div>}
           </aside>
         </div>
-        <footer className="hu-quick-footer"><span>Mỗi dòng là <b>một kiện đã tách thực tế, tối đa 300</b>. Nhập đúng số lượng; tem ghi số thứ tự riêng, không cần quét QR khi nhập thủ công.</span><div><Button onClick={() => setShowQuickCreate(false)}>Hủy</Button><Button type="primary" icon={<CheckCircleOutlined />} disabled={!quickScanLines.length || isQuickConfirming} loading={isQuickConfirming} onClick={confirmQuickReceiving}>Xác nhận nhập & tạo kiện</Button></div></footer>
+        <footer className="hu-quick-footer"><span>Mỗi dòng là <b>một kiện đã tách thực tế, tối đa 500</b>. Nhập đúng số lượng; tem ghi số thứ tự riêng, không cần quét QR khi nhập thủ công.</span><div><Button onClick={() => setShowQuickCreate(false)}>Hủy</Button><Button type="primary" icon={<CheckCircleOutlined />} disabled={!quickScanLines.length || isQuickConfirming} loading={isQuickConfirming} onClick={confirmQuickReceiving}>Xác nhận nhập & tạo kiện</Button></div></footer>
       </Modal>
       {/* MODAL TẠO KIỆN HÀNG MỚI */}
       <Modal
@@ -5271,7 +5274,7 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
                 </div>
               </div>
             )}
-            {currentAllocAvailable > 0 && currentAllocAvailable < 300 && (
+            {currentAllocAvailable > 0 && currentAllocAvailable < 500 && (
               <Button size="small" onClick={() => allocationForm.setFieldsValue({ packageMethod: "LE", looseQty: currentAllocAvailable })}>
                 Tạo kiện lẻ {fmt(currentAllocAvailable)} {currentAllocUnitName}
               </Button>
@@ -5299,7 +5302,7 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
                     );
                     allocationForm.setFieldValue(
                       "conversionFactor",
-                      Math.min(300, Number(spec?.conversionFactor || (m === "THUNG" ? 50 : 300))),
+                      Math.min(500, Number(spec?.conversionFactor || (m === "THUNG" ? 50 : 300))),
                     );
                   } else {
                     allocationForm.setFieldValue("looseQty", undefined);
@@ -5343,11 +5346,11 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
                 >
                   <InputNumber
                     min={1}
-                    max={300}
+                    max={500}
                     precision={0}
                     style={{ width: "100%" }}
                     addonAfter={`${currentAllocUnitName}/tải`}
-                    placeholder={`Tối đa 300 ${currentAllocUnitName}/tải`}
+                    placeholder={`Tối đa 500 ${currentAllocUnitName}/tải`}
                   />
                 </Form.Item>
               </Flex>
@@ -5377,11 +5380,11 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
                 >
                   <InputNumber
                     min={1}
-                    max={300}
+                    max={500}
                     precision={0}
                     style={{ width: "100%" }}
                     addonAfter={`${currentAllocUnitName}/thùng`}
-                    placeholder={`Tối đa 300 ${currentAllocUnitName}/thùng`}
+                    placeholder={`Tối đa 500 ${currentAllocUnitName}/thùng`}
                   />
                 </Form.Item>
               </Flex>
@@ -5398,7 +5401,7 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
               >
                 <InputNumber
                   min={1}
-                  max={300}
+                  max={500}
                   precision={0}
                   style={{ width: "100%" }}
                   addonAfter={currentAllocUnitName}
@@ -5561,7 +5564,7 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
                   <div className="hu-transfer-list">{candidates.map(unit => card(unit, "target"))}</div>
                 </section>
               </div>}
-              <div className="hu-transfer-sku">Chỉ chuyển cùng SKU: <strong>{mergeReturnUnit.skuName}</strong>. Kiện lẻ có thể gom tối đa 300 {mergeReturnUnit.unitName}; kiện cha đã tách chỉ dùng tra cứu.</div>
+              <div className="hu-transfer-sku">Chỉ chuyển cùng SKU: <strong>{mergeReturnUnit.skuName}</strong>. Kiện lẻ có thể gom tối đa 500 {mergeReturnUnit.unitName}; kiện cha đã tách chỉ dùng tra cứu.</div>
               {selectedTarget && maximumQuantity <= 0 && <Alert type="warning" showIcon message={isReturnHandlingUnit(selectedTarget)
                 ? "Kiện hàng hoàn chỉ được chuyển đi. Bấm đổi chiều để chọn kiện nhận phù hợp."
                 : Number(mergeReturnUnit.currentPcs) <= 0 ? "Kiện chuyển đi đã hết hàng."
@@ -5617,7 +5620,7 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
             splittingUnit.currentPcs,
             splitTargetSize,
           );
-          const isValid = quantities.length >= 2 && quantities.length <= 20 && quantities.every((quantity) => quantity <= 300);
+          const isValid = quantities.length >= 2 && quantities.length <= 20 && quantities.every((quantity) => quantity <= 500);
           return (
             <div className="hu-split-modal-body">
               <div className="hu-split-source">
@@ -5639,7 +5642,7 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
               <InputNumber
                 className="hu-split-size-input"
                 min={1}
-                max={Math.min(300, Math.max(1, splittingUnit.currentPcs - 1))}
+                max={Math.min(500, Math.max(1, splittingUnit.currentPcs - 1))}
                 precision={0}
                 controls={false}
                 value={splitTargetSize}
@@ -5655,7 +5658,7 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
                   setSplitTargetSize((value) =>
                     Math.min(
                       Math.max(1, Math.floor(Number(value || 1))),
-                      Math.min(300, Math.max(1, splittingUnit.currentPcs - 1)),
+                      Math.min(500, Math.max(1, splittingUnit.currentPcs - 1)),
                     ),
                   )
                 }

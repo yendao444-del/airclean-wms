@@ -152,7 +152,7 @@ async function transferToPacked(tx, row, nextQuantity, inventory, actor, recordT
     if (plan.moved < 0 && !['opened', 'pending_check', 'empty'].includes(source.status)) throw new Error(`Không thể hoàn hàng về kiện ${source.code} đã đóng hoặc tách.`);
     const remaining = Number(source.remainingQuantity) - plan.moved;
     if (remaining < 0) throw new Error(`Kiện ${source.code} không đủ hàng để đóng ${nextQuantity} combo.`);
-    if (plan.moved < 0 && remaining > Math.min(300, source.initialQuantity)) throw new Error(`Hoàn hàng vượt sức chứa ban đầu của kiện ${source.code}.`);
+    if (plan.moved < 0 && remaining > (source.initialQuantity > 500 ? 300 : source.initialQuantity)) throw new Error(`Hoàn hàng vượt sức chứa ban đầu của kiện ${source.code}.`);
     const changed = await tx.handlingUnit.updateMany({ where: { code: source.code, remainingQuantity: source.remainingQuantity, status: source.status }, data: { remainingQuantity: remaining, status: remaining === 0 ? 'pending_check' : 'opened' } });
     if (changed.count !== 1) throw new Error('Tồn kiện vừa thay đổi trên máy khác. Vui lòng tải lại.');
     const allocations = nextAllocations.get(plan.component);

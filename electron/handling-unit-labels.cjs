@@ -1,10 +1,10 @@
 const KEY = "handlingUnitLabelNumbersV1";
-const MAX_QUANTITY = 300;
+const MAX_QUANTITY = 500;
 const MAX_SEQUENCE_NUMBER = Number.MAX_SAFE_INTEGER;
 
 function assertPackageQuantity(quantity) {
   if (!Number.isSafeInteger(Number(quantity)) || Number(quantity) < 1 || Number(quantity) > MAX_QUANTITY) {
-    throw new Error("Mỗi kiện phải có từ 1 đến 300 đơn vị thực tế. Hãy tách hàng và ghi đúng số lượng từng kiện trước khi nhập.");
+    throw new Error("Mỗi kiện phải có từ 1 đến 500 đơn vị thực tế. Hãy tách hàng và ghi đúng số lượng từng kiện trước khi nhập.");
   }
 }
 

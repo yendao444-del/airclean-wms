@@ -67,7 +67,7 @@ function planPackages(units, sku, target) {
   for (const item of packages) if (!isCount(item.quantity) || !isCount(item.capacity)) throw new Error('Số dư kiện không hợp lệ.');
   // Returns are aggregated by SKU at receipt, not physical 300-piece cartons.
   // Preserve old large return balances until they are merged into normal units.
-  const balances = packages.map(item => item.status === 'empty' ? 0 : Math.min(item.quantity, item.capacity, item.isReturn ? item.capacity : 300));
+  const balances = packages.map(item => item.status === 'empty' ? 0 : Math.min(item.quantity, item.capacity, item.isReturn || item.capacity <= 500 ? item.capacity : 300));
   let remaining = availableStock(target) - balances.reduce((sum, quantity) => sum + quantity, 0);
   // Retain the existing oldest-stock priority when removing excess containment.
   for (let i = packages.length - 1; i >= 0 && remaining < 0; i--) {

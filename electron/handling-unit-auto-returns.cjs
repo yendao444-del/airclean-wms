@@ -2,7 +2,8 @@ const { createHash } = require('node:crypto');
 const normalize = value => String(value || '').normalize('NFD')
   .replace(/[\u0300-\u036f]/g, '').replace(/đ/g, 'd').trim().toLowerCase();
 const isReturn = unit => normalize(unit?.packagingName).includes('hang hoan');
-const capacity = unit => Math.min(300, Math.max(0, Number(unit.initialQuantity || unit.conversionFactor || 0)));
+// Packages above the 500 limit predate it and were physically capped at 300.
+const capacity = unit => { const quantity = Math.max(0, Number(unit.initialQuantity || unit.conversionFactor || 0)); return quantity > 500 ? 300 : quantity; };
 const count = n => Number.isSafeInteger(n) && n >= 0;
 const timestamp = unit => Number.isFinite(Date.parse(unit.createdAt)) ? Date.parse(unit.createdAt) : Number.MAX_SAFE_INTEGER;
 const chronological = (a, b) => timestamp(a) - timestamp(b)

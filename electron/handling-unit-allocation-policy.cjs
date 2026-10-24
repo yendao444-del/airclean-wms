@@ -1,7 +1,7 @@
 function assertAllocationCapacity({ incoming, existing, packedLots, stockBySku }) {
   const additions = new Map();
   for (const unit of incoming) {
-    if (!Number.isSafeInteger(unit.initialQuantity) || unit.initialQuantity < 1 || unit.initialQuantity > 300 || !Number.isSafeInteger(unit.remainingQuantity) || unit.remainingQuantity < 0 || unit.remainingQuantity > unit.initialQuantity) throw new Error(`Kiện ${unit.code} phải có số lượng nguyên hợp lệ, tối đa 300.`);
+    if (!Number.isSafeInteger(unit.initialQuantity) || unit.initialQuantity < 1 || unit.initialQuantity > 500 || !Number.isSafeInteger(unit.remainingQuantity) || unit.remainingQuantity < 0 || unit.remainingQuantity > unit.initialQuantity) throw new Error(`Kiện ${unit.code} phải có số lượng nguyên hợp lệ, tối đa 500.`);
     additions.set(unit.sku, (additions.get(unit.sku) || 0) + unit.remainingQuantity);
   }
   for (const [sku, added] of additions) {
