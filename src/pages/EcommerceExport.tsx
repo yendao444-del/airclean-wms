@@ -333,6 +333,26 @@ function getShopeeSkuHeader(worksheet: any, jsonData: any[]): string {
     return '';
 }
 
+/**
+ * Bỏ khỏi orderMap các đơn không có dòng nào mang SKU và trả về mã các đơn đó,
+ * để một đơn thiếu SKU không chặn cả file. Không nhập đơn thiếu SKU vì sẽ trừ sai tồn.
+ */
+function removeOrdersMissingSku(orderMap: Map<string, any[]>): string[] {
+    const missingSkuOrders: string[] = [];
+    orderMap.forEach((orderItems, orderId) => {
+        if (!orderItems.some((entry: any) => String(entry.item?.variantSku || '').trim())) {
+            missingSkuOrders.push(orderId);
+        }
+    });
+    missingSkuOrders.forEach((orderId) => orderMap.delete(orderId));
+    return missingSkuOrders;
+}
+
+function formatMissingSkuOrders(orderIds: string[]): string {
+    const moreOrders = orderIds.length > 3 ? ` và ${orderIds.length - 3} đơn khác` : '';
+    return `bỏ qua ${orderIds.length} đơn thiếu SKU, cần gán SKU trên sàn rồi nhập lại: ${orderIds.slice(0, 3).join(', ')}${moreOrders}`;
+}
+
 function isShopeeGiftOrPromotionLine(productName: any): boolean {
     const normalized = normalizeHeaderText(productName);
     return normalized.includes('qua chi tang khong ban')
@@ -1980,9 +2000,11 @@ Thời gian: ${currentTime}`;
                 // Validate at order level: metadata can be present on another line of the same order.
                 const missingSkuLabel = isTikTok ? 'Seller SKU' : 'SKU ở cột T';
                 const missingTimeLabel = isTikTok ? 'Created Time (cột Y)' : 'Ngày đặt hàng (cột C)';
+                const missingSkuOrders = removeOrdersMissingSku(orderMap);
+                // Cả file đều thiếu SKU thì báo lỗi, không coi là snapshot rỗng.
+                if (orderMap.size === 0) missingSkuOrders.forEach((orderId) => invalidOrders.push(`${orderId}: thiếu ${missingSkuLabel}`));
                 orderMap.forEach((orderItems, orderId) => {
                     const validItems = orderItems.filter((entry: any) => String(entry.item?.variantSku || '').trim());
-                    if (validItems.length === 0) invalidOrders.push(`${orderId}: thiếu ${missingSkuLabel}`);
                     if (!orderItems.some((entry: any) => entry.orderPlacedAt)) invalidOrders.push(`${orderId}: thiếu ${missingTimeLabel}`);
                     if (validItems.some((entry: any) => !Number.isInteger(entry.item?.quantity) || entry.item.quantity <= 0)) {
                         invalidOrders.push(`${orderId}: số lượng sản phẩm không hợp lệ`);
@@ -2061,6 +2083,7 @@ Thời gian: ${currentTime}`;
                             allowEmptySnapshot,
                             snapshotKind,
                             reconcileMissing: isAuthoritativePendingSnapshot(file.name, source, jsonData),
+                            excludedOrderNumbers: missingSkuOrders,
                         }),
                             120000,
                             'Đồng bộ dữ liệu lên Supabase quá lâu. Vui lòng thử lại.',
@@ -2081,6 +2104,10 @@ Thời gian: ${currentTime}`;
                 }
 
                 const source = isTikTok ? 'TikTok' : 'Shopee';
+
+                if (missingSkuOrders.length > 0) {
+                    message.warning({ content: `${source}: ${formatMissingSkuOrders(missingSkuOrders)}`, duration: 10 });
+                }
 
                 if (importedCount === 0) {
                     if (mismatchCount > 0) {
@@ -2160,6 +2187,8 @@ Thời gian: ${currentTime}`;
             const snapshotFilesBySource = new Map<string, string[]>();
             const reconcileMissingBySource = new Map<string, boolean>();
             const snapshotKindBySource = new Map<string, MarketplaceSnapshotKind>();
+            const missingSkuOrdersBySource = new Map<string, string[]>();
+            const missingSkuParts: string[] = [];
             // Xử lý từng file
             for (const [fileIndex, fileData] of files.entries()) {
                 try {
@@ -2335,9 +2364,12 @@ Thời gian: ${currentTime}`;
 
                     const missingSkuLabel = isTikTok ? 'Seller SKU' : 'SKU ở cột T';
                     const missingTimeLabel = isTikTok ? 'Created Time (cột Y)' : 'Ngày đặt hàng (cột C)';
+                    const missingSkuOrders = removeOrdersMissingSku(orderMap);
+                    missingSkuOrdersBySource.set(fileSource, missingSkuOrders);
+                    // Cả file đều thiếu SKU thì báo lỗi, không coi là snapshot rỗng.
+                    if (orderMap.size === 0) missingSkuOrders.forEach((orderId) => invalidOrders.push(`${orderId}: thiếu ${missingSkuLabel}`));
                     orderMap.forEach((orderItems, orderId) => {
                         const validItems = orderItems.filter((entry: any) => String(entry.item?.variantSku || '').trim());
-                        if (validItems.length === 0) invalidOrders.push(`${orderId}: thiếu ${missingSkuLabel}`);
                         if (!orderItems.some((entry: any) => entry.orderPlacedAt)) invalidOrders.push(`${orderId}: thiếu ${missingTimeLabel}`);
                         if (validItems.some((entry: any) => !Number.isInteger(entry.item?.quantity) || entry.item.quantity <= 0)) {
                             invalidOrders.push(`${orderId}: số lượng sản phẩm không hợp lệ`);
@@ -2430,6 +2462,7 @@ Thời gian: ${currentTime}`;
                             allowEmptySnapshot,
                             snapshotKind: snapshotKindBySource.get(source) || 'unknown',
                             reconcileMissing: reconcileMissingBySource.get(source) === true,
+                            excludedOrderNumbers: missingSkuOrdersBySource.get(source) || [],
                         }),
                         120000,
                         `Đồng bộ ${source} lên Supabase quá lâu. Vui lòng thử lại.`,
@@ -2444,6 +2477,8 @@ Thời gian: ${currentTime}`;
                     totalShippingConfirmed += importResult.data?.shippingConfirmed || 0;
                     const mismatchCount = importResult.data?.mismatch || 0;
                     totalMismatch += mismatchCount;
+                    const missingSkuOrders = missingSkuOrdersBySource.get(source) || [];
+                    if (missingSkuOrders.length > 0) missingSkuParts.push(`${source}: ${formatMissingSkuOrders(missingSkuOrders)}`);
                 }
                 await loadEcommerceExports(true);
             }
@@ -2458,6 +2493,7 @@ Thời gian: ${currentTime}`;
             if (totalShippingConfirmed > 0) resultParts.push(`xác nhận ${totalShippingConfirmed} đơn đang giao`);
             if (totalSkippedUntracked > 0) resultParts.push(`${totalSkippedUntracked} đơn chưa có lịch sử pickup không tự trừ tồn`);
             if (totalMismatch > 0) resultParts.push(`${totalMismatch} đơn đưa vào Cần kiểm tra`);
+            resultParts.push(...missingSkuParts);
 
             if (failedFiles.length > 0) {
                 const failedNames = failedFiles.slice(0, 3).map(file => file.name).join(', ');
@@ -2473,8 +2509,9 @@ Thời gian: ${currentTime}`;
             } else if (resultParts.length === 0) {
                 message.warning({ content: 'Không có thay đổi nào, tất cả đơn đều đã tồn tại!', key: 'import-folder', duration: 5 });
             } else {
-                const notify = totalMismatch > 0 ? message.warning : message.success;
-                notify({ content: resultParts.join(' | '), key: 'import-folder', duration: 5 });
+                const hasMissingSku = missingSkuParts.length > 0;
+                const notify = totalMismatch > 0 || hasMissingSku ? message.warning : message.success;
+                notify({ content: resultParts.join(' | '), key: 'import-folder', duration: hasMissingSku ? 10 : 5 });
             }
 
         } catch (error) {

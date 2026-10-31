@@ -7632,6 +7632,7 @@ ipcMain.handle("handlingUnits:getWorkspace", async (_event, options = {}) => {
       suppliers,
       splitRecords,
       packedInventoryCfg,
+      packingAssignmentCfgs,
     ] = await Promise.all([
         prisma.product.findMany({
           where: {
@@ -7707,6 +7708,10 @@ ipcMain.handle("handlingUnits:getWorkspace", async (_event, options = {}) => {
         }),
         prisma.appConfig.findUnique({
           where: { key: packagePackingModule.INVENTORY_KEY },
+          select: { value: true },
+        }),
+        prisma.appConfig.findMany({
+          where: { key: { startsWith: packagePackingModule.PREFIX } },
           select: { value: true },
         }),
       ]);
@@ -7932,6 +7937,21 @@ ipcMain.handle("handlingUnits:getWorkspace", async (_event, options = {}) => {
       scheduleAutoReturnMaintenance();
       void scheduleHandlingUnitWorkspaceSync(currentSession?.username || 'System');
     }
+    const packerByAssignmentId = new Map();
+    for (const record of packingAssignmentCfgs || []) {
+      try {
+        const state = JSON.parse(record.value || '{}');
+        for (const row of Array.isArray(state.rows) ? state.rows : []) {
+          if (row?.id) packerByAssignmentId.set(String(row.id), { packerUsername: row.packerUsername, packerName: row.packerName });
+        }
+      } catch (error) {
+        console.warn('[HandlingUnits] Ignoring malformed packing assignment snapshot:', error.message);
+      }
+    }
+    const packedLots = packagePackingModule.decodeInventory(packedInventoryCfg).lots.map(lot => ({
+      ...lot,
+      ...(packerByAssignmentId.get(String(lot.assignmentId)) || {}),
+    }));
     return {
       success: true,
       data: {
@@ -7948,7 +7968,7 @@ ipcMain.handle("handlingUnits:getWorkspace", async (_event, options = {}) => {
           : Array.isArray(recentTransactions)
           ? recentTransactions
           : [],
-        packedInventory: blindStockCheck ? [] : packagePackingModule.decodeInventory(packedInventoryCfg).lots,
+        packedInventory: blindStockCheck ? [] : packedLots,
       },
     };
   } catch (error) {
@@ -13163,10 +13183,11 @@ ipcMain.handle("handlingUnits:setShiftCheckScope", async (_event, payload = {}) 
     requireRole("admin");
     if (!prisma) throw new Error("Không kết nối được cơ sở dữ liệu kiện hàng.");
     const productIds = payload.productIds === null ? null : payload.productIds;
+    const shiftMode = payload.shiftMode === undefined ? "both" : payload.shiftMode;
     if (Array.isArray(productIds) && productIds.length === 0) {
       throw new Error("Hãy chọn ít nhất một sản phẩm cần kiểm.");
     }
-    const entry = await prisma.$transaction((tx) => saveShiftScope(tx, productIds, currentSession?.username || "admin"));
+    const entry = await prisma.$transaction((tx) => saveShiftScope(tx, productIds, currentSession?.username || "admin", new Date(), shiftMode));
     broadcastHandlingUnitsChanged("SHIFT_CHECK_SCOPE", entry);
     return { success: true, data: entry };
   } catch (error) {
@@ -25673,6 +25694,14 @@ ipcMain.handle("ecommerceExports:importSnapshot", async (event, payload = {}) =>
     }
     const reconcileMissing = payload.reconcileMissing === true
       && isAuthoritativePendingSnapshot(platform.key, fileNames, snapshotKind);
+    // Orders present in the file but skipped by the importer (e.g. missing SKU)
+    // are still on the marketplace, so absence from records must not flag them.
+    const presentOrderNumbers = [
+      ...orderNumbers,
+      ...(Array.isArray(payload.excludedOrderNumbers)
+        ? payload.excludedOrderNumbers.map((value) => String(value || "").trim()).filter(Boolean)
+        : []),
+    ];
 
     const runSnapshotImport = () => getPrismaDirectTx().$transaction(
       async (tx) => {
@@ -25919,10 +25948,10 @@ ipcMain.handle("ecommerceExports:importSnapshot", async (event, payload = {}) =>
                 customerName: platform.label,
                 status: { in: ["pending", "processing"] },
                 OR: [
-                  { orderNumber: { notIn: orderNumbers } },
+                  { orderNumber: { notIn: presentOrderNumbers } },
                   {
                     orderNumber: null,
-                    ecommerceExportCode: { notIn: orderNumbers },
+                    ecommerceExportCode: { notIn: presentOrderNumbers },
                   },
                 ],
               },

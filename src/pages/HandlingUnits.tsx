@@ -47,6 +47,7 @@ import {
   TagOutlined,
   DownOutlined,
   ScissorOutlined,
+  SettingOutlined,
 } from "@ant-design/icons";
 import { Warehouse2DMap } from "../components/Warehouse2DMap";
 import Modal from "../components/HandlingUnitModal";
@@ -160,6 +161,7 @@ type Workspace = {
     outstanding: Array<{ code: string; requiredAt: string; date: string; requiresPhysicalCheck?: boolean }>;
     trackedCodes: string[];
     checkProductIds?: number[] | null;
+    checkShiftMode?: "morning" | "afternoon" | "both";
     checkScopeUpdatedBy?: string;
     checkScopeUpdatedAt?: string;
   };
@@ -859,7 +861,7 @@ let handlingUnitsWorkspaceCache: Pick<
 export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit?: () => void; initialTab?: "units" | "prepack" }) {
   const { user, isRolePreview } = useAuth();
   const isAdmin = user?.role === "admin";
-  const [activeModuleTab, setActiveModuleTab] = useState<"units" | "prepack" | "history">(initialTab);
+  const [activeModuleTab, setActiveModuleTab] = useState<"units" | "prepack" | "targets" | "history">(initialTab);
   const moduleContentRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     moduleContentRef.current?.scrollTo({ top: 0, left: 0 });
@@ -2276,13 +2278,12 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
     }
     setShiftCheckScope(scope);
     setShiftCheckFocusCode(null);
-    const initialFamily = selected?.productGroup || "all";
+    // The end-of-shift modal is a cross-product review.  It must always open
+    // on the complete list instead of inheriting the product family currently
+    // selected behind the modal (which could silently leave it on e.g. Decor).
+    const initialFamily = "all";
     setShiftCheckFamily(initialFamily);
-    // Keep the current family in the first batch when more than 100 are due.
-    setShiftCheckSnapshot(initialFamily === "all" ? identified : [
-      ...identified.filter(item => item.productGroup === initialFamily),
-      ...identified.filter(item => item.productGroup !== initialFamily),
-    ]);
+    setShiftCheckSnapshot(identified);
     setShiftCheckDrafts(
       Object.fromEntries(
         candidates.map(({ unit }) => [
@@ -3212,6 +3213,13 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
               </Button>
             </Tooltip>
           )}
+          {isAdmin && !isRolePreview && workspace.shiftCheckPolicy && (
+            <Tooltip title="Cài đặt buổi kiểm và phạm vi sản phẩm (chỉ admin)">
+              <Button size="small" icon={<SettingOutlined />} onClick={() => setShowShiftScopeModal(true)}>
+                Cài đặt ca
+              </Button>
+            </Tooltip>
+          )}
           <Tooltip title="Sơ đồ 2D & quản lý vị trí khu vực kho">
             <Button
               size="small"
@@ -3361,6 +3369,7 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
           <div className="hu-module-tabs" role="tablist" aria-label="Phân hệ quản lý kiện hàng">
             <button type="button" role="tab" id="hu-tab-units" aria-controls="hu-module-content" aria-selected={activeModuleTab === "units"} className={`hu-module-tab ${activeModuleTab === "units" ? "is-active" : ""}`} onClick={() => { setActiveModuleTab("units"); setHistoryScope("units"); }}>Kiện hàng</button>
             <button type="button" role="tab" id="hu-tab-prepack" aria-controls="hu-module-content" aria-selected={activeModuleTab === "prepack"} className={`hu-module-tab ${activeModuleTab === "prepack" ? "is-active" : ""}`} onClick={() => { setActiveModuleTab("prepack"); setHistoryScope("prepack"); }}>Đóng gói sẵn</button>
+            <button type="button" role="tab" id="hu-tab-targets" aria-controls="hu-module-content" aria-selected={activeModuleTab === "targets"} className={`hu-module-tab ${activeModuleTab === "targets" ? "is-active" : ""}`} onClick={() => setActiveModuleTab("targets")}>Mục tiêu đóng gói</button>
             <button type="button" role="tab" id="hu-tab-history" aria-controls="hu-module-content" aria-selected={activeModuleTab === "history"} className={`hu-module-tab ${activeModuleTab === "history" ? "is-active" : ""}`} onClick={() => setActiveModuleTab("history")}>Lịch sử</button>
           </div>
           <div ref={moduleContentRef} className="hu-tab-content" id="hu-module-content" role="tabpanel" aria-labelledby={`hu-tab-${activeModuleTab}`}>
@@ -3368,8 +3377,10 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
           <Modal title="Phiếu đóng gói sẵn" open={prepackWorkOpen && canCreatePrepack} onCancel={() => { setPrepackWorkOpen(false); setPrepackCreateRequest(0); void loadWorkspace(true); }} footer={null} width={1200} destroyOnHidden>
             {prepackWorkOpen && canCreatePrepack && <PrepackManagement embedded view="report" createRequest={prepackCreateRequest} onCreateHandled={() => setPrepackCreateRequest(0)} sourceUnits={workspace.register.map(unit => ({ id: unit.id, skuName: unit.skuName, unitName: unit.unitName, status: unit.status, currentPcs: unit.currentPcs, packageType: unit.packageType }))} productSkus={selected ? workspace.catalog.filter(item => item.productGroup === selected.productGroup).map(item => item.sku) : undefined} />}
           </Modal>
-          {(activeModuleTab === "prepack" || (activeModuleTab === "history" && historyScope === "prepack")) ? (
-            activeModuleTab === "history" ? <PrepackManagement view="history" sourceUnits={workspace.register.map(unit => ({ id: unit.id, skuName: unit.skuName, unitName: unit.unitName, status: unit.status, currentPcs: unit.currentPcs, packageType: unit.packageType }))} productSkus={selected ? workspace.catalog.filter(item => item.productGroup === selected.productGroup).map(item => item.sku) : undefined} /> : selected ? <PrepackInventoryView lots={workspace.packedInventory} sku={selected.sku} unitName={selected.unitName} canCreate={canCreatePrepack} onCreate={() => openPrepackWork(true)} /> : null
+          {activeModuleTab === "targets" ? (
+            <PrepackManagement view="report" sourceUnits={workspace.register.map(unit => ({ id: unit.id, skuName: unit.skuName, unitName: unit.unitName, status: unit.status, currentPcs: unit.currentPcs, packageType: unit.packageType }))} />
+          ) : (activeModuleTab === "prepack" || (activeModuleTab === "history" && historyScope === "prepack")) ? (
+            activeModuleTab === "history" ? <PrepackManagement view="history" sourceUnits={workspace.register.map(unit => ({ id: unit.id, skuName: unit.skuName, unitName: unit.unitName, status: unit.status, currentPcs: unit.currentPcs, packageType: unit.packageType }))} productSkus={selected ? workspace.catalog.filter(item => item.productGroup === selected.productGroup).map(item => item.sku) : undefined} /> : <PrepackInventoryView lots={workspace.packedInventory} catalog={workspace.catalog} canCreate={canCreatePrepack} onCreate={() => openPrepackWork(true)} />
           ) : selected ? (
             <>
               <header className="hu-selected-header">
@@ -4599,6 +4610,7 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
           open={showShiftScopeModal}
           products={shiftScopeProducts}
           selectedIds={workspace.shiftCheckPolicy?.checkProductIds ?? null}
+          shiftMode={workspace.shiftCheckPolicy?.checkShiftMode}
           updatedBy={workspace.shiftCheckPolicy?.checkScopeUpdatedBy}
           updatedAt={workspace.shiftCheckPolicy?.checkScopeUpdatedAt}
           onClose={() => setShowShiftScopeModal(false)}

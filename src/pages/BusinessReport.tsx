@@ -22,6 +22,16 @@ import {
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, ResponsiveContainer, Tooltip as ReTooltip } from 'recharts';
 import dayjs, { Dayjs } from 'dayjs';
 import isBetween from 'dayjs/plugin/isBetween';
+import {
+    applyPlatformCategoryRate,
+    DEFAULT_SHOPEE_FEES,
+    DEFAULT_TIKTOK_FEES,
+    FEE_POLICY_VERSION,
+    migratePlatformCategoryId,
+    normalizePlatformFees,
+    PLATFORM_CATEGORIES,
+    upgradePlatformFeePolicy,
+} from '../lib/platformFeePolicy';
 dayjs.extend(isBetween);
 
 const { Title, Text } = Typography;
@@ -64,118 +74,14 @@ const OPEX_CONFIG_FIELDS = [
     { name: 'monthlyOther', label: 'Chi phí khác', icon: '📦', step: 50000 },
 ] as const;
 
-// Keep these fallbacks aligned with Tools > Platform fees.
-const DEFAULT_SHOPEE_FEES = [
-    { id: 'phiCoDinh', name: 'Phí cố định (Hoa hồng sàn theo Ngành hàng)', type: 'percent', value: 12, icon: '💳', color: '#2563eb', required: true, enabled: true },
-    { id: 'phiThanhToan', name: 'Phí xử lý giao dịch (Phí thanh toán 6%)', type: 'percent', value: 6, icon: '💰', color: '#ea580c', required: true, enabled: true },
-    { id: 'phiHaTang', name: 'Phí hạ tầng sàn Shopee (3.000đ/đơn)', type: 'fixed', value: 3000, icon: '⚙️', color: '#7c3aed', required: true, enabled: true },
-    { id: 'thueGTGT', name: 'Thuế GTGT (Khấu trừ cá nhân 0.96%)', type: 'percent', value: 0.96, icon: '🏛️', color: '#db2777', enabled: true },
-    { id: 'thueTNCN', name: 'Thuế TNCN (Khấu trừ cá nhân 0.54%)', type: 'percent', value: 0.54, icon: '📊', color: '#0891b2', enabled: true },
-    { id: 'affiliate', name: 'Phí Affiliate Shopee', type: 'percent', value: 5, icon: '🤝', color: '#16a34a', enabled: true },
-    { id: 'piShip', name: 'Phí dịch vụ vận chuyển PiShip (2.700đ/đơn)', type: 'fixed', value: 2700, icon: '📦', color: '#059669', enabled: true },
-    { id: 'freeshipXtra', name: 'Gói Freeship Xtra / Freeship Xtra Plus (8%)', type: 'percent', value: 8, icon: '🚚', color: '#16a34a', enabled: false },
-    { id: 'voucherXtra', name: 'Gói Voucher Xtra (Mã giảm giá/Live/Video 5.5%)', type: 'percent', value: 5.5, icon: '🎁', color: '#f59e0b', enabled: false },
-    { id: 'shopeeLive', name: 'Gói Shopee Live / Livestream Extra (4%)', type: 'percent', value: 4, icon: '📹', color: '#ec4899', enabled: false },
-];
-
-const DEFAULT_TIKTOK_FEES = [
-    { id: 'phiGiaoDich', name: 'Phí giao dịch TikTok Shop (6%)', type: 'percent', value: 6, icon: '💰', color: '#ea580c', required: true, enabled: true },
-    { id: 'phiHoaHong', name: 'Phí hoa hồng TikTok Shop', type: 'percent', value: 14, icon: '💳', color: '#2563eb', required: true, enabled: true },
-    { id: 'phiXuLyDon', name: 'Phí xử lý đơn hàng', type: 'fixed', value: 3000, icon: '⚙️', color: '#7c3aed', required: true, enabled: true },
-    { id: 'thueGTGT', name: 'Thuế GTGT (TikTok khấu trừ)', type: 'percent', value: 1, icon: '🏛️', color: '#db2777', enabled: true },
-    { id: 'thueTNCN', name: 'Thuế TNCN (TikTok khấu trừ)', type: 'percent', value: 0.5, icon: '📊', color: '#0891b2', enabled: true },
-    { id: 'affiliate', name: 'Phí Affiliate TikTok', type: 'percent', value: 5, icon: '🤝', color: '#16a34a', enabled: true },
-];
-
-const FEE_POLICY_VERSION = 20260826;
-const PLATFORM_CATEGORY_RATES: Record<'shopee' | 'tiktok', Record<string, number>> = {
-    shopee: {
-        'sp-beauty': 17,
-        'sp-health': 15.5,
-        'sp-pets': 14,
-        'sp-fashion': 12.5,
-        'sp-home': 12,
-        'sp-sports': 11,
-        'sp-baby': 10.5,
-        'sp-groceries': 10,
-        'sp-books': 10,
-        'sp-auto': 9.5,
-        'sp-appliance': 9,
-        'sp-electronics': 8.5,
-        'sp-other': 12,
-    },
-    tiktok: {
-        'tt-health': 12,
-        'tt-beauty': 12,
-        'tt-fashion-women': 12,
-        'tt-fashion-men': 12,
-        'tt-personal-care': 10,
-        'tt-electronics': 6,
-        'tt-tech-accessories': 10,
-        'tt-home': 10,
-        'tt-baby': 10,
-        'tt-food': 10,
-        'tt-other': 14,
-    },
-};
-const PLATFORM_CATEGORY_LABELS: Record<'shopee' | 'tiktok', Record<string, string>> = {
-    shopee: {
-        'sp-beauty': 'Mỹ phẩm & Sắc đẹp',
-        'sp-health': 'Sức khỏe & Y tế (Khẩu trang, TPCN)',
-        'sp-pets': 'Thú cưng & Phụ kiện',
-        'sp-fashion': 'Thời trang & Phụ kiện',
-        'sp-home': 'Nhà cửa & Đời sống',
-        'sp-sports': 'Thể thao & Du lịch',
-        'sp-baby': 'Mẹ & Bé',
-        'sp-groceries': 'Bách hóa online & Thực phẩm',
-        'sp-books': 'Sách & Văn phòng phẩm',
-        'sp-auto': 'Ô tô, Xe máy & Xe đạp',
-        'sp-appliance': 'Thiết bị điện gia dụng',
-        'sp-electronics': 'Thiết bị điện tử & Phụ kiện',
-        'sp-other': 'Ngành hàng khác / Tùy chỉnh',
-    },
-    tiktok: {
-        'tt-health': 'Thực phẩm chức năng & Sức khỏe',
-        'tt-beauty': 'Mỹ phẩm & Sắc đẹp',
-        'tt-fashion-women': 'Thời trang nữ',
-        'tt-fashion-men': 'Thời trang nam',
-        'tt-personal-care': 'Chăm sóc cá nhân & Giặt giũ',
-        'tt-electronics': 'Điện thoại & Máy tính bảng',
-        'tt-tech-accessories': 'Phụ kiện công nghệ',
-        'tt-home': 'Nhà cửa & Đời sống',
-        'tt-baby': 'Mẹ & Bé',
-        'tt-food': 'Thực phẩm & Đồ uống',
-        'tt-other': 'Ngành hàng khác / Tùy chỉnh',
-    },
-};
-const normalizePlatformFees = (savedFees: any[], defaults: any[]) => {
-    const savedById = new Map((Array.isArray(savedFees) ? savedFees : []).map((fee: any) => [fee.id, fee]));
-    return defaults.map((defaultFee: any) => ({
-        ...defaultFee,
-        ...(savedById.get(defaultFee.id) || {}),
-        name: defaultFee.name,
-        type: defaultFee.type,
-        icon: defaultFee.icon,
-        color: defaultFee.color,
-        required: defaultFee.required ?? false,
-        enabled: defaultFee.required ? true : (savedById.get(defaultFee.id)?.enabled ?? defaultFee.enabled ?? true),
-    }));
-};
-const getPlatformCategoryId = (platform: 'shopee' | 'tiktok', value: unknown) => {
-    const aliases: Record<string, string> = {
-        'sp-electronic': 'sp-electronics',
-        'tt-electronic': 'tt-electronics',
-        'tt-accessories': 'tt-tech-accessories',
-    };
-    const id = aliases[String(value || '')] || String(value || '');
-    if (PLATFORM_CATEGORY_RATES[platform][id] !== undefined) return id;
-    return platform === 'shopee' ? 'sp-home' : 'tt-other';
-};
-const applyPlatformCategoryRate = (fees: any[], platform: 'shopee' | 'tiktok', categoryId: string) => {
-    const commissionId = platform === 'shopee' ? 'phiCoDinh' : 'phiHoaHong';
-    const rate = PLATFORM_CATEGORY_RATES[platform][categoryId];
-    return fees.map((fee: any) => fee.id === commissionId ? { ...fee, value: rate } : fee);
-};
+const PLATFORM_CATEGORY_RATES = {
+    shopee: Object.fromEntries(PLATFORM_CATEGORIES.shopee.map((category) => [category.id, category.feeRate])),
+    tiktok: Object.fromEntries(PLATFORM_CATEGORIES.tiktok.map((category) => [category.id, category.feeRate])),
+} as Record<'shopee' | 'tiktok', Record<string, number>>;
+const PLATFORM_CATEGORY_LABELS = {
+    shopee: Object.fromEntries(PLATFORM_CATEGORIES.shopee.map((category) => [category.id, category.name])),
+    tiktok: Object.fromEntries(PLATFORM_CATEGORIES.tiktok.map((category) => [category.id, category.name])),
+} as Record<'shopee' | 'tiktok', Record<string, string>>;
 
 // ============================================
 // COMPONENT
@@ -881,8 +787,8 @@ export default function BusinessReportPage() {
                 ? calculatorInputsRes.data
                 : {};
             setCalculatorInputsConfig(calculatorInputs);
-            const shopeeCategoryId = getPlatformCategoryId('shopee', calculatorInputs.categories?.shopee);
-            const tiktokCategoryId = getPlatformCategoryId('tiktok', calculatorInputs.categories?.tiktok);
+            const shopeeCategoryId = migratePlatformCategoryId('shopee', calculatorInputs.categories?.shopee);
+            const tiktokCategoryId = migratePlatformCategoryId('tiktok', calculatorInputs.categories?.tiktok);
             setPlatformCategoryIds({ shopee: shopeeCategoryId, tiktok: tiktokCategoryId });
             const hasCurrentFeePolicy = calculatorInputs.feePolicyVersion === FEE_POLICY_VERSION;
             const normalizedShopeeFees = shopeeFeesRes.success && Array.isArray(shopeeFeesRes.data)
@@ -892,16 +798,12 @@ export default function BusinessReportPage() {
                 ? normalizePlatformFees(tiktokFeesRes.data, DEFAULT_TIKTOK_FEES)
                 : DEFAULT_TIKTOK_FEES;
             const nextShopeeFees = applyPlatformCategoryRate(
-                hasCurrentFeePolicy
-                    ? normalizedShopeeFees
-                    : normalizedShopeeFees.map((fee: any) => fee.id === 'affiliate' ? { ...fee, value: 5, enabled: true } : fee),
+                upgradePlatformFeePolicy(normalizedShopeeFees, DEFAULT_SHOPEE_FEES, calculatorInputs.feePolicyVersion),
                 'shopee',
                 shopeeCategoryId,
             );
             const nextTiktokFees = applyPlatformCategoryRate(
-                hasCurrentFeePolicy
-                    ? normalizedTiktokFees
-                    : normalizedTiktokFees.map((fee: any) => fee.id === 'affiliate' ? { ...fee, value: 5, enabled: true } : fee),
+                upgradePlatformFeePolicy(normalizedTiktokFees, DEFAULT_TIKTOK_FEES, calculatorInputs.feePolicyVersion),
                 'tiktok',
                 tiktokCategoryId,
             );

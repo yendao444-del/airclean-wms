@@ -33,6 +33,9 @@ export interface PackingLot {
     createdAt?: string;
     lastCheckedAt?: string;
     updatedAt: string;
+    /** Assignment owner copied into the read-only inventory snapshot for filters. */
+    packerUsername?: string;
+    packerName?: string;
 }
 export interface PackingSource {
     id: string;

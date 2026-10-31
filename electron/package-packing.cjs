@@ -296,6 +296,37 @@ function createPackagePackingService({ getDb, getSession, recordTransfers }) {
         }
         if (row.revision !== payload.revision) throw new Error('Công việc đã thay đổi trên máy khác. Vui lòng tải lại.');
         if (row.status === 'deleted') throw new Error('Công việc đã xóa. Vui lòng tải lại.');
+        if (action === 'edit') {
+          if (actor.role !== 'admin') throw new Error('Chỉ admin được sửa mục tiêu đóng gói.');
+          if (row.status !== 'draft' || Number(row.transferredQty || 0) !== 0 || inventory.lots.some(lot => lot.assignmentId === row.id)) {
+            throw new Error('Chỉ được sửa mục tiêu chưa gửi xác nhận và chưa chuyển hàng sang combo.');
+          }
+          const nextTarget = quantity(payload.requestedQty, 1);
+          const nextCode = String(payload.code ?? row.code).trim();
+          if (!nextCode || nextCode.length > 80) throw new Error('Tên hoặc mã combo không hợp lệ.');
+          const rawComponents = payload.components ?? row.components;
+          if (!Array.isArray(rawComponents) || !rawComponents.length || rawComponents.length > 20) throw new Error('Chọn từ 1 đến 20 thành phần.');
+          const components = rawComponents.map(item => ({
+            sku: String(item?.sku || '').trim(), name: String(item?.name || item?.sku || '').trim(),
+            unit: String(item?.unit || row.components.find(component => component.sku === item?.sku)?.unit || 'gói').trim(),
+            quantity: quantity(item?.quantity, 1),
+          }));
+          if (components.some(item => !item.sku || !item.unit) || new Set(components.map(item => item.sku)).size !== components.length) throw new Error('SKU thành phần bị trống hoặc trùng.');
+          let packer = null;
+          if (payload.packerId != null) {
+            packer = await tx.user.findUnique({ where: { id: Number(payload.packerId) } });
+            if (!packer || packer.status !== 'active' || packer.role === 'admin') throw new Error('Nhân viên thực hiện không còn hoạt động.');
+          }
+          if (nextTarget === row.requestedQty && nextCode === row.code && JSON.stringify(components) === JSON.stringify(row.components) && (!packer || packer.username === row.packerUsername)) return row;
+          row.code = nextCode;
+          row.requestedQty = nextTarget;
+          row.components = components;
+          if (packer) { row.packerUsername = packer.username; row.packerName = packer.fullName || packer.username; }
+          row.draftQty = null;
+          row.events.push({ action: 'edit', actor: actor.username, quantity: nextTarget, at: new Date().toISOString() });
+          row.revision += 1;
+          return row;
+        }
         if (action === 'draft' || action === 'submit') {
           if (row.status !== 'draft') throw new Error('Công việc đã gửi xác nhận.');
           const value = payload.quantity === null && action === 'draft' ? null : quantity(payload.quantity);

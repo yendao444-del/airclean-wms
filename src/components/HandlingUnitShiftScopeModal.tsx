@@ -2,10 +2,12 @@ import { Alert, Button, Checkbox, Empty, Input, Modal, Radio, Space, Tag, messag
 import { useEffect, useMemo, useState } from "react";
 
 export type ShiftScopeProduct = { productId: number; name: string; openedCount: number };
+export type ShiftCheckMode = "morning" | "afternoon" | "both";
 type Props = {
   open: boolean;
   products: readonly ShiftScopeProduct[];
   selectedIds: readonly number[] | null;
+  shiftMode?: ShiftCheckMode;
   updatedBy?: string;
   updatedAt?: string;
   onClose: () => void;
@@ -16,15 +18,17 @@ const searchText = (value: string) => value.normalize("NFD").replace(/[̀-ͯ]/g,
 // Admin-only: choose which products the end-of-shift count (and its fines) covers.
 export default function HandlingUnitShiftScopeModal(props: Props) {
   const [mode, setMode] = useState<"all" | "selected">("all");
+  const [shiftMode, setShiftMode] = useState<ShiftCheckMode>("both");
   const [checked, setChecked] = useState<number[]>([]);
   const [search, setSearch] = useState("");
   const [saving, setSaving] = useState(false);
   useEffect(() => {
     if (!props.open) return;
     setMode(props.selectedIds ? "selected" : "all");
+    setShiftMode(props.shiftMode || "both");
     setChecked(props.selectedIds ? [...props.selectedIds] : []);
     setSearch("");
-  }, [props.open, props.selectedIds]);
+  }, [props.open, props.selectedIds, props.shiftMode]);
   const visible = useMemo(() => {
     const term = searchText(search).trim();
     return props.products.filter(product => !term || searchText(product.name).includes(term));
@@ -36,9 +40,9 @@ export default function HandlingUnitShiftScopeModal(props: Props) {
     if (mode === "selected" && checked.length === 0) { message.warning("Hãy tick ít nhất một sản phẩm cần kiểm."); return; }
     setSaving(true);
     try {
-      const response = await window.electronAPI?.handlingUnits?.setShiftCheckScope({ productIds: mode === "all" ? null : checked });
+      const response = await window.electronAPI?.handlingUnits?.setShiftCheckScope({ productIds: mode === "all" ? null : checked, shiftMode });
       if (!response?.success) throw new Error(response?.error || "Không lưu được danh sách sản phẩm cần kiểm.");
-      message.success(mode === "all" ? "Kiểm cuối ca áp dụng cho toàn bộ sản phẩm." : `Kiểm cuối ca chỉ áp dụng cho ${checked.length} sản phẩm đã chọn.`);
+      message.success(`Đã lưu: ${shiftMode === "morning" ? "kiểm buổi sáng" : shiftMode === "afternoon" ? "kiểm buổi chiều" : "kiểm cả buổi sáng và buổi chiều"}.`);
       props.onSaved();
       props.onClose();
     } catch (error: any) {
@@ -47,9 +51,19 @@ export default function HandlingUnitShiftScopeModal(props: Props) {
       setSaving(false);
     }
   };
-  return <Modal open={props.open} title="Sản phẩm cần kiểm cuối ca" onCancel={() => !saving && props.onClose()}
+  return <Modal open={props.open} title="Cài đặt kiểm cuối ca" onCancel={() => !saving && props.onClose()}
     onOk={save} okText="Lưu" cancelText="Huỷ" confirmLoading={saving} width={560} destroyOnHidden>
     <Space direction="vertical" size={12} style={{ width: "100%" }}>
+      <div>
+        <div style={{ marginBottom: 6, fontWeight: 600 }}>Buổi cần kiểm</div>
+        <Radio.Group value={shiftMode} onChange={event => setShiftMode(event.target.value)} disabled={saving}>
+          <Space direction="vertical" size={4}>
+            <Radio value="morning">Buổi sáng (hạn 12:30)</Radio>
+            <Radio value="afternoon">Buổi chiều (hạn 19:00)</Radio>
+            <Radio value="both">Cả buổi sáng và buổi chiều</Radio>
+          </Space>
+        </Radio.Group>
+      </div>
       <Radio.Group value={mode} onChange={event => setMode(event.target.value)} disabled={saving}>
         <Radio value="all">Kiểm toàn bộ sản phẩm</Radio>
         <Radio value="selected">Chỉ kiểm sản phẩm được tick</Radio>

@@ -8,6 +8,11 @@ const SHIFTS = {
   evening: { label: "ca chiều", deadline: "19:00" },
 };
 const SHIFT_KEYS = Object.keys(SHIFTS);
+const SHIFT_MODES = {
+  morning: ["midday"],
+  afternoon: ["evening"],
+  both: SHIFT_KEYS,
+};
 const packing = require("./package-packing.cjs");
 
 function dayKey(value) {
@@ -31,9 +36,18 @@ function nextDay(date) {
 function isRecord(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
-function requiredShiftsFor(value) {
+function normalizeRequiredShifts(value) {
+  const allowed = Array.isArray(value) ? value.filter(shift => SHIFT_KEYS.includes(shift)) : [];
+  return [...new Set(allowed)];
+}
+function requiredShiftsFor(value, allowedShifts = SHIFT_KEYS) {
   const date = dayKey(value);
-  return SHIFT_KEYS.filter(shift => new Date(value) <= deadlineFor(date, shift));
+  const allowed = normalizeRequiredShifts(allowedShifts);
+  // A single selected checkpoint is a recurring daily checkpoint. Keep it on
+  // the duty so an afternoon movement in "morning" mode carries to tomorrow
+  // instead of silently becoming untracked after today's deadline.
+  if (allowed.length === 1) return allowed;
+  return SHIFT_KEYS.filter(shift => allowed.includes(shift) && new Date(value) <= deadlineFor(date, shift));
 }
 function normalizeUnit(unit, date) {
   if (!isRecord(unit) || !Number.isFinite(Date.parse(unit.requiredAt))) {
@@ -65,10 +79,10 @@ function parseLedger(row) {
   }
   return data;
 }
-function ensureDuty(ledger, date, code, timestamp) {
+function ensureDuty(ledger, date, code, timestamp, requiredShifts) {
   const day = ledger.days[date] ||= { assignedTo: assigneeFor(date), units: {} };
   const unit = day.units[code] ||= {
-    requiredAt: timestamp, requiredShifts: requiredShiftsFor(timestamp),
+    requiredAt: timestamp, requiredShifts: requiredShifts === undefined ? requiredShiftsFor(timestamp) : [...requiredShifts],
     shiftChecks: { midday: null, evening: null }, shiftRequiredAt: {}, missedShifts: {},
   };
   day.units[code] = normalizeUnit(unit, date);
@@ -112,7 +126,7 @@ function carryDuties(ledger, now) {
       // daily observation is removed by observeActiveUnits instead.
       if (!unit.pendingCheck && lastCountAt(ledger, code) >= Date.parse(requiredAt)) continue;
       const next = nextDay(date);
-      const nextUnit = ensureDuty(ledger, next, code, new Date(`${next}T00:00:00+07:00`).toISOString());
+      const nextUnit = ensureDuty(ledger, next, code, new Date(`${next}T00:00:00+07:00`).toISOString(), unit.requiredShifts);
       nextUnit.activityRequiredAt = requiredAt;
       if (unit.pendingCheck) nextUnit.pendingCheck = true;
       if (unit.requiresPhysicalCheck) nextUnit.requiresPhysicalCheck = true;
@@ -137,7 +151,10 @@ function resolveCode(ledger, code, timestamp, actor, resolution) {
     unit.resolution = resolution;
   }
 }
-function applyEvents(ledger, entries) {
+function applyEvents(ledger, entries, options = {}) {
+  const requirementsFor = typeof options.requiredShiftsForAt === "function"
+    ? options.requiredShiftsForAt
+    : timestamp => requiredShiftsFor(timestamp, options.requiredShifts || SHIFT_KEYS);
   for (const entry of [...entries].sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt))) {
     const code = String(entry?.unitId || "").trim().toUpperCase();
     const date = dayKey(entry.createdAt);
@@ -152,10 +169,11 @@ function applyEvents(ledger, entries) {
     if (autoEmpty || syncEmpty || autoReturnEmpty || type === "Xóa kiện") {
       resolveCode(ledger, code, timestamp, String(entry.actor || "System"), autoReturnEmpty ? "auto-return-merged" : syncEmpty ? "software-sync-empty" : autoEmpty ? "auto-empty-tmdt" : "deleted");
     } else if (isRequired(entry)) {
-      const unit = ensureDuty(ledger, date, code, timestamp);
+      const requiredShifts = requirementsFor(timestamp);
+      const unit = ensureDuty(ledger, date, code, timestamp, requiredShifts);
       unit.activityRequiredAt = timestamp;
       if (entry.requiresPhysicalCheck === true) unit.requiresPhysicalCheck = true;
-      for (const shift of requiredShiftsFor(timestamp)) {
+      for (const shift of requiredShifts) {
         if (!unit.requiredShifts.includes(shift)) unit.requiredShifts.push(shift);
         unit.shiftRequiredAt[shift] = timestamp;
         unit.shiftChecks[shift] = null;
@@ -198,7 +216,8 @@ async function recordShiftEvents(tx, entries) {
   if (!entries.some(relevantEvent)) return;
   await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${LEDGER_KEY}))`;
   const ledger = parseLedger(await tx.appConfig.findUnique({ where: { key: LEDGER_KEY } }));
-  applyEvents(ledger, entries);
+  const scope = await readShiftScope(tx);
+  applyEvents(ledger, entries, { requiredShiftsForAt: timestamp => requiredShiftsAt(scope, timestamp) });
   const value = JSON.stringify(ledger);
   await tx.appConfig.upsert({ where: { key: LEDGER_KEY }, create: { key: LEDGER_KEY, value }, update: { value } });
 }
@@ -210,7 +229,7 @@ function lastCountAt(ledger, code) {
 // Observe pending counts, and retain only duties backed by an actual movement.
 // Legacy daily observations have no activity marker; recover evidence from the
 // movement buffer, without replaying checks or overwriting historical fines.
-async function observeActiveUnits(tx, ledger, now) {
+async function observeActiveUnits(tx, ledger, now, configuredShifts = SHIFT_KEYS) {
   if (dayKey(now) < EFFECTIVE_DATE) return;
   // An explicit loose repack proves physical opening even at its new full
   // quantity; legacy full rows with only a stale opened status stay excluded.
@@ -267,10 +286,10 @@ async function observeActiveUnits(tx, ledger, now) {
   for (const unit of activeUnits) {
     if (unit.status !== 'pending_check') continue;
     const code = unit.code.toUpperCase();
-    const duty = ensureDuty(ledger, date, code, new Date(now).toISOString());
+    const duty = ensureDuty(ledger, date, code, new Date(now).toISOString(), configuredShifts);
     if (!duty.requiredShifts.length) {
-      duty.requiredShifts = requiredShiftsFor(now);
-      if (!duty.requiredShifts.length) duty.requiredShifts = [currentShift(now)];
+      duty.requiredShifts = requiredShiftsFor(now, configuredShifts);
+      if (!duty.requiredShifts.length) duty.requiredShifts = [...normalizeRequiredShifts(configuredShifts)];
       for (const shift of duty.requiredShifts) duty.shiftRequiredAt[shift] = new Date(now).toISOString();
     }
     duty.pendingCheck = true;
@@ -288,24 +307,42 @@ function parseScope(row) {
     && (entry.productIds === null || Array.isArray(entry.productIds)));
   return { history: history.sort((a, b) => Date.parse(a.effectiveAt) - Date.parse(b.effectiveAt)) };
 }
-function scopeAt(scope, at) {
+function latestScopeEntry(scope, at) {
   let entry = null;
   for (const candidate of scope.history) if (Date.parse(candidate.effectiveAt) <= new Date(at).getTime()) entry = candidate;
+  return entry;
+}
+function scopeAt(scope, at) {
+  const entry = latestScopeEntry(scope, at);
   return entry?.productIds ? new Set(entry.productIds.map(Number)) : null;
+}
+function configuredShiftsAt(scope, at) {
+  const entry = latestScopeEntry(scope, at);
+  return SHIFT_MODES[entry?.shiftMode] ? SHIFT_MODES[entry.shiftMode] : SHIFT_KEYS;
+}
+function requiredShiftsAt(scope, at) {
+  const entry = latestScopeEntry(scope, at);
+  const configured = configuredShiftsAt(scope, at);
+  const due = requiredShiftsFor(at, configured);
+  // An explicitly saved schedule is recurring. If today's selected deadline
+  // has passed, keep the duty so carry-over places it on the next day.
+  return due.length || !SHIFT_MODES[entry?.shiftMode] ? due : [...configured];
 }
 async function readShiftScope(tx) {
   return parseScope(await tx.appConfig.findUnique({ where: { key: SCOPE_KEY } }));
 }
-async function saveShiftScope(tx, productIds, actor, now = new Date()) {
+async function saveShiftScope(tx, productIds, actor, now = new Date(), shiftMode = "both") {
   if (productIds !== null && (!Array.isArray(productIds)
     || productIds.some(id => !Number.isSafeInteger(Number(id)) || Number(id) <= 0))) {
     throw new Error("Danh sách sản phẩm cần kiểm không hợp lệ.");
   }
+  if (!SHIFT_MODES[shiftMode]) throw new Error("Ca kiểm cuối ca không hợp lệ.");
   await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${SCOPE_KEY}))`;
   const scope = await readShiftScope(tx);
   const entry = {
     effectiveAt: new Date(now).toISOString(),
     productIds: productIds === null ? null : [...new Set(productIds.map(Number))].sort((a, b) => a - b),
+    shiftMode,
     updatedBy: String(actor || ""),
   };
   const value = JSON.stringify({ history: [...scope.history, entry].slice(-200) });
@@ -341,7 +378,8 @@ function policySnapshot(ledger, now = new Date(), inScope = () => true, scope = 
     if (isOutstanding(unit, shift) && inScope(code, now)) outstanding.push({ code, requiredAt: unit.shiftRequiredAt[shift], date,
       ...(unit.requiresPhysicalCheck ? { requiresPhysicalCheck: true } : {}) });
   }
-  const latestScope = scope.history.filter(entry => Date.parse(entry.effectiveAt) <= new Date(now).getTime()).at(-1);
+  const latestScope = latestScopeEntry(scope, now);
+  const shiftMode = SHIFT_MODES[latestScope?.shiftMode] ? latestScope.shiftMode : "both";
   return {
     date, effectiveDate: EFFECTIVE_DATE, fineAmount: FINE_AMOUNT,
     assignedTo: assigneeFor(date), nextAssignedTo: assigneeFor(nextDay(date)),
@@ -350,6 +388,7 @@ function policySnapshot(ledger, now = new Date(), inScope = () => true, scope = 
     deadlines: Object.fromEntries(SHIFT_KEYS.map(key => [key, deadlineFor(date, key).toISOString()])),
     outstanding, trackedCodes: [...trackedCodes], todayRemaining: outstanding.length,
     checkProductIds: latestScope?.productIds ?? null,
+    checkShiftMode: shiftMode,
     checkScopeUpdatedBy: latestScope?.updatedBy || "",
     checkScopeUpdatedAt: latestScope?.effectiveAt || "",
   };
@@ -357,8 +396,8 @@ function policySnapshot(ledger, now = new Date(), inScope = () => true, scope = 
 async function readShiftPolicy(tx, now = new Date()) {
   const ledger = parseLedger(await tx.appConfig.findUnique({ where: { key: LEDGER_KEY } }));
   carryDuties(ledger, now);
-  await observeActiveUnits(tx, ledger, now);
   const scope = await readShiftScope(tx);
+  await observeActiveUnits(tx, ledger, now, configuredShiftsAt(scope, now));
   const productIds = scopeAt(scope, now)
     ? await productIdsByCode(tx, Object.keys(ledger.days[dayKey(now)]?.units || {}))
     : new Map();
@@ -412,7 +451,8 @@ async function reconcileShiftFines(prisma, { now = new Date() } = {}) {
       const ledgerRow = await tx.appConfig.findUnique({ where: { key: LEDGER_KEY } });
       const ledger = parseLedger(ledgerRow);
       carryDuties(ledger, now);
-      await observeActiveUnits(tx, ledger, now);
+      const scope = await readShiftScope(tx);
+      await observeActiveUnits(tx, ledger, now, configuredShiftsAt(scope, now));
       buildFines(ledger, {}, now); // Latch deadline facts even without payroll profiles.
       const value = JSON.stringify(ledger);
       if (ledgerRow?.value !== value) await tx.appConfig.upsert({ where: { key: LEDGER_KEY }, create: { key: LEDGER_KEY, value }, update: { value } });
@@ -439,7 +479,6 @@ async function reconcileShiftFines(prisma, { now = new Date() } = {}) {
       for (const audit of data.fineAuditLog || []) if (audit.action === "delete" && audit.before?.id) deletedIds.add(String(audit.before.id));
       const existing = data.extraFines || [];
       const ids = new Set(existing.map(fine => String(fine.id)));
-      const scope = await readShiftScope(tx);
       const missedCodes = scope.history.some(entry => entry.productIds)
         ? Object.values(ledger.days).flatMap(day => Object.entries(day.units)
           .filter(([, raw]) => Object.keys(raw.missedShifts || {}).length).map(([code]) => code))
@@ -468,4 +507,4 @@ async function reconcileShiftFines(prisma, { now = new Date() } = {}) {
     throw error;
   }
 }
-module.exports = { LEDGER_KEY, SCOPE_KEY, readShiftScope, saveShiftScope, scopeAt, scopeFilter, EFFECTIVE_DATE, FINE_AMOUNT, SHIFTS, assigneeFor, deadlineFor, shiftForTimestamp, currentShift, dayKey, applyEvents, policySnapshot, recordShiftEvents, readShiftPolicy, buildFines, reconcileShiftFines, isHandlingUnitShiftFine };
+module.exports = { LEDGER_KEY, SCOPE_KEY, readShiftScope, saveShiftScope, scopeAt, requiredShiftsAt, configuredShiftsAt, scopeFilter, EFFECTIVE_DATE, FINE_AMOUNT, SHIFTS, SHIFT_MODES, assigneeFor, deadlineFor, shiftForTimestamp, currentShift, dayKey, applyEvents, policySnapshot, recordShiftEvents, readShiftPolicy, buildFines, reconcileShiftFines, isHandlingUnitShiftFine };

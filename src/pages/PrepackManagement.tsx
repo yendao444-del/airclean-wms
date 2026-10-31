@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { Alert, Button, DatePicker, Empty, Form, Input, InputNumber, Select, Spin, message } from 'antd';
-import { CalendarOutlined, CheckOutlined, DeleteOutlined, DownOutlined, FileTextOutlined, MinusCircleOutlined, PlusOutlined } from '@ant-design/icons';
+import { CalendarOutlined, CheckOutlined, DeleteOutlined, DownOutlined, EditOutlined, FileTextOutlined, MinusCircleOutlined, PlusOutlined } from '@ant-design/icons';
 import { CaretUpDown, Circle, Info, PaperPlaneTilt } from '@phosphor-icons/react';
 import dayjs from 'dayjs';
 import { useAuth } from '../contexts/AuthContext';
@@ -18,6 +18,7 @@ const actionLabels: Record<string, string> = { created: 'Giao việc', draft: 'L
 
 export default function PrepackManagement({ view = 'report', createRequest = 0, onCreateHandled = () => {}, sourceUnits = [], productSkus }: Props) {
     const { user, actualUser, isRolePreview } = useAuth();
+    const isAdmin = (actualUser || user)?.role === 'admin';
     const isManager = ['admin', 'manager'].includes((actualUser || user)?.role || '');
     const canCreate = canCreatePackagePacking(user?.role, isRolePreview);
     const [date, setDate] = useState(today);
@@ -31,6 +32,8 @@ export default function PrepackManagement({ view = 'report', createRequest = 0, 
     const [createOpen, setCreateOpen] = useState(false);
     const [detailId, setDetailId] = useState<string | null>(null);
     const [deleteRow, setDeleteRow] = useState<PackingAssignment | null>(null);
+    const [editTargetRow, setEditTargetRow] = useState<PackingAssignment | null>(null);
+    const [editForm] = Form.useForm();
     const [form] = Form.useForm();
     const request = useRef(0);
     const createKey = useRef('');
@@ -72,22 +75,31 @@ export default function PrepackManagement({ view = 'report', createRequest = 0, 
         : `Nhân viên ${names.get(selected) || 'đã chọn'} chưa có công việc cho SKU đang chọn.`;
     const detail = rows.find(row => row.id === detailId);
     const amount = (row: PackingAssignment) => row.status === 'draft' ? (Object.prototype.hasOwnProperty.call(drafts, row.id) ? drafts[row.id] : row.draftQty) : row.reportedQty;
-    const update = async (row: PackingAssignment, action: 'draft' | 'submit' | 'accept' | 'return' | 'delete') => {
+    const update = async (row: PackingAssignment, action: 'draft' | 'submit' | 'accept' | 'return' | 'delete' | 'edit', payload: Record<string, unknown> = {}) => {
         if (mutationInFlight.current || !canWrite) return false;
         mutationInFlight.current = true;
         const generation = request.current;
         setBusy(true);
         try {
-            const result = await window.electronAPI.packagePacking.update({ workDate: action === 'delete' ? row.workDate : date, id: row.id, revision: row.revision, action, quantity: amount(row) });
+            const result = await window.electronAPI.packagePacking.update({ workDate: action === 'delete' ? row.workDate : date, id: row.id, revision: row.revision, action, quantity: amount(row), ...payload });
             if (!result.success || !result.data) throw new Error(result.error || 'Không thể cập nhật.');
             if (generation !== request.current) return false;
             setRows(current => current.map(item => item.id === row.id ? result.data! : item));
             setDrafts(current => { const next = { ...current }; delete next[row.id]; return next; });
             if (action === 'delete') setDetailId(current => current === row.id ? null : current);
+            if (action === 'edit') { setEditTargetRow(null); editForm.resetFields(); }
             message.success(action === 'delete' ? 'Đã xóa công việc chưa gửi. Lịch sử được giữ lại, tồn kho không đổi.' : 'Đã cập nhật công việc đóng gói.');
             return true;
         } catch (err: any) { message.error(err.message); if (action === 'delete') { setDeleteRow(null); void load(); } return false; }
         finally { mutationInFlight.current = false; setBusy(false); }
+    };
+    const openEditTarget = (row: PackingAssignment) => {
+        setEditTargetRow(row);
+        editForm.setFieldsValue({ code: row.code, packerId: employees.find(employee => employee.username === row.packerUsername)?.id, requestedQty: row.requestedQty, components: row.components.map(component => ({ sku: component.sku, quantity: component.quantity })) });
+    };
+    const saveEditTarget = async (values: { code: string; packerId?: number; requestedQty: number; components: Array<{ sku: string; quantity: number }> }) => {
+        if (!editTargetRow) return;
+        await update(editTargetRow, 'edit', { ...values, components: values.components.map(component => ({ ...component, unit: skuOptions.find(source => source.skuName === component.sku)?.unitName || 'gói' })) });
     };
     const create = async (values: any) => {
         if (mutationInFlight.current || !canWrite) return;
@@ -109,7 +121,7 @@ export default function PrepackManagement({ view = 'report', createRequest = 0, 
                 <td><button className="packing-code" onClick={() => setDetailId(row.id)} aria-label={`Chi tiết ${row.code}`}><strong>{row.code}</strong></button><small>{composition(row)}</small></td><td><span>Từ kiện xử lý: FIFO tự động</span><small>{value ?? 0} combo = {row.components.map(c => `${(value ?? 0) * c.quantity} ${c.unit.toLowerCase()} ${color(c.sku)}`).join(' + ')}</small></td><td>{row.requestedQty} combo</td>
                 <td><div className="packing-quantity"><InputNumber aria-label={`Đã đóng ${row.code}`} value={value} min={0} max={100000} precision={0} readOnly={row.status !== 'draft' || !canWrite || busy} onChange={next => setDrafts(current => ({ ...current, [row.id]: next === null ? null : Number(next) }))} />{(row.status !== 'draft' || !canWrite || busy) && <CaretUpDown className="packing-readonly-arrows" size={18} aria-hidden />}</div></td>
                 <td><button type="button" className={`packing-status ${row.status}`} aria-label={`${row.status === 'ready' ? 'Sẵn sàng' : row.status === 'submitted' ? 'Chờ xác nhận' : 'Đang đóng'}: xem chi tiết ${row.code}`} onClick={() => setDetailId(row.id)}><Circle size={10} weight="fill" aria-hidden />{row.status === 'ready' ? 'Sẵn sàng' : row.status === 'submitted' ? 'Chờ xác nhận' : 'Đang đóng'}</button></td>
-                <td><div className="packing-row-actions">{row.status === 'draft' ? <Button className="packing-submit" icon={<PaperPlaneTilt size={20} />} loading={busy} disabled={!canWrite || busy || value === null || !Number.isSafeInteger(value) || Number(value) < 0} onClick={() => void update(row, 'submit')}>Gửi xác nhận</Button> : row.status === 'submitted' ? <Button className="packing-sent" icon={<CheckOutlined />} disabled>Đã gửi</Button> : <Button className="packing-detail" icon={<FileTextOutlined />} onClick={() => setDetailId(row.id)}>Xem chi tiết</Button>}
+                <td><div className="packing-row-actions">{isAdmin && row.status === 'draft' && <Button className="packing-edit-target" icon={<EditOutlined />} disabled={!canWrite || busy} onClick={() => openEditTarget(row)}>Sửa mục tiêu</Button>}{row.status === 'draft' ? <Button className="packing-submit" icon={<PaperPlaneTilt size={20} />} loading={busy} disabled={!canWrite || busy || value === null || !Number.isSafeInteger(value) || Number(value) < 0} onClick={() => void update(row, 'submit')}>Gửi xác nhận</Button> : row.status === 'submitted' ? <Button className="packing-sent" icon={<CheckOutlined />} disabled>Đã gửi</Button> : <Button className="packing-detail" icon={<FileTextOutlined />} onClick={() => setDetailId(row.id)}>Xem chi tiết</Button>}
                   {canWrite && canDeletePackingDraft(row) && <Button danger type="text" className="packing-delete" icon={<DeleteOutlined />} disabled={busy} aria-label={`Xóa công việc ${row.code}`} onClick={() => setDeleteRow(row)}>Xóa</Button>}
                 </div></td>
             </tr>; })}</tbody></table></div><div className="packing-note"><Info size={22} weight="bold" /> Đóng gói sẵn không làm giảm tổng tồn kho.</div>
@@ -121,6 +133,16 @@ export default function PrepackManagement({ view = 'report', createRequest = 0, 
           <p>Xóa công việc <strong>{deleteRow?.code}</strong> của <strong>{deleteRow?.packerName}</strong>?</p>
           <p>Công việc chưa gửi xác nhận sẽ được bỏ khỏi danh sách đang làm. Tồn kho không thay đổi; lịch sử thao tác vẫn được giữ lại.</p>
         </Modal>
+        <Modal title="Sửa mục tiêu đóng gói" open={!!editTargetRow} onCancel={() => { if (!busy) setEditTargetRow(null); }}
+          onOk={() => editForm.submit()} okText="Lưu mục tiêu" cancelText="Hủy" confirmLoading={busy} okButtonProps={{ disabled: !canWrite }}>
+          <p>Chỉ admin được sửa mục tiêu chưa gửi xác nhận. Tồn kho chỉ thay đổi khi nhân viên gửi số đã đóng.</p>
+          <Form form={editForm} layout="vertical" onFinish={saveEditTarget}>
+            <Form.Item name="code" label="Tên / mã combo" rules={[{ required: true, whitespace: true }]}><Input maxLength={80} /></Form.Item>
+            <Form.Item name="packerId" label="Nhân viên thực hiện" rules={[{ required: true, message: 'Chọn nhân viên.' }]}><Select showSearch optionFilterProp="label" options={employees.map(employee => ({ value: employee.id, label: employee.fullName }))} /></Form.Item>
+            <Form.Item name="requestedQty" label="Số combo mục tiêu" rules={[{ required: true }]}><InputNumber min={1} max={100000} precision={0} style={{ width: '100%' }} /></Form.Item>
+            <Form.List name="components">{(fields, { add, remove }) => <>{fields.map(field => <div className="packing-component-form" key={field.key}><Form.Item name={[field.name, 'sku']} label="SKU / màu" rules={[{ required: true }]}><Select showSearch optionFilterProp="label" options={skuOptions.map(source => ({ value: source.skuName, label: source.skuName }))} /></Form.Item><Form.Item name={[field.name, 'quantity']} label="Số gói / combo" rules={[{ required: true }]}><InputNumber min={1} max={100000} precision={0} /></Form.Item><Button type="text" aria-label="Bỏ thành phần" icon={<MinusCircleOutlined />} onClick={() => remove(field.name)} /></div>)}<Button icon={<PlusOutlined />} onClick={() => add({ quantity: 1 })}>Thêm thành phần</Button></>}</Form.List>
+          </Form>
+        </Modal>
         <Modal title={isManager ? 'Giao việc đóng gói sẵn' : 'Tạo đóng gói sẵn'} open={createOpen} onCancel={() => { if (!busy) setCreateOpen(false); }} onOk={() => form.submit()} okText={isManager ? 'Giao việc' : 'Tạo đóng gói'} cancelText="Hủy" confirmLoading={busy} okButtonProps={{ disabled: !canWrite }} width={640}>
           <Form form={form} layout="vertical" onFinish={create} initialValues={{ requestedQty: 20, components: [{ quantity: 5 }] }}>
             <Form.Item name="code" label="Tên / mã combo" rules={[{ required: true, whitespace: true }]}><Input placeholder="COMBO-MIX-10" maxLength={80} /></Form.Item>
@@ -128,6 +150,6 @@ export default function PrepackManagement({ view = 'report', createRequest = 0, 
             <Form.Item name="requestedQty" label={isManager ? 'Số combo được giao cho mỗi nhân viên' : 'Số combo dự kiến đóng'} rules={[{ required: true }]}><InputNumber min={1} max={100000} precision={0} /></Form.Item>
             <Form.List name="components">{(fields, { add, remove }) => <>{fields.map(field => <div className="packing-component-form" key={field.key}><Form.Item name={[field.name, 'sku']} label="SKU / màu" rules={[{ required: true, message: 'Chọn SKU hoặc màu.' }]}><Select showSearch optionFilterProp="label" options={skuOptions.map(s => ({ value: s.skuName, label: `${s.skuName} · Lấy kiện dở trước, tiếp đến kiện nguyên` }))} /></Form.Item><Form.Item name={[field.name, 'quantity']} label="Số gói / combo" rules={[{ required: true }]}><InputNumber min={1} max={100000} precision={0} /></Form.Item><Button type="text" aria-label="Bỏ thành phần" icon={<MinusCircleOutlined />} onClick={() => remove(field.name)} /></div>)}<Button icon={<PlusOutlined />} onClick={() => add({ quantity: 5 })}>Thêm thành phần</Button></>}</Form.List>
         </Form></Modal>
-        <Modal title={detail?.code || 'Chi tiết đóng gói'} open={!!detail} onCancel={() => setDetailId(null)} footer={<Button onClick={() => setDetailId(null)}>Đóng</Button>}>{detail && <><p>{composition(detail)}</p><p>Nguồn kiện: Hệ thống tự phân bổ FIFO khi xác nhận số đã đóng.</p><p>Nhân viên: {detail.packerName}</p><p>Được giao: {detail.requestedQty} combo · Đã đóng: {amount(detail) ?? 0} combo</p>{detail.status === 'draft' && <Button disabled={!canWrite || busy} onClick={() => void update(detail, 'draft')}>Lưu số đã đóng</Button>}{detail.status === 'submitted' && isManager && <div className="packing-review"><Button disabled={!canWrite || busy} onClick={() => void update(detail, 'return')}>Trả lại</Button><Button type="primary" disabled={!canWrite || busy} onClick={() => void update(detail, 'accept')}>Xác nhận sẵn sàng</Button></div>}</>}</Modal>
+        <Modal title={detail?.code || 'Chi tiết đóng gói'} open={!!detail} onCancel={() => setDetailId(null)} footer={<Button onClick={() => setDetailId(null)}>Đóng</Button>}>{detail && <><p>{composition(detail)}</p><p>Nguồn kiện: Hệ thống tự phân bổ FIFO khi xác nhận số đã đóng.</p><p>Nhân viên: {detail.packerName}</p><p>Được giao: {detail.requestedQty} combo · Đã đóng: {amount(detail) ?? 0} combo</p>{detail.status === 'draft' && <><Button disabled={!canWrite || busy} onClick={() => void update(detail, 'draft')}>Lưu số đã đóng</Button>{isAdmin && <Button icon={<EditOutlined />} disabled={!canWrite || busy} onClick={() => openEditTarget(detail)}>Sửa mục tiêu</Button>}</>}{detail.status === 'submitted' && isManager && <div className="packing-review"><Button disabled={!canWrite || busy} onClick={() => void update(detail, 'return')}>Trả lại</Button><Button type="primary" disabled={!canWrite || busy} onClick={() => void update(detail, 'accept')}>Xác nhận sẵn sàng</Button></div>}</>}</Modal>
     </div>;
 }
