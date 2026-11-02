@@ -215,6 +215,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
         finalizePick: (data) => ipcRenderer.invoke('handlingUnits:finalizePick', data),
         finalizeShiftCheck: (data) => ipcRenderer.invoke('handlingUnits:finalizeShiftCheck', data),
         setShiftCheckScope: (data) => ipcRenderer.invoke('handlingUnits:setShiftCheckScope', data),
+        setShiftCheckThreshold: (data) => ipcRenderer.invoke('handlingUnits:setShiftCheckThreshold', data),
+        setHiddenSkus: (data) => ipcRenderer.invoke('handlingUnits:setHiddenSkus', data),
         moveUnit: (data) => ipcRenderer.invoke('handlingUnits:move', data),
         updateUnit: (data) => ipcRenderer.invoke('handlingUnits:updateUnit', data),
         deleteUnit: (data) => ipcRenderer.invoke('handlingUnits:deleteUnit', data),

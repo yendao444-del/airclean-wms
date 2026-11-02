@@ -293,7 +293,7 @@ const { isEcommerceOrderFine } = require("./ecommerce-order-fines");
 const { reconcilePrepackShortfallFines, isPrepackShortfallFine } = require("./prepack-fines");
 const { MAX_QUANTITY: HANDLING_UNIT_MAX_QUANTITY, assertPackageQuantity, readLabelNumbers, assignLabelNumbers } = require("./handling-unit-labels.cjs");
 const { assertMergePolicy } = require("./handling-unit-merge-policy.cjs");
-const { recordShiftEvents, readShiftPolicy, reconcileShiftFines, saveShiftScope, assigneeFor: shiftAssigneeFor, dayKey: shiftDayKey } = require("./handling-unit-shift-policy.cjs");
+const { recordShiftEvents, readShiftPolicy, reconcileShiftFines, saveShiftScope, saveShiftThreshold, saveShiftMinThreshold, canEditShiftScope, assigneeFor: shiftAssigneeFor, dayKey: shiftDayKey } = require("./handling-unit-shift-policy.cjs");
 const autoReturns = require('./handling-unit-auto-returns.cjs');
 
 // 📦 Offline Queue — lưu scan khi mất mạng, sync lại khi có mạng
@@ -7612,6 +7612,49 @@ ipcMain.handle("products:getPackingCatalog", async () => {
   }
 });
 
+// SKUs the admin removed from the handling-unit catalog. Display preference
+// only: products, stock and unit history are untouched.
+const HANDLING_UNIT_HIDDEN_SKUS_KEY = "handlingUnitHiddenSkusJson";
+
+ipcMain.handle("handlingUnits:setHiddenSkus", async (_event, payload = {}) => {
+  try {
+    requireReceivingOperatorRole("admin");
+    if (!prisma) throw new Error("Không kết nối được cơ sở dữ liệu kiện hàng.");
+    const skus = [...new Set((Array.isArray(payload.skus) ? payload.skus : []).map((sku) => String(sku || "").trim()).filter(Boolean))];
+    if (skus.length === 0) throw new Error("Hãy chọn ít nhất một SKU.");
+    const hidden = payload.hidden === true;
+    const hiddenSkus = await prisma.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${HANDLING_UNIT_HIDDEN_SKUS_KEY}))`;
+      if (hidden) {
+        // A SKU still holding units or pre-packed combos needs its catalog row.
+        const activeUnit = await tx.handlingUnit.findFirst({
+          where: { sku: { in: skus }, status: { notIn: ["empty", "split"] } },
+          select: { sku: true },
+        });
+        if (activeUnit) throw new Error(`SKU ${activeUnit.sku} còn kiện đang hoạt động, chưa thể ẩn.`);
+        const inventory = packagePackingModule.decodeInventory(await tx.appConfig.findUnique({ where: { key: packagePackingModule.INVENTORY_KEY } }));
+        const packedLot = inventory.lots.find((lot) => Number(lot.packedQty) > Number(lot.issuedQty || 0)
+          && (lot.components || []).some((component) => skus.includes(component.sku)));
+        if (packedLot) throw new Error("SKU đã chọn còn combo đóng sẵn chưa xuất, chưa thể ẩn.");
+      }
+      const row = await tx.appConfig.findUnique({ where: { key: HANDLING_UNIT_HIDDEN_SKUS_KEY }, select: { value: true } });
+      const next = new Set(parseJsonArray(row?.value));
+      skus.forEach((sku) => (hidden ? next.add(sku) : next.delete(sku)));
+      const value = JSON.stringify([...next]);
+      await tx.appConfig.upsert({
+        where: { key: HANDLING_UNIT_HIDDEN_SKUS_KEY },
+        create: { key: HANDLING_UNIT_HIDDEN_SKUS_KEY, value },
+        update: { value },
+      });
+      return [...next];
+    });
+    broadcastHandlingUnitsChanged("HIDDEN_SKUS", { skus, hidden });
+    return { success: true, data: { hiddenSkus } };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
 ipcMain.handle("handlingUnits:getWorkspace", async (_event, options = {}) => {
   try {
     const stockCheckWorkspace = options?.purpose === "stock-check";
@@ -7623,6 +7666,7 @@ ipcMain.handle("handlingUnits:getWorkspace", async (_event, options = {}) => {
     const blindStockCheck = stockCheckWorkspace && !isAdminStockCheckSession();
 
     const [
+      hiddenSkusCfg,
       productCandidates,
       dbRegister,
       txCfg,
@@ -7634,6 +7678,10 @@ ipcMain.handle("handlingUnits:getWorkspace", async (_event, options = {}) => {
       packedInventoryCfg,
       packingAssignmentCfgs,
     ] = await Promise.all([
+        prisma.appConfig.findUnique({
+          where: { key: HANDLING_UNIT_HIDDEN_SKUS_KEY },
+          select: { value: true },
+        }),
         prisma.product.findMany({
           where: {
             status: "active",
@@ -7969,6 +8017,7 @@ ipcMain.handle("handlingUnits:getWorkspace", async (_event, options = {}) => {
           ? recentTransactions
           : [],
         packedInventory: blindStockCheck ? [] : packedLots,
+        hiddenSkus: parseJsonArray(hiddenSkusCfg?.value),
       },
     };
   } catch (error) {
@@ -10288,7 +10337,7 @@ function clearTelegramWmsInlineKeyboard(chatId, messageId) {
 }
 
 function broadcastHandlingUnitsChanged(type, data) {
-  if (!['AUTO_RETURN_MERGED', 'QR_LABELS_ISSUED', 'QR_LABELS_PRINTED', 'MOVE', 'SHIFT_CHECK_SCOPE'].includes(type)) scheduleAutoReturnMaintenance();
+  if (!['AUTO_RETURN_MERGED', 'QR_LABELS_ISSUED', 'QR_LABELS_PRINTED', 'MOVE', 'SHIFT_CHECK_SCOPE', 'HIDDEN_SKUS'].includes(type)) scheduleAutoReturnMaintenance();
   try {
     const { BrowserWindow } = require("electron");
     BrowserWindow.getAllWindows().forEach((win) => {
@@ -13177,18 +13226,37 @@ ipcMain.handle("handlingUnits:getCheckHistory", async (_event, { sku } = {}) => 
   }
 });
 
-// Admin chooses which products the end-of-shift count covers. null = all.
+// Admin or a named staff editor chooses which products the end-of-shift count
+// covers. null = all. Fine rate and minimum level are applied for admin only.
 ipcMain.handle("handlingUnits:setShiftCheckScope", async (_event, payload = {}) => {
   try {
-    requireRole("admin");
+    requireRole("admin", "manager", "staff");
+    if (!canEditShiftScope(currentSession)) throw new Error("Bạn không có quyền đổi cài đặt kiểm cuối ca.");
+    const isAdmin = currentSession?.role === "admin";
     if (!prisma) throw new Error("Không kết nối được cơ sở dữ liệu kiện hàng.");
     const productIds = payload.productIds === null ? null : payload.productIds;
     const shiftMode = payload.shiftMode === undefined ? "both" : payload.shiftMode;
     if (Array.isArray(productIds) && productIds.length === 0) {
       throw new Error("Hãy chọn ít nhất một sản phẩm cần kiểm.");
     }
-    const entry = await prisma.$transaction((tx) => saveShiftScope(tx, productIds, currentSession?.username || "admin", new Date(), shiftMode));
+    const entry = await prisma.$transaction(async (tx) => {
+      if (isAdmin && payload.minThresholdPercent !== undefined) await saveShiftMinThreshold(tx, payload.minThresholdPercent);
+      return saveShiftScope(tx, productIds, currentSession?.username || "admin", new Date(), shiftMode, isAdmin ? payload.fineAmount : undefined);
+    });
     broadcastHandlingUnitsChanged("SHIFT_CHECK_SCOPE", entry);
+    return { success: true, data: entry };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+// Staff set the level themselves; every change is kept with who and when.
+ipcMain.handle("handlingUnits:setShiftCheckThreshold", async (_event, payload = {}) => {
+  try {
+    requireRole("admin", "manager", "staff");
+    if (!prisma) throw new Error("Không kết nối được cơ sở dữ liệu kiện hàng.");
+    const entry = await prisma.$transaction((tx) => saveShiftThreshold(tx, payload.productId, payload.percent, currentSession?.username, { isAdmin: currentSession?.role === "admin" }));
+    broadcastHandlingUnitsChanged("SHIFT_CHECK_THRESHOLD", entry);
     return { success: true, data: entry };
   } catch (error) {
     return { success: false, error: error.message };

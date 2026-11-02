@@ -66,15 +66,27 @@ Read [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) when a task crosses more tha
 - Prefer extracting pure calculations and service calls from large renderer pages before changing their behavior. Keep public IPC channels and Prisma contracts stable unless the task explicitly changes them.
 - When a task is limited to documentation, instructions, or local search hygiene, do not run a release script or database command.
 
-## Product Design Demo Images
+## Image Generation Routing
 
-When creating any UI/UX demo image, mockup, visual concept, or design exploration:
+- When this project is being worked on inside Codex, use Codex's native image-generation capability first for image demos and visual mockups. Do not launch the external ChatGPT image script just because the request says "demo ảnh".
+- Use the external ChatGPT image workflow below only when the project is being worked on outside Codex, or when the user explicitly asks to use ChatGPT's external image tool.
 
-- Always use the Product Design workflow, routed through the relevant Product Design skill.
-- Query the configured gateway's image-model catalog before generation.
-- Use the highest-quality dedicated image-generation model currently available. At present, prefer `cx/gpt-image-2.5`.
-- Use variants such as `cx/gpt-image-2.5-flare` or `cx/gpt-image-2.5-sunburst` only when their visual characteristics suit the requested design direction.
-- A higher version number in a general-purpose model name does not by itself make it preferable to the newest dedicated `gpt-image` model family.
-- If a newer dedicated `gpt-image` model becomes available, prefer it over `cx/gpt-image-2.5`.
-- Do not use an older or lower-tier image model when the preferred dedicated model is available.
-- Do not silently substitute an HTML/CSS screenshot, placeholder, or fallback image generator. If the highest-quality image model is unavailable, report that limitation before proceeding.
+## Image Generation (External ChatGPT fallback)
+
+- When the user needs an AI image or mockup, run directly:
+  `"G:\CHATGPT IMAGES\.build-venv\Scripts\python.exe" "G:\DANGKHOA BILLABS	ools\dby_image.py" generate --prompt-file F [--size 1792x1024] [--out DIR]`
+  Write the prompt to a file F in the scratchpad first; save demo images to `design-demos/` with `--out`.
+- It uses the user's DBY Images tool with their ChatGPT login through OpenAI OAuth; the login is stored encrypted and refreshes itself. Never ask the user for a session token, API key or to copy a session.
+- Only if the login has expired (`dby_image.py status` or a generate error says so), run `G:\DANGKHOA BILLABS	ools\dang-nhap-tao-anh.bat` in a terminal so the user can sign in with Google.
+- Do not use the 9Router endpoint for demos unless the user asks: it needs a key that is not set on this machine.
+- The tool takes a text prompt only, so describe the current UI and any reference image the user sent in words: colors, logo, labels, layout. Prompts must state what to preserve, the exact requested change, and an explicit `Avoid` list. Keep Vietnamese labels with correct diacritics, readable and unclipped.
+- When mocking one part of the UI (a menu, a header, a dialog), ask for that part alone; a full-page prompt redraws the whole interface, which the user does not want.
+- Never replace a failed generated image with an HTML/CSS screenshot.
+
+## Mandatory Image Demo Gate
+
+- When the user says "demo ảnh" or "demo", and for every Product Design request, the first deliverable is a visual demo image, not code.
+- Always make exactly 2 versions with different directions using the selected image-generation tool, showing only the part asked for, and show both images in the response. Then stop and wait for the user to pick one.
+- When the user provides a visual target, treat it as the source of truth: both versions follow it, adapted to the DBY POS interface.
+- Do not edit application UI code, scaffold a prototype, or wire a route until the user picks a version or says to go ahead.
+- After approval, implementation must finish with a `design-qa.md` comparison against the approved image.

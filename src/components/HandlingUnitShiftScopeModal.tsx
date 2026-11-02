@@ -1,13 +1,20 @@
-import { Alert, Button, Checkbox, Empty, Input, Modal, Radio, Space, Tag, message } from "antd";
+import { SettingOutlined } from "@ant-design/icons";
+import { Alert, Button, Checkbox, Empty, Input, InputNumber, Modal, Popover, Radio, Space, Tag, message } from "antd";
 import { useEffect, useMemo, useState } from "react";
 
-export type ShiftScopeProduct = { productId: number; name: string; openedCount: number };
+export type ShiftScopeProduct = { productId: number; name: string; openedCount: number; packageSize?: number };
+export type ShiftCheckThreshold = { percent: number; updatedBy?: string; effectiveAt?: string };
 export type ShiftCheckMode = "morning" | "afternoon" | "both";
 type Props = {
   open: boolean;
+  canEditPolicy: boolean;
+  canEditAdminSettings: boolean;
+  thresholds?: Record<string, ShiftCheckThreshold>;
+  minThreshold?: number;
   products: readonly ShiftScopeProduct[];
   selectedIds: readonly number[] | null;
   shiftMode?: ShiftCheckMode;
+  fineAmount?: number;
   updatedBy?: string;
   updatedAt?: string;
   onClose: () => void;
@@ -15,10 +22,52 @@ type Props = {
 };
 const searchText = (value: string) => value.normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/đ/gi, "d").toLocaleLowerCase("vi-VN");
 
-// Admin-only: choose which products the end-of-shift count (and its fines) covers.
+function ThresholdButton({ product, current, min, onSaved }: { product: ShiftScopeProduct; current?: ShiftCheckThreshold; min: number; onSaved: () => void }) {
+  const [open, setOpen] = useState(false);
+  const [percent, setPercent] = useState<number | null>(30);
+  const [saving, setSaving] = useState(false);
+  const apply = async () => {
+    if (percent === null) { message.warning("Hãy nhập mức cần kiểm."); return; }
+    setSaving(true);
+    try {
+      const response = await window.electronAPI?.handlingUnits?.setShiftCheckThreshold({ productId: product.productId, percent });
+      if (!response?.success) throw new Error(response?.error || "Không lưu được mức cần kiểm.");
+      message.success(`${product.name}: kiểm khi kiện còn ≤ ${percent}%.`);
+      setOpen(false);
+      onSaved();
+    } catch (error: any) {
+      message.error(error?.message || "Không lưu được mức cần kiểm.");
+    } finally {
+      setSaving(false);
+    }
+  };
+  return <Popover open={open} trigger="click" placement="bottomRight" title="Mức cần kiểm"
+    onOpenChange={next => { if (saving) return; setOpen(next); if (next) setPercent(current?.percent ?? Math.max(30, min)); }}
+    content={<div className="hu-shift-level-popover">
+      <InputNumber<number> aria-label={`Mức cần kiểm ${product.name}`} style={{ width: "100%" }} value={percent} min={min} max={100} precision={0} suffix="%" disabled={saving} onChange={value => setPercent(value)} />
+      <small>{product.packageSize && percent !== null
+        ? `Kiện ${product.packageSize.toLocaleString("vi-VN")} gói → kiểm khi còn ≤ ${Math.floor(product.packageSize * percent / 100).toLocaleString("vi-VN")} gói`
+        : "Tính theo sức chứa của từng kiện"}</small>
+      {current?.updatedBy && <small>Đổi bởi {current.updatedBy}{current.effectiveAt ? ` lúc ${new Date(current.effectiveAt).toLocaleString("vi-VN")}` : ""}</small>}
+      <Space size={8} style={{ justifyContent: "flex-end" }}>
+        <Button size="small" disabled={saving} onClick={() => setOpen(false)}>Huỷ</Button>
+        <Button size="small" type="primary" loading={saving} onClick={apply}>Áp dụng</Button>
+      </Space>
+    </div>}>
+    <Button size="small" icon={<SettingOutlined />} className={open ? "hu-shift-level-btn is-open" : "hu-shift-level-btn"}>{current ? `Mức ${current.percent}%` : "Đặt mức"}</Button>
+  </Popover>;
+}
+
+// Admin or a named staff editor chooses which products the end-of-shift count
+// (and its fines) covers. Other staff only see the per-product level buttons.
 export default function HandlingUnitShiftScopeModal(props: Props) {
   const [mode, setMode] = useState<"all" | "selected">("all");
   const [shiftMode, setShiftMode] = useState<ShiftCheckMode>("both");
+  const [fineAmount, setFineAmount] = useState<number | null>(null);
+  const [minThreshold, setMinThreshold] = useState<number | null>(null);
+  // Compare by content: applying a level reloads the workspace and must not
+  // throw away ticks the admin has not saved yet.
+  const selectedKey = JSON.stringify(props.selectedIds);
   const [checked, setChecked] = useState<number[]>([]);
   const [search, setSearch] = useState("");
   const [saving, setSaving] = useState(false);
@@ -26,21 +75,30 @@ export default function HandlingUnitShiftScopeModal(props: Props) {
     if (!props.open) return;
     setMode(props.selectedIds ? "selected" : "all");
     setShiftMode(props.shiftMode || "both");
+    setFineAmount(props.fineAmount ?? null);
+    setMinThreshold(props.minThreshold ?? 10);
     setChecked(props.selectedIds ? [...props.selectedIds] : []);
     setSearch("");
-  }, [props.open, props.selectedIds, props.shiftMode]);
+  }, [props.open, selectedKey, props.shiftMode, props.fineAmount, props.minThreshold]);
   const visible = useMemo(() => {
     const term = searchText(search).trim();
-    return props.products.filter(product => !term || searchText(product.name).includes(term));
-  }, [props.products, search]);
+    // Staff set levels only for products that are actually being counted.
+    const scoped = !props.canEditPolicy && props.selectedIds
+      ? props.products.filter(product => props.selectedIds?.includes(product.productId)) : props.products;
+    return scoped.filter(product => !term || searchText(product.name).includes(term));
+  }, [props.products, props.canEditPolicy, props.selectedIds, search]);
   const checkedSet = new Set(checked);
+  // Saved ticks of hidden SKUs stay in the policy so a SKU that returns is still counted.
+  const listedCheckedCount = props.products.filter(product => checkedSet.has(product.productId)).length;
   const toggle = (productId: number, on: boolean) =>
     setChecked(previous => on ? [...new Set([...previous, productId])] : previous.filter(id => id !== productId));
   const save = async () => {
-    if (mode === "selected" && checked.length === 0) { message.warning("Hãy tick ít nhất một sản phẩm cần kiểm."); return; }
+    if (mode === "selected" && listedCheckedCount === 0) { message.warning("Hãy tick ít nhất một sản phẩm cần kiểm."); return; }
+    if (props.canEditAdminSettings && fineAmount === null) { message.warning("Hãy nhập mức phạt mỗi ca."); return; }
+    if (props.canEditAdminSettings && minThreshold === null) { message.warning("Hãy nhập mức tối thiểu."); return; }
     setSaving(true);
     try {
-      const response = await window.electronAPI?.handlingUnits?.setShiftCheckScope({ productIds: mode === "all" ? null : checked, shiftMode });
+      const response = await window.electronAPI?.handlingUnits?.setShiftCheckScope({ productIds: mode === "all" ? null : checked, shiftMode, ...(props.canEditAdminSettings ? { fineAmount: fineAmount ?? undefined, minThresholdPercent: minThreshold ?? undefined } : {}) });
       if (!response?.success) throw new Error(response?.error || "Không lưu được danh sách sản phẩm cần kiểm.");
       message.success(`Đã lưu: ${shiftMode === "morning" ? "kiểm buổi sáng" : shiftMode === "afternoon" ? "kiểm buổi chiều" : "kiểm cả buổi sáng và buổi chiều"}.`);
       props.onSaved();
@@ -51,9 +109,13 @@ export default function HandlingUnitShiftScopeModal(props: Props) {
       setSaving(false);
     }
   };
-  return <Modal open={props.open} title="Cài đặt kiểm cuối ca" onCancel={() => !saving && props.onClose()}
-    onOk={save} okText="Lưu" cancelText="Huỷ" confirmLoading={saving} width={560} destroyOnHidden>
+  const levelMin = props.canEditAdminSettings ? 1 : props.minThreshold ?? 10;
+  return <Modal open={props.open} title={props.canEditPolicy ? "Cài đặt kiểm cuối ca" : "Cài đặt mức cần kiểm"} onCancel={() => !saving && props.onClose()}
+    onOk={save} okText="Lưu" cancelText="Huỷ" confirmLoading={saving} width={560} destroyOnHidden
+    footer={props.canEditPolicy ? undefined : <Button onClick={props.onClose}>Đóng</Button>}
+    wrapClassName="hu-shift-scope-wrap" className="hu-shift-scope-modal">
     <Space direction="vertical" size={12} style={{ width: "100%" }}>
+      {props.canEditPolicy && <>
       <div>
         <div style={{ marginBottom: 6, fontWeight: 600 }}>Buổi cần kiểm</div>
         <Radio.Group value={shiftMode} onChange={event => setShiftMode(event.target.value)} disabled={saving}>
@@ -64,26 +126,48 @@ export default function HandlingUnitShiftScopeModal(props: Props) {
           </Space>
         </Radio.Group>
       </div>
+      {props.canEditAdminSettings && <>
+      <div>
+        <div style={{ marginBottom: 6, fontWeight: 600 }}>Mức phạt mỗi ca</div>
+        <InputNumber<number> aria-label="Mức phạt mỗi ca" style={{ width: 200 }} value={fineAmount} disabled={saving}
+          min={1000} max={10000000} step={10000} precision={0} suffix="đ"
+          formatter={value => value === undefined || value === null ? "" : Number(value).toLocaleString("vi-VN")}
+          parser={value => Number((value || "").replace(/\D/g, ""))}
+          onChange={value => setFineAmount(value)} />
+      </div>
+      <div>
+        <div style={{ marginBottom: 6, fontWeight: 600 }}>Mức thấp nhất nhân viên được đặt</div>
+        <InputNumber<number> aria-label="Mức thấp nhất nhân viên được đặt" style={{ width: 200 }} value={minThreshold} disabled={saving}
+          min={1} max={100} precision={0} suffix="%" onChange={value => setMinThreshold(value)} />
+      </div>
+      </>}
       <Radio.Group value={mode} onChange={event => setMode(event.target.value)} disabled={saving}>
         <Radio value="all">Kiểm toàn bộ sản phẩm</Radio>
         <Radio value="selected">Chỉ kiểm sản phẩm được tick</Radio>
       </Radio.Group>
-      <Alert type="info" showIcon title="Sản phẩm không được tick sẽ không hiện trong Kiểm cuối ca và không tính phạt từ thời điểm lưu. Các ca đã qua hạn giữ nguyên." />
-      {mode === "selected" && <>
+      <Alert type="info" showIcon title="Sản phẩm không được tick sẽ không hiện trong Kiểm cuối ca và không tính phạt từ thời điểm lưu. Mức phạt mới áp dụng cho các hạn kiểm sau khi lưu; các ca đã qua hạn giữ nguyên." />
+      </>}
+      {!props.canEditPolicy && <Alert type="info" showIcon title="Sản phẩm đã đặt mức chỉ phải kiểm khi kiện xuống tới mức đó; kiện chờ chốt hết kiện vẫn luôn phải kiểm. Mọi lần đổi mức đều được ghi lại." />}
+      <>
         <Input allowClear placeholder="Tìm sản phẩm..." value={search} onChange={event => setSearch(event.target.value)} disabled={saving} />
-        <Space size={8}>
+        {props.canEditPolicy && mode === "selected" && <Space size={8}>
           <Button size="small" disabled={saving} onClick={() => setChecked(previous => [...new Set([...previous, ...visible.map(product => product.productId)])])}>Tick tất cả đang hiện</Button>
           <Button size="small" disabled={saving} onClick={() => setChecked(previous => previous.filter(id => !visible.some(product => product.productId === id)))}>Bỏ tick đang hiện</Button>
-          <span>Đã chọn <b>{checked.length}</b>/{props.products.length}</span>
-        </Space>
-        <div style={{ maxHeight: 360, overflowY: "auto", border: "1px solid #f0f0f0", borderRadius: 8, padding: "4px 12px" }}>
+          <span>Đã chọn <b>{listedCheckedCount}</b>/{props.products.length}</span>
+        </Space>}
+        <div style={{ border: "1px solid #f0f0f0", borderRadius: 8, padding: "4px 12px" }}>
           {visible.length === 0 && <Empty description="Không có sản phẩm phù hợp" />}
-          {visible.map(product => <div key={product.productId} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 0" }}>
-            <Checkbox checked={checkedSet.has(product.productId)} disabled={saving} onChange={event => toggle(product.productId, event.target.checked)}>{product.name}</Checkbox>
-            {product.openedCount > 0 && <Tag color="blue">{product.openedCount} kiện đang khui</Tag>}
+          {visible.map(product => <div key={product.productId} style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 0" }}>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              {props.canEditPolicy && mode === "selected"
+                ? <Checkbox checked={checkedSet.has(product.productId)} disabled={saving} onChange={event => toggle(product.productId, event.target.checked)}>{product.name}</Checkbox>
+                : product.name}
+            </div>
+            {product.openedCount > 0 && <Tag color="blue" style={{ marginInlineEnd: 0 }}>{product.openedCount} kiện đang khui</Tag>}
+            <ThresholdButton product={product} current={props.thresholds?.[product.productId]} min={levelMin} onSaved={props.onSaved} />
           </div>)}
         </div>
-      </>}
+      </>
       {props.updatedAt && <small style={{ color: "#8c8c8c" }}>Cập nhật lần cuối bởi {props.updatedBy || "admin"} lúc {new Date(props.updatedAt).toLocaleString("vi-VN")}</small>}
     </Space>
   </Modal>;

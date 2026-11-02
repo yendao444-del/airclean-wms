@@ -516,6 +516,7 @@ export interface ElectronAPI {
         suppliers?: any[];
         recentTransactions?: any[];
         packedInventory?: import('./packagePacking').PackingLot[];
+        hiddenSkus?: string[];
       };
       error?: string;
     }>;
@@ -611,9 +612,13 @@ export interface ElectronAPI {
       shift?: "midday" | "evening";
       idempotencyKey?: string;
     }) => Promise<{ success: boolean; data?: any; error?: string }>;
+    setHiddenSkus: (data: { skus: string[]; hidden: boolean }) => Promise<{ success: boolean; data?: { hiddenSkus: string[] }; error?: string }>;
+    setShiftCheckThreshold: (data: { productId: number; percent: number }) => Promise<{ success: boolean; data?: any; error?: string }>;
     setShiftCheckScope: (data: {
       productIds: number[] | null;
       shiftMode?: "morning" | "afternoon" | "both";
+      fineAmount?: number;
+      minThresholdPercent?: number;
     }) => Promise<{ success: boolean; data?: any; error?: string }>;
     moveUnit: (data: {
       code: string;

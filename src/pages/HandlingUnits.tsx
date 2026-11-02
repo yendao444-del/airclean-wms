@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Alert,
   Button,
@@ -56,10 +56,11 @@ import { buildHandlingUnitSequenceMap, prepareHandlingUnitPrintUnits } from "../
 import { packedStockForSku, summarizeHandlingUnitAllocation, summarizePackedInventory, suggestHandlingUnitAllocation, looseRemainderForAllocation } from "../lib/handlingUnitAllocation";
 import HandlingUnitPackedStock from "../components/HandlingUnitPackedStock";
 import HandlingUnitShiftChecklist, { ShiftFamilySearch } from "../components/HandlingUnitShiftChecklist";
-import HandlingUnitShiftScopeModal from "../components/HandlingUnitShiftScopeModal";
+import HandlingUnitShiftScopeModal, { type ShiftCheckThreshold } from "../components/HandlingUnitShiftScopeModal";
 import { identifyShiftCandidates, scopeShiftCandidates, type ShiftIdentity } from "../lib/handlingUnitShiftScope";
 import HandlingUnitUnifiedHistory from "../components/HandlingUnitUnifiedHistory";
 import { useAuth } from "../contexts/AuthContext";
+import { isDedicatedReceivingOperator } from "../lib/permissions";
 import { canCreatePackagePacking } from "../lib/packagePackingPermissions";
 import { canRecheckHandlingUnit } from "../lib/handlingUnitCheck";
 import PrepackManagement from "./PrepackManagement";
@@ -140,6 +141,7 @@ type LocationItem = {
 };
 type Workspace = {
   packedInventory: PackingLot[];
+  hiddenSkus: string[];
   catalog: CatalogItem[];
   register: UnitRow[];
   packagingSpecs: any[];
@@ -164,6 +166,10 @@ type Workspace = {
     checkShiftMode?: "morning" | "afternoon" | "both";
     checkScopeUpdatedBy?: string;
     checkScopeUpdatedAt?: string;
+    checkThresholds?: Record<string, ShiftCheckThreshold>;
+    checkThresholdMin?: number;
+    exemptCodes?: string[];
+    scopeEditors?: string[];
   };
 };
 type ShiftCheckCandidate = ShiftIdentity & {
@@ -538,6 +544,7 @@ const displayProductGroup = (name: string) =>
 
 const workspaceLayoutDefaults: Workspace = {
   packedInventory: [],
+  hiddenSkus: [],
   catalog: [
     {
       sku: "1-5DUNI-TRANG",
@@ -845,6 +852,7 @@ const workspaceLayoutDefaults: Workspace = {
 // bridge. Locations remain local configuration for the warehouse floor plan.
 const emptyWorkspace: Workspace = {
   packedInventory: [],
+  hiddenSkus: [],
   ...workspaceLayoutDefaults,
   catalog: [],
   register: [],
@@ -855,12 +863,13 @@ const emptyWorkspace: Workspace = {
 };
 let handlingUnitsWorkspaceCache: Pick<
   Workspace,
-  "catalog" | "register" | "recentTransactions" | "packedInventory"
+  "catalog" | "register" | "recentTransactions" | "packedInventory" | "hiddenSkus"
 > | null = null;
 
 export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit?: () => void; initialTab?: "units" | "prepack" }) {
   const { user, isRolePreview } = useAuth();
   const isAdmin = user?.role === "admin";
+  const canManageCatalog = !isRolePreview && (isAdmin || isDedicatedReceivingOperator(user?.username));
   const [activeModuleTab, setActiveModuleTab] = useState<"units" | "prepack" | "targets" | "history">(initialTab);
   const moduleContentRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -893,6 +902,10 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
   );
   const [search, setSearch] = useState("");
   const [openGroups, setOpenGroups] = useState<Record<string, boolean>>({});
+  const [isCatalogManaging, setIsCatalogManaging] = useState(false);
+  const [catalogManageView, setCatalogManageView] = useState<"managed" | "hidden">("managed");
+  const [catalogSelection, setCatalogSelection] = useState<string[]>([]);
+  const [isSavingCatalogVisibility, setIsSavingCatalogVisibility] = useState(false);
   const [detail, setDetail] = useState<UnitRow | null>(null);
   const [showPrintModal, setShowPrintModal] = useState(false);
   const [printUnits, setPrintUnits] = useState<UnitRow[]>([]);
@@ -1229,6 +1242,7 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
           const suppliers = Array.isArray(rawData.suppliers) ? rawData.suppliers : [];
           const shiftCheckPolicy = rawData.shiftCheckPolicy;
           const packedInventory = Array.isArray(rawData.packedInventory) ? rawData.packedInventory : [];
+          const hiddenSkus = Array.isArray(rawData.hiddenSkus) ? rawData.hiddenSkus : [];
           // Avoid serializing the whole workspace on every refresh. The old
           // signature copied several hundred history/QR records before React
           // could paint; these revision hints still detect normal mutations
@@ -1250,8 +1264,9 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
             compactSignature(suppliers),
             compactSignature(packedInventory),
             JSON.stringify(shiftCheckPolicy || null),
+            hiddenSkus.join(","),
           ].join("|");
-          handlingUnitsWorkspaceCache = { catalog, register, recentTransactions, packedInventory };
+          handlingUnitsWorkspaceCache = { catalog, register, recentTransactions, packedInventory, hiddenSkus };
           if (responseSignature === workspaceResponseSignatureRef.current) return;
           workspaceResponseSignatureRef.current = responseSignature;
           setWorkspace((prev) => ({
@@ -1264,6 +1279,7 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
             suppliers,
             shiftCheckPolicy,
             packedInventory,
+            hiddenSkus,
           }));
           setSelectedSku((current) =>
             catalog.some((item) => item.sku === current)
@@ -1321,6 +1337,7 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
       register: workspace.register,
       recentTransactions: workspace.recentTransactions,
       packedInventory: workspace.packedInventory,
+      hiddenSkus: workspace.hiddenSkus,
     };
   }, [
     isWorkspaceLoading,
@@ -1328,6 +1345,7 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
     workspace.register,
     workspace.recentTransactions,
     workspace.packedInventory,
+    workspace.hiddenSkus,
   ]);
 
   const handleUnsealUnit = async (unit: UnitRow): Promise<boolean> => {
@@ -1863,23 +1881,6 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
     }
   };
 
-  const matchingSkus = useMemo(() => {
-    const term = normalizeSearch(search);
-    if (!term) return workspace.catalog;
-    return workspace.catalog.filter((item) => {
-      const skuNorm = normalizeSearch(item.sku);
-      const nameNorm = normalizeSearch(item.variantName);
-      const groupNorm = normalizeSearch(item.productGroup);
-      const colorNorm = normalizeSearch(item.color || "");
-      return (
-        skuNorm.includes(term) ||
-        nameNorm.includes(term) ||
-        groupNorm.includes(term) ||
-        colorNorm.includes(term)
-      );
-    });
-  }, [workspace.catalog, search]);
-
   const unitsBySku = useMemo(() => {
     const index = new Map<string, UnitRow[]>();
     workspace.register.forEach((unit) => {
@@ -1899,8 +1900,48 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
   const packedSummary = useMemo(() => summarizePackedInventory(workspace.packedInventory), [workspace.packedInventory]);
   const packedBySku = packedSummary.quantityBySku;
   const packedComboBySku = packedSummary.comboCountBySku;
+  // Out-of-stock SKUs leave the catalog automatically. Either way a SKU holding
+  // units returns by itself, so stock being managed can never be out of sight.
+  const skuHoldsStock = useCallback(
+    (sku: string) => (activeUnitCountBySku.get(sku) || 0) > 0 || (packedBySku.get(sku) || 0) > 0,
+    [activeUnitCountBySku, packedBySku],
+  );
+  const { managedCatalog, hiddenCatalog } = useMemo(() => {
+    const hiddenSet = new Set(workspace.hiddenSkus);
+    const managedCatalog: CatalogItem[] = [];
+    const hiddenCatalog: CatalogItem[] = [];
+    workspace.catalog.forEach((item) => {
+      if (skuHoldsStock(item.sku)) managedCatalog.push(item);
+      else if (Number(item.stock || 0) <= 0) return;
+      else if (hiddenSet.has(item.sku)) hiddenCatalog.push(item);
+      else managedCatalog.push(item);
+    });
+    return { managedCatalog, hiddenCatalog };
+  }, [workspace.catalog, workspace.hiddenSkus, skuHoldsStock]);
+  const filterCatalog = useCallback((items: CatalogItem[]) => {
+    const term = normalizeSearch(search);
+    if (!term) return items;
+    return items.filter((item) => {
+      const skuNorm = normalizeSearch(item.sku);
+      const nameNorm = normalizeSearch(item.variantName);
+      const groupNorm = normalizeSearch(item.productGroup);
+      const colorNorm = normalizeSearch(item.color || "");
+      return (
+        skuNorm.includes(term) ||
+        nameNorm.includes(term) ||
+        groupNorm.includes(term) ||
+        colorNorm.includes(term)
+      );
+    });
+  }, [search]);
+  const matchingSkus = useMemo(() => filterCatalog(managedCatalog), [filterCatalog, managedCatalog]);
+  const isViewingHiddenCatalog = isCatalogManaging && catalogManageView === "hidden";
+  const listedSkus = useMemo(
+    () => (isViewingHiddenCatalog ? filterCatalog(hiddenCatalog) : matchingSkus),
+    [isViewingHiddenCatalog, filterCatalog, hiddenCatalog, matchingSkus],
+  );
   const allocationGaps = useMemo(() =>
-    workspace.catalog
+    managedCatalog
       .map((item) => {
         const allocation = summarizeHandlingUnitAllocation(
           Number(item.stock || 0), unitsBySku.get(item.sku) || [], packedBySku.get(item.sku) || 0,
@@ -1912,7 +1953,7 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
       })
       .filter((item) => item.missingQuantity > 0)
       .sort((a, b) => b.missingQuantity - a.missingQuantity),
-  [workspace.catalog, unitsBySku, packedBySku]);
+  [managedCatalog, unitsBySku, packedBySku]);
   const allocationGapBySku = useMemo(
     () => new Map(allocationGaps.map((item) => [item.sku, item.missingQuantity])),
     [allocationGaps],
@@ -1961,7 +2002,7 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
   const skuGroups = useMemo(() => {
     const groups: Array<{
       groupName: string;
-      children: typeof matchingSkus;
+      children: typeof listedSkus;
       withdrawnQuantity: number;
       lastWithdrawalAt: number;
     }> = [];
@@ -1996,8 +2037,8 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
         ),
       );
     });
-    const map = new Map<string, typeof matchingSkus>();
-    matchingSkus.forEach((item) => {
+    const map = new Map<string, typeof listedSkus>();
+    listedSkus.forEach((item) => {
       const key = item.productGroup || "Khác";
       if (!map.has(key)) map.set(key, []);
       map.get(key)!.push(item);
@@ -2034,7 +2075,42 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
       if (recencyDifference !== 0) return recencyDifference;
       return a.groupName.localeCompare(b.groupName, "vi", { numeric: true, sensitivity: "base" });
     });
-  }, [matchingSkus, workspace.register, workspace.recentTransactions]);
+  }, [listedSkus, workspace.register, workspace.recentTransactions]);
+
+  const closeCatalogManaging = () => {
+    setIsCatalogManaging(false);
+    setCatalogManageView("managed");
+    setCatalogSelection([]);
+  };
+
+  const toggleCatalogSelection = (groupName: string) => {
+    setCatalogSelection((prev) => (prev.includes(groupName)
+      ? prev.filter((name) => name !== groupName)
+      : [...prev, groupName]));
+  };
+
+  // A row stands for the whole product, even when search narrows its colors.
+  const submitCatalogVisibility = async () => {
+    const hidden = catalogManageView === "managed";
+    const source = hidden ? managedCatalog : hiddenCatalog;
+    const skus = source
+      .filter((item) => catalogSelection.includes(item.productGroup || "Khác"))
+      .map((item) => item.sku);
+    if (skus.length === 0) return;
+    setIsSavingCatalogVisibility(true);
+    try {
+      const res = await window.electronAPI.handlingUnits.setHiddenSkus({ skus, hidden });
+      if (!res?.success || !res.data) throw new Error(res?.error || "Không lưu được danh mục SKU.");
+      const hiddenSkus = res.data.hiddenSkus;
+      setWorkspace((prev) => ({ ...prev, hiddenSkus }));
+      setCatalogSelection([]);
+      message.success(hidden ? `Đã ẩn ${skus.length} SKU khỏi quản lý kiện.` : `Đã khôi phục ${skus.length} SKU.`);
+    } catch (error: any) {
+      message.error(error?.message || "Không lưu được danh mục SKU.");
+    } finally {
+      setIsSavingCatalogVisibility(false);
+    }
+  };
 
   const toggleGroup = (groupName: string) => {
     setOpenGroups((prev) => ({ ...prev, [groupName]: !prev[groupName] }));
@@ -2140,6 +2216,7 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
     // Admin may limit the count to selected products; null keeps every product.
     const scopeIds = workspace.shiftCheckPolicy?.checkProductIds;
     const checkScope = Array.isArray(scopeIds) ? new Set(scopeIds.map(Number)) : null;
+    const exemptCodes = new Set(workspace.shiftCheckPolicy?.exemptCodes || []);
     const packedCandidates: ShiftCheckCandidate[] = workspace.packedInventory.flatMap(lot => {
       const code = `PACKED:${lot.assignmentId}`.toUpperCase();
       const duty = outstanding.get(code);
@@ -2154,6 +2231,8 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
         const obligation = outstanding.get(code);
         const history = transactionsByUnitId.get(unit.id.trim().toUpperCase()) || [];
         const isPendingCheck = unit.status === "Chờ kiểm" || unit.status === "pending_check";
+        // Still above the level set for this product: no count due yet.
+        if (!isPendingCheck && exemptCodes.has(code)) return null;
         const latestCompletedCheck = history
           .filter(item => isCompletedCheckTransaction(item))
           .reduce(
@@ -2212,18 +2291,22 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
   }, [workspace.register, workspace.packedInventory, workspace.shiftCheckPolicy, transactionsByUnitId]);
 
   const shiftScopeProducts = useMemo(() => {
-    const products = new Map<number, { productId: number; name: string; openedCount: number }>();
-    workspace.catalog.forEach((item) => {
+    const products = new Map<number, { productId: number; name: string; openedCount: number; packageSize?: number }>();
+    managedCatalog.forEach((item) => {
       if (item.productId != null && !products.has(item.productId)) {
         products.set(item.productId, { productId: item.productId, name: item.productGroup, openedCount: 0 });
       }
     });
     workspace.register.forEach((unit) => {
       const product = unit.productId != null ? products.get(unit.productId) : undefined;
-      if (product && ["Đang sử dụng", "opened", "Chờ kiểm", "pending_check"].includes(unit.status)) product.openedCount += 1;
+      if (product && ["Đang sử dụng", "opened", "Chờ kiểm", "pending_check"].includes(unit.status)) {
+        product.openedCount += 1;
+        const size = isReturnHandlingUnit(unit) ? Number(unit.initialPcs) : capacityForUnit(unit);
+        if (Number.isFinite(size) && size > (product.packageSize || 0)) product.packageSize = size;
+      }
     });
     return [...products.values()].sort((a, b) => b.openedCount - a.openedCount || a.name.localeCompare(b.name, "vi"));
-  }, [workspace.catalog, workspace.register]);
+  }, [managedCatalog, workspace.register]);
 
   const mandatoryShiftCheckCandidates = useMemo(
     () => shiftCheckCandidates.filter(({ unit }) => unit.status === "Chờ kiểm" || unit.status === "pending_check"),
@@ -2248,6 +2331,7 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
   const visibleShiftCheckCandidates = shiftCheckFocusCode
     ? shiftCheckBatchCandidates
     : scopeShiftCandidates(shiftCheckBatchCandidates, shiftCheckFamily);
+  const canEditShiftScope = isAdmin || (workspace.shiftCheckPolicy?.scopeEditors || []).includes(String(user?.username || "").trim().toLowerCase());
   const canPerformUnitCheck = !isRolePreview && (isAdmin || user?.role === 'manager' || (user?.role === 'staff' && user.username === workspace.shiftCheckPolicy?.assignedTo));
 
   const shiftCheckEnteredCount = shiftCheckBatchCandidates.filter(({ unit }) => {
@@ -3170,6 +3254,7 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
               trigger="click"
               placement="bottomRight"
               title="Phân công kiểm cuối ca"
+              zIndex={10050}
               content={
                 <div style={{ maxWidth: "min(300px, calc(100vw - 48px))" }}>
                   <p><b>Hôm nay:</b> {workspace.shiftCheckPolicy.assignedTo}</p>
@@ -3204,19 +3289,17 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
               </button>
             </Popover>
           )}
-          {isAdmin && !isRolePreview && workspace.shiftCheckPolicy && (
-            <Tooltip title="Chọn sản phẩm nhân viên phải kiểm cuối ca (chỉ admin)">
-              <Button size="small" icon={<CheckCircleOutlined />} onClick={() => setShowShiftScopeModal(true)}>
-                {Array.isArray(workspace.shiftCheckPolicy.checkProductIds)
-                  ? `SP cần kiểm: ${workspace.shiftCheckPolicy.checkProductIds.length}`
-                  : "SP cần kiểm: Tất cả"}
-              </Button>
-            </Tooltip>
-          )}
-          {isAdmin && !isRolePreview && workspace.shiftCheckPolicy && (
-            <Tooltip title="Cài đặt buổi kiểm và phạm vi sản phẩm (chỉ admin)">
-              <Button size="small" icon={<SettingOutlined />} onClick={() => setShowShiftScopeModal(true)}>
+          {!isRolePreview && workspace.shiftCheckPolicy && (
+            <Tooltip title={canEditShiftScope ? "Cài đặt buổi kiểm, phạm vi sản phẩm và mức cần kiểm" : "Cài đặt mức cần kiểm của từng sản phẩm"}>
+              <Button size="small" icon={<SettingOutlined />} className="hu-shift-settings-btn" onClick={() => setShowShiftScopeModal(true)}>
                 Cài đặt ca
+                {canEditShiftScope && (
+                  <span className="hu-shift-settings-count">
+                    {Array.isArray(workspace.shiftCheckPolicy.checkProductIds)
+                      ? `${workspace.shiftCheckPolicy.checkProductIds.length} SP`
+                      : "Tất cả SP"}
+                  </span>
+                )}
               </Button>
             </Tooltip>
           )}
@@ -3241,12 +3324,43 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
               <Typography.Title level={5}>Danh mục SKU</Typography.Title>
               <Typography.Text type="secondary">
                 {search.trim()
-                  ? `Tìm thấy: ${matchingSkus.length}/${workspace.catalog.length} SKU`
-                  : `Tổng: ${workspace.catalog.length} SKU`}
+                  ? `Tìm thấy: ${listedSkus.length}/${isViewingHiddenCatalog ? hiddenCatalog.length : managedCatalog.length} SKU`
+                  : `Tổng: ${managedCatalog.length} SKU`}
               </Typography.Text>
             </div>
-            <TagsOutlined />
+            {canManageCatalog ? (
+              <Button
+                size="small"
+                className={`hu-catalog-manage-toggle ${isCatalogManaging ? "is-active" : ""}`}
+                onClick={() => (isCatalogManaging ? closeCatalogManaging() : setIsCatalogManaging(true))}
+              >
+                Quản lý
+              </Button>
+            ) : <TagsOutlined />}
           </Flex>
+          {isCatalogManaging && (
+            <div className="hu-catalog-views" role="tablist" aria-label="Danh mục SKU">
+              {([
+                ["managed", "Đang quản lý", managedCatalog.length],
+                ["hidden", "Đã ẩn", hiddenCatalog.length],
+              ] as const).map(([view, label, count]) => (
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={catalogManageView === view}
+                  className={`hu-catalog-view ${catalogManageView === view ? "is-active" : ""}`}
+                  key={view}
+                  onClick={() => {
+                    setCatalogManageView(view);
+                    setCatalogSelection([]);
+                  }}
+                >
+                  {label}
+                  <span className="hu-catalog-view-count">{count}</span>
+                </button>
+              ))}
+            </div>
+          )}
           <Input.Search
             className="hu-catalog-search"
             value={search}
@@ -3270,6 +3384,34 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
                 const groupUnallocatedCount = group.children.filter(
                   (item) => Number(allocationGapBySku.get(item.sku) || 0) > 0,
                 ).length;
+                if (isCatalogManaging) {
+                  const groupItems = (isViewingHiddenCatalog ? hiddenCatalog : managedCatalog)
+                    .filter((item) => (item.productGroup || "Khác") === group.groupName);
+                  const isBlocked = !isViewingHiddenCatalog && groupItems.some((item) => skuHoldsStock(item.sku));
+                  const isChecked = catalogSelection.includes(group.groupName);
+                  const row = (
+                    <button
+                      type="button"
+                      className={`hu-sku-group-header hu-sku-group-manage ${isChecked ? "is-checked" : ""}`}
+                      disabled={isBlocked}
+                      aria-pressed={isChecked}
+                      onClick={() => toggleCatalogSelection(group.groupName)}
+                    >
+                      <Checkbox checked={isChecked} disabled={isBlocked} tabIndex={-1} className="hu-sku-group-check" />
+                      <span className="hu-sku-group-label">
+                        {displayProductGroup(group.groupName)}
+                      </span>
+                      <span className="hu-sku-group-count">
+                        {groupItems.length} màu · {groupUnitsCount} kiện
+                      </span>
+                    </button>
+                  );
+                  return (
+                    <div className="hu-sku-group" key={group.groupName}>
+                      {isBlocked ? <Tooltip title="Còn kiện hoặc combo đóng sẵn, chưa thể ẩn"><span>{row}</span></Tooltip> : row}
+                    </div>
+                  );
+                }
                 return (
                   <div className="hu-sku-group" key={group.groupName}>
                     <button
@@ -3346,19 +3488,35 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
               <div className="hu-sku-search-empty">
                 <Empty
                   image={Empty.PRESENTED_IMAGE_SIMPLE}
-                  description={
+                  description={search.trim() ? (
                     <span>
                       Không tìm thấy SKU nào cho "<b>{search}</b>"
                     </span>
-                  }
+                  ) : "Chưa có SKU nào trong mục này"}
                 >
-                  <Button size="small" onClick={() => setSearch("")}>
-                    Xóa tìm kiếm
-                  </Button>
+                  {search.trim() && (
+                    <Button size="small" onClick={() => setSearch("")}>
+                      Xóa tìm kiếm
+                    </Button>
+                  )}
                 </Empty>
               </div>
             )}
           </div>
+          {isCatalogManaging && (
+            <div className="hu-catalog-manage-footer">
+              <span className="hu-catalog-manage-summary">Đã chọn {catalogSelection.length} nhóm</span>
+              <Button onClick={closeCatalogManaging}>Hủy</Button>
+              <Button
+                type="primary"
+                disabled={catalogSelection.length === 0}
+                loading={isSavingCatalogVisibility}
+                onClick={() => void submitCatalogVisibility()}
+              >
+                {isViewingHiddenCatalog ? "Khôi phục" : "Ẩn khỏi quản lý kiện"}
+              </Button>
+            </div>
+          )}
         </aside>
         <section className={`hu-selected-panel hu-selected-panel--${activeModuleTab}`}>
           <header className="hu-workspace-heading">
@@ -4605,12 +4763,17 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
         />
       </Modal>
 
-      {isAdmin && (
+      {!isRolePreview && (
         <HandlingUnitShiftScopeModal
+          canEditPolicy={canEditShiftScope}
+          canEditAdminSettings={isAdmin}
+          thresholds={workspace.shiftCheckPolicy?.checkThresholds}
+          minThreshold={workspace.shiftCheckPolicy?.checkThresholdMin}
           open={showShiftScopeModal}
           products={shiftScopeProducts}
           selectedIds={workspace.shiftCheckPolicy?.checkProductIds ?? null}
           shiftMode={workspace.shiftCheckPolicy?.checkShiftMode}
+          fineAmount={workspace.shiftCheckPolicy?.fineAmount}
           updatedBy={workspace.shiftCheckPolicy?.checkScopeUpdatedBy}
           updatedAt={workspace.shiftCheckPolicy?.checkScopeUpdatedAt}
           onClose={() => setShowShiftScopeModal(false)}

@@ -1,7 +1,17 @@
 const LEDGER_KEY = "handlingUnitShiftChecksV1";
 const SCOPE_KEY = "handlingUnitShiftScopeV1";
+const THRESHOLD_KEY = "handlingUnitShiftThresholdsV1";
+const DEFAULT_MIN_THRESHOLD = 10;
+// Staff allowed to change the checked products and shifts. Fine rate and the
+// minimum level stay admin-only.
+const SHIFT_SCOPE_EDITORS = ["nguyendinhtoan"];
 const EFFECTIVE_DATE = "2026-10-14";
-const FINE_AMOUNT = 50000;
+const FINE_AMOUNT = 100000;
+const LEGACY_FINE_AMOUNT = 50000;
+// Deadlines before this moment keep the old rate if a fine is written late.
+const FINE_AMOUNT_EFFECTIVE_AT = "2026-11-02T00:00:00+07:00";
+const MIN_FINE_AMOUNT = 1000;
+const MAX_FINE_AMOUNT = 10000000;
 const ROTATION = ["nguyendinhtoan", "nguyenvankhanh"];
 const SHIFTS = {
   midday: { label: "ca trưa", deadline: "12:30" },
@@ -15,6 +25,9 @@ const SHIFT_MODES = {
 };
 const packing = require("./package-packing.cjs");
 
+function canEditShiftScope(session) {
+  return session?.role === "admin" || SHIFT_SCOPE_EDITORS.includes(String(session?.username || "").trim().toLowerCase());
+}
 function dayKey(value) {
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? "" : date.toLocaleDateString("sv-SE", { timeZone: "Asia/Bangkok" });
@@ -226,6 +239,13 @@ function lastCountAt(ledger, code) {
     Object.values(day.units[code]?.shiftChecks || {}).map(check => Date.parse(check?.checkedAt) || 0)));
 }
 
+function unitCapacity(unit) {
+  const isReturn = String(unit.packagingName || "").normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "").replace(/đ/g, "d").toLowerCase().includes("hang hoan");
+  // Normal legacy packages (above the 500 limit) were capped to 300 without rewriting their
+  // original capacity. Returned stock remains aggregated without that cap.
+  return isReturn ? Number(unit.initialQuantity) : Number(unit.initialQuantity) > 500 ? 300 : Number(unit.initialQuantity);
+}
 // Observe pending counts, and retain only duties backed by an actual movement.
 // Legacy daily observations have no activity marker; recover evidence from the
 // movement buffer, without replaying checks or overwriting historical fines.
@@ -256,11 +276,7 @@ async function observeActiveUnits(tx, ledger, now, configuredShifts = SHIFT_KEYS
   }
   carryDuties(ledger, now);
   const activeUnits = activeRows.filter(unit => {
-    const isReturn = String(unit.packagingName || "").normalize("NFD")
-      .replace(/[\u0300-\u036f]/g, "").replace(/đ/g, "d").toLowerCase().includes("hang hoan");
-    // Normal legacy packages (above the 500 limit) were capped to 300 without rewriting their
-    // original capacity. Returned stock remains aggregated without that cap.
-    const capacity = isReturn ? Number(unit.initialQuantity) : Number(unit.initialQuantity) > 500 ? 300 : Number(unit.initialQuantity);
+    const capacity = unitCapacity(unit);
     return unit.status === "pending_check"
       || repackedChecks.has(String(unit.code).toUpperCase())
       || !Number.isFinite(Number(unit.remainingQuantity))
@@ -328,21 +344,39 @@ function requiredShiftsAt(scope, at) {
   // has passed, keep the duty so carry-over places it on the next day.
   return due.length || !SHIFT_MODES[entry?.shiftMode] ? due : [...configured];
 }
+function validFineAmount(value) {
+  return Number.isSafeInteger(value) && value >= MIN_FINE_AMOUNT && value <= MAX_FINE_AMOUNT;
+}
+// The rate saved at the deadline applies, so a later change never reprices a
+// deadline that already passed.
+function fineAmountAt(scope, at) {
+  const time = new Date(at).getTime();
+  let amount = null;
+  for (const entry of scope.history) {
+    if (Date.parse(entry.effectiveAt) <= time && validFineAmount(entry.fineAmount)) amount = entry.fineAmount;
+  }
+  if (amount !== null) return amount;
+  return time >= Date.parse(FINE_AMOUNT_EFFECTIVE_AT) ? FINE_AMOUNT : LEGACY_FINE_AMOUNT;
+}
 async function readShiftScope(tx) {
   return parseScope(await tx.appConfig.findUnique({ where: { key: SCOPE_KEY } }));
 }
-async function saveShiftScope(tx, productIds, actor, now = new Date(), shiftMode = "both") {
+async function saveShiftScope(tx, productIds, actor, now = new Date(), shiftMode = "both", fineAmount) {
   if (productIds !== null && (!Array.isArray(productIds)
     || productIds.some(id => !Number.isSafeInteger(Number(id)) || Number(id) <= 0))) {
     throw new Error("Danh sách sản phẩm cần kiểm không hợp lệ.");
   }
   if (!SHIFT_MODES[shiftMode]) throw new Error("Ca kiểm cuối ca không hợp lệ.");
+  if (fineAmount !== undefined && !validFineAmount(fineAmount)) {
+    throw new Error(`Mức phạt phải là số nguyên từ ${MIN_FINE_AMOUNT.toLocaleString("vi-VN")}đ đến ${MAX_FINE_AMOUNT.toLocaleString("vi-VN")}đ.`);
+  }
   await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${SCOPE_KEY}))`;
   const scope = await readShiftScope(tx);
   const entry = {
     effectiveAt: new Date(now).toISOString(),
     productIds: productIds === null ? null : [...new Set(productIds.map(Number))].sort((a, b) => a - b),
     shiftMode,
+    fineAmount: fineAmount === undefined ? fineAmountAt(scope, now) : fineAmount,
     updatedBy: String(actor || ""),
   };
   const value = JSON.stringify({ history: [...scope.history, entry].slice(-200) });
@@ -358,6 +392,109 @@ async function productIdsByCode(tx, codes) {
   });
   return new Map(rows.map(row => [String(row.code).toUpperCase(), Number(row.productId)]));
 }
+// Per-product "count when a package is down to N%" levels. History is kept for
+// audit, and so a later change never reprices a deadline that already passed.
+function parseThresholds(row) {
+  let data;
+  try { data = JSON.parse(row?.value || "{}"); } catch { data = {}; }
+  const history = (Array.isArray(data?.history) ? data.history : []).filter(entry =>
+    isRecord(entry) && Number.isFinite(Date.parse(entry.effectiveAt))
+    && Number.isSafeInteger(entry.productId) && Number.isSafeInteger(entry.percent));
+  return {
+    minPercent: Number.isSafeInteger(data?.minPercent) ? data.minPercent : DEFAULT_MIN_THRESHOLD,
+    history: history.sort((a, b) => Date.parse(a.effectiveAt) - Date.parse(b.effectiveAt)),
+  };
+}
+async function readShiftThresholds(tx) {
+  return parseThresholds(await tx.appConfig.findUnique({ where: { key: THRESHOLD_KEY } }));
+}
+function thresholdEntryAt(thresholds, productId, at) {
+  const time = new Date(at).getTime();
+  let found = null;
+  for (const entry of thresholds.history) {
+    if (entry.productId === productId && Date.parse(entry.effectiveAt) <= time) found = entry;
+  }
+  return found;
+}
+function isAboveThreshold(remaining, capacity, percent) {
+  return remaining !== null && Number.isFinite(Number(remaining)) && Number.isFinite(capacity) && capacity > 0
+    && Number(remaining) > capacity * percent / 100;
+}
+async function saveShiftThreshold(tx, productId, percent, actor, { isAdmin = false, now = new Date() } = {}) {
+  if (!Number.isSafeInteger(productId) || productId <= 0) throw new Error("Sản phẩm không hợp lệ.");
+  await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${THRESHOLD_KEY}))`;
+  const thresholds = await readShiftThresholds(tx);
+  const lowest = isAdmin ? 1 : thresholds.minPercent;
+  if (!Number.isSafeInteger(percent) || percent < lowest || percent > 100) {
+    throw new Error(`Mức cần kiểm phải là số nguyên từ ${lowest}% đến 100%.`);
+  }
+  const entry = { effectiveAt: new Date(now).toISOString(), productId, percent, updatedBy: String(actor || "") };
+  const value = JSON.stringify({ minPercent: thresholds.minPercent, history: [...thresholds.history, entry].slice(-2000) });
+  await tx.appConfig.upsert({ where: { key: THRESHOLD_KEY }, create: { key: THRESHOLD_KEY, value }, update: { value } });
+  return entry;
+}
+async function saveShiftMinThreshold(tx, minPercent) {
+  if (!Number.isSafeInteger(minPercent) || minPercent < 1 || minPercent > 100) {
+    throw new Error("Mức tối thiểu phải là số nguyên từ 1% đến 100%.");
+  }
+  await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${THRESHOLD_KEY}))`;
+  const thresholds = await readShiftThresholds(tx);
+  const value = JSON.stringify({ minPercent, history: thresholds.history });
+  await tx.appConfig.upsert({ where: { key: THRESHOLD_KEY }, create: { key: THRESHOLD_KEY, value }, update: { value } });
+}
+// Physical rows for fine evaluation; PACKED combos have no level and stay due.
+async function unitInfoByCode(tx, codes) {
+  const physical = [...new Set(codes)].filter(code => !code.startsWith("PACKED:"));
+  if (!physical.length) return new Map();
+  const rows = await tx.handlingUnit.findMany({
+    where: { code: { in: physical, mode: "insensitive" } },
+    select: { code: true, productId: true, initialQuantity: true, packagingName: true },
+  });
+  return new Map(rows.map(row => [String(row.code).toUpperCase(), { productId: Number(row.productId), capacity: unitCapacity(row) }]));
+}
+function mandatoryCodes(ledger) {
+  return new Set(Object.values(ledger.days).flatMap(day => Object.entries(day.units)
+    .filter(([, unit]) => unit.pendingCheck || unit.requiresPhysicalCheck).map(([code]) => code)));
+}
+// A duty counts at a deadline only when that package's balance, as last logged
+// before the deadline, was at or below its level. Unknown data stays due.
+function thresholdFilter(thresholds, unitInfo, events, mandatory) {
+  const logged = new Map();
+  for (const entry of events) {
+    const code = String(entry?.unitId || "").trim().toUpperCase();
+    const time = Date.parse(entry?.createdAt);
+    if (!code || !Number.isFinite(time) || entry.remaining === undefined) continue;
+    if (!logged.has(code)) logged.set(code, []);
+    logged.get(code).push({ time, remaining: entry.remaining });
+  }
+  return (code, at) => {
+    const info = unitInfo.get(code);
+    if (!info || mandatory.has(code)) return true;
+    const level = thresholdEntryAt(thresholds, info.productId, at);
+    if (!level) return true;
+    const time = new Date(at).getTime();
+    let latest = null;
+    for (const item of logged.get(code) || []) {
+      if (item.time <= time && (!latest || item.time >= latest.time)) latest = item;
+    }
+    return !latest || !isAboveThreshold(latest.remaining, info.capacity, level.percent);
+  };
+}
+// Today's opened packages still above their level: hidden from the checklist.
+async function readExemptCodes(tx, ledger, thresholds, now) {
+  if (!thresholds.history.length) return [];
+  const rows = await tx.handlingUnit.findMany({
+    where: { status: "opened" },
+    select: { code: true, status: true, productId: true, remainingQuantity: true, initialQuantity: true, packagingName: true },
+  });
+  const mandatory = mandatoryCodes(ledger);
+  return rows.flatMap(row => {
+    const code = String(row.code).toUpperCase();
+    const level = thresholdEntryAt(thresholds, Number(row.productId), now);
+    return row.status === "opened" && level && !mandatory.has(code)
+      && isAboveThreshold(row.remainingQuantity, unitCapacity(row), level.percent) ? [code] : [];
+  });
+}
 function scopeFilter(scope, productIds) {
   return (code, at) => {
     const allowed = scopeAt(scope, at);
@@ -366,22 +503,27 @@ function scopeFilter(scope, productIds) {
     return productId === undefined || allowed.has(productId);
   };
 }
-function policySnapshot(ledger, now = new Date(), inScope = () => true, scope = { history: [] }) {
+function policySnapshot(ledger, now = new Date(), inScope = () => true, scope = { history: [] }, thresholds = { history: [], minPercent: DEFAULT_MIN_THRESHOLD }, exemptCodes = []) {
   carryDuties(ledger, now);
   const date = dayKey(now);
   const shift = currentShift(now);
+  const exempt = new Set(exemptCodes);
   const outstanding = [];
   const trackedCodes = new Set();
   for (const day of Object.values(ledger.days)) for (const code of Object.keys(day.units)) trackedCodes.add(code);
   for (const [code, raw] of Object.entries(ledger.days[date]?.units || {})) {
     const unit = normalizeUnit(raw, date);
-    if (isOutstanding(unit, shift) && inScope(code, now)) outstanding.push({ code, requiredAt: unit.shiftRequiredAt[shift], date,
+    if (isOutstanding(unit, shift) && inScope(code, now) && !exempt.has(code)) outstanding.push({ code, requiredAt: unit.shiftRequiredAt[shift], date,
       ...(unit.requiresPhysicalCheck ? { requiresPhysicalCheck: true } : {}) });
   }
   const latestScope = latestScopeEntry(scope, now);
   const shiftMode = SHIFT_MODES[latestScope?.shiftMode] ? latestScope.shiftMode : "both";
+  const checkThresholds = {};
+  for (const entry of thresholds.history) {
+    if (Date.parse(entry.effectiveAt) <= new Date(now).getTime()) checkThresholds[entry.productId] = entry;
+  }
   return {
-    date, effectiveDate: EFFECTIVE_DATE, fineAmount: FINE_AMOUNT,
+    date, scopeEditors: SHIFT_SCOPE_EDITORS, effectiveDate: EFFECTIVE_DATE, fineAmount: fineAmountAt(scope, now),
     assignedTo: assigneeFor(date), nextAssignedTo: assigneeFor(nextDay(date)),
     currentShift: shift, shiftLabel: SHIFTS[shift].label,
     deadline: deadlineFor(date, shift).toISOString(),
@@ -391,6 +533,7 @@ function policySnapshot(ledger, now = new Date(), inScope = () => true, scope = 
     checkShiftMode: shiftMode,
     checkScopeUpdatedBy: latestScope?.updatedBy || "",
     checkScopeUpdatedAt: latestScope?.effectiveAt || "",
+    checkThresholds, checkThresholdMin: thresholds.minPercent, exemptCodes: [...exempt],
   };
 }
 async function readShiftPolicy(tx, now = new Date()) {
@@ -401,14 +544,15 @@ async function readShiftPolicy(tx, now = new Date()) {
   const productIds = scopeAt(scope, now)
     ? await productIdsByCode(tx, Object.keys(ledger.days[dayKey(now)]?.units || {}))
     : new Map();
-  return policySnapshot(ledger, now, scopeFilter(scope, productIds), scope);
+  const thresholds = await readShiftThresholds(tx);
+  return policySnapshot(ledger, now, scopeFilter(scope, productIds), scope, thresholds, await readExemptCodes(tx, ledger, thresholds, now));
 }
 function employeeFor(data, username) {
   const matches = (data.employees || []).filter(employee => String(employee.username || "").trim().toLowerCase() === username);
   if (matches.length !== 1 || !Number.isSafeInteger(Number(matches[0].id)) || Number(matches[0].id) <= 0) return null;
   return Number(matches[0].id);
 }
-function buildFines(ledger, data = {}, now = new Date(), inScope = () => true) {
+function buildFines(ledger, data = {}, now = new Date(), inScope = () => true, scope = { history: [] }) {
   const today = dayKey(now);
   if (!today || today < EFFECTIVE_DATE) return [];
   freezeDeadlines(ledger, now);
@@ -425,11 +569,12 @@ function buildFines(ledger, data = {}, now = new Date(), inScope = () => true) {
         .filter(([code, raw]) => normalizeUnit(raw, date).missedShifts[shift] && inScope(code, deadlineFor(date, shift)))
         .map(([code]) => code).sort();
       if (!missingUnits.length) continue;
+      const amount = fineAmountAt(scope, deadlineFor(date, shift));
       fines.push({
         id: `fine-hu-shift-${date}-${shift}-${assignedTo}`, empId,
         type: `Chưa kiểm kiện ${SHIFTS[shift].label}`,
-        detail: `Chưa nhập số đếm thực tế ${missingUnits.length} kiện trước hạn ${SHIFTS[shift].deadline}; phạt 50.000đ/ca.`,
-        amount: FINE_AMOUNT, date: deadlineFor(date, shift).toISOString(),
+        detail: `Chưa nhập số đếm thực tế ${missingUnits.length} kiện trước hạn ${SHIFTS[shift].deadline}; phạt ${amount.toLocaleString("vi-VN")}đ/ca.`,
+        amount, date: deadlineFor(date, shift).toISOString(),
         source: "handling-unit-shift-check", attendanceDate: date,
         scheduledSession: shift === "midday" ? "morning" : "afternoon", shift, assignedTo, missingUnits,
       });
@@ -479,11 +624,20 @@ async function reconcileShiftFines(prisma, { now = new Date() } = {}) {
       for (const audit of data.fineAuditLog || []) if (audit.action === "delete" && audit.before?.id) deletedIds.add(String(audit.before.id));
       const existing = data.extraFines || [];
       const ids = new Set(existing.map(fine => String(fine.id)));
-      const missedCodes = scope.history.some(entry => entry.productIds)
+      const thresholds = await readShiftThresholds(tx);
+      const missedCodes = scope.history.some(entry => entry.productIds) || thresholds.history.length
         ? Object.values(ledger.days).flatMap(day => Object.entries(day.units)
           .filter(([, raw]) => Object.keys(raw.missedShifts || {}).length).map(([code]) => code))
         : [];
-      const allFines = buildFines(ledger, data, now, scopeFilter(scope, await productIdsByCode(tx, missedCodes)));
+      const inScope = scopeFilter(scope, await productIdsByCode(tx, missedCodes));
+      let aboveLevelFilter = () => true;
+      if (thresholds.history.length) {
+        const eventsRow = await tx.appConfig.findUnique({ where: { key: "handlingUnitsTransactionsJson" } });
+        const events = JSON.parse(eventsRow?.value || "[]");
+        if (!Array.isArray(events)) throw new Error("Lịch sử biến động kiện không hợp lệ.");
+        aboveLevelFilter = thresholdFilter(thresholds, await unitInfoByCode(tx, missedCodes), events, mandatoryCodes(ledger));
+      }
+      const allFines = buildFines(ledger, data, now, (code, at) => inScope(code, at) && aboveLevelFilter(code, at), scope);
       const created = allFines.filter(fine => !ids.has(fine.id) && !deletedIds.has(fine.id));
       const audit = [...(data.fineAuditLog || []), ...created.map(fine => ({
         id: `create-${fine.id}`, action: "create", timestamp: new Date(now).toLocaleString("vi-VN", { timeZone: "Asia/Bangkok" }),
@@ -507,4 +661,4 @@ async function reconcileShiftFines(prisma, { now = new Date() } = {}) {
     throw error;
   }
 }
-module.exports = { LEDGER_KEY, SCOPE_KEY, readShiftScope, saveShiftScope, scopeAt, requiredShiftsAt, configuredShiftsAt, scopeFilter, EFFECTIVE_DATE, FINE_AMOUNT, SHIFTS, SHIFT_MODES, assigneeFor, deadlineFor, shiftForTimestamp, currentShift, dayKey, applyEvents, policySnapshot, recordShiftEvents, readShiftPolicy, buildFines, reconcileShiftFines, isHandlingUnitShiftFine };
+module.exports = { LEDGER_KEY, SCOPE_KEY, THRESHOLD_KEY, canEditShiftScope, SHIFT_SCOPE_EDITORS, readShiftThresholds, saveShiftThreshold, saveShiftMinThreshold, thresholdFilter, readShiftScope, saveShiftScope, scopeAt, requiredShiftsAt, configuredShiftsAt, scopeFilter, EFFECTIVE_DATE, FINE_AMOUNT, LEGACY_FINE_AMOUNT, fineAmountAt, SHIFTS, SHIFT_MODES, assigneeFor, deadlineFor, shiftForTimestamp, currentShift, dayKey, applyEvents, policySnapshot, recordShiftEvents, readShiftPolicy, buildFines, reconcileShiftFines, isHandlingUnitShiftFine };

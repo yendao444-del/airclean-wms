@@ -16,7 +16,7 @@ const color = (sku: string) => ({ TRANG: 'trắng', DEN: 'đen', BE: 'be', XAM: 
 const composition = (row: PackingAssignment) => row.components.map(c => `${c.quantity} ${row.components.length === 1 ? `${c.unit.toLowerCase()} ` : ''}${color(c.sku)}`).join(' + ');
 const actionLabels: Record<string, string> = { created: 'Giao việc', draft: 'Lưu số đã đóng', submit: 'Gửi xác nhận', accept: 'Xác nhận sẵn sàng', return: 'Trả lại để sửa', delete: 'Xóa công việc chưa gửi' };
 
-export default function PrepackManagement({ view = 'report', createRequest = 0, onCreateHandled = () => {}, sourceUnits = [], productSkus }: Props) {
+export default function PrepackManagement({ embedded = false, view = 'report', createRequest = 0, onCreateHandled = () => {}, sourceUnits = [], productSkus }: Props) {
     const { user, actualUser, isRolePreview } = useAuth();
     const isAdmin = (actualUser || user)?.role === 'admin';
     const isManager = ['admin', 'manager'].includes((actualUser || user)?.role || '');
@@ -59,6 +59,7 @@ export default function PrepackManagement({ view = 'report', createRequest = 0, 
         void window.electronAPI.users.getAll().then(result => { if (!cancelled && result.success) setEmployees((result.data || []).filter((e: Employee) => e.isActive !== false && e.role !== 'admin')); }).catch(() => message.error('Không tải được danh sách nhân viên.'));
         return () => { cancelled = true; };
     }, [isManager]);
+    const openCreate = () => { createKey.current = crypto.randomUUID(); form.resetFields(); setDate(today()); setCreateOpen(true); };
     useEffect(() => {
         if (!createRequest) return;
         if (canCreate) { createKey.current = crypto.randomUUID(); form.resetFields(); setDate(today()); setCreateOpen(true); }
@@ -109,13 +110,14 @@ export default function PrepackManagement({ view = 'report', createRequest = 0, 
             const result = await window.electronAPI.packagePacking.create({ code: values.code, requestedQty: values.requestedQty, components: values.components, packerIds: isManager ? values.packerIds : undefined, workDate: date, requestKey: createKey.current });
             if (!result.success) throw new Error(result.error || 'Không thể tạo công việc đóng gói.');
             const createdCount = Array.isArray(result.data) ? result.data.length : 1;
-            if (!isManager && user?.username) setPacker(user.username);
+            const firstPacker = isManager ? employees.find(employee => employee.id === values.packerIds?.[0])?.username : user?.username;
+            if (firstPacker) setPacker(firstPacker);
             setCreateOpen(false); form.resetFields(); await load(); message.success(isManager ? `Đã giao việc cho ${createdCount} nhân viên.` : 'Đã tạo công việc đóng gói cho bạn.');
         } catch (err: any) { message.error(err.message); }
         finally { mutationInFlight.current = false; setBusy(false); }
     };
     return <div className="packing-workspace">
-        <div className="packing-filters"><label><span>Nhân viên</span><Select aria-label="Nhân viên" value={selected} options={[...names].map(([value, label]) => ({ value, label }))} suffixIcon={<DownOutlined />} onChange={setPacker} /></label><label><span>Ngày làm việc</span><div className="packing-date"><CalendarOutlined /><DatePicker aria-label="Ngày làm việc" allowClear={false} value={dayjs(date)} format="DD/MM/YYYY" onChange={value => { if (value) setDate(value.format('YYYY-MM-DD')); }} /></div></label></div>
+        <div className="packing-filters"><label><span>Nhân viên</span><Select aria-label="Nhân viên" value={selected} options={[...names].map(([value, label]) => ({ value, label }))} suffixIcon={<DownOutlined />} onChange={setPacker} /></label><label><span>Ngày làm việc</span><div className="packing-date"><CalendarOutlined /><DatePicker aria-label="Ngày làm việc" allowClear={false} value={dayjs(date)} format="DD/MM/YYYY" onChange={value => { if (value) setDate(value.format('YYYY-MM-DD')); }} /></div></label>{!embedded && view === 'report' && canCreate && <Button type="primary" className="packing-create" icon={<PlusOutlined />} onClick={openCreate}>{isManager ? 'Giao việc đóng gói' : 'Tạo đóng gói'}</Button>}</div>
         {error ? <Alert type="error" message={error} action={<Button onClick={() => void load()}>Tải lại</Button>} /> : loading ? <div className="packing-loading"><Spin /></div> : !visible.length ? <Empty description={emptyDescription} /> : view === 'history' ? <div className="packing-history">{visible.flatMap(row => row.events.map((event, i) => <article key={`${row.id}-${i}`}><strong>{row.code}</strong><span>{actionLabels[event.action] || event.action}</span><span>{event.actor}</span><time>{dayjs(event.at).format('HH:mm DD/MM/YYYY')}</time></article>))}</div> : <>
             <div className="packing-table-scroll"><table className="packing-table"><colgroup><col /><col /><col /><col /><col /><col /></colgroup><thead><tr>{['Combo', 'Thành phần', 'Được giao', 'Đã đóng', 'Trạng thái', 'Thao tác'].map(label => <th key={label}>{label}</th>)}</tr></thead><tbody>{visible.map(row => { const value = amount(row); return <tr key={row.id}>
                 <td><button className="packing-code" onClick={() => setDetailId(row.id)} aria-label={`Chi tiết ${row.code}`}><strong>{row.code}</strong></button><small>{composition(row)}</small></td><td><span>Từ kiện xử lý: FIFO tự động</span><small>{value ?? 0} combo = {row.components.map(c => `${(value ?? 0) * c.quantity} ${c.unit.toLowerCase()} ${color(c.sku)}`).join(' + ')}</small></td><td>{row.requestedQty} combo</td>

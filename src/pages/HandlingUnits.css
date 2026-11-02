@@ -121,6 +121,75 @@
 .hu-panel-heading .ant-typography {
   font-size: 12px;
 }
+.hu-catalog-manage-toggle.ant-btn {
+  border-color: #0f8a5f;
+  color: #0f8a5f;
+  font-weight: 600;
+}
+.hu-catalog-manage-toggle.is-active.ant-btn {
+  background: #ecfdf5;
+}
+.hu-catalog-views {
+  display: flex;
+  flex-shrink: 0;
+  gap: 16px;
+  padding: 0 5px;
+  border-bottom: 1px solid #edf0f4;
+}
+.hu-catalog-view {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 9px 2px;
+  border: none;
+  border-bottom: 2px solid transparent;
+  background: none;
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.hu-catalog-view.is-active {
+  border-bottom-color: #0f8a5f;
+  color: #0f8a5f;
+}
+.hu-catalog-view-count {
+  padding: 0 6px;
+  border-radius: 999px;
+  background: #f1f5f9;
+  font-size: 11px;
+  line-height: 16px;
+}
+.hu-catalog-view.is-active .hu-catalog-view-count {
+  background: #d1fae5;
+}
+.hu-sku-group-header.hu-sku-group-manage.is-checked {
+  background: #ecfdf5;
+}
+.hu-sku-group-header.hu-sku-group-manage:disabled {
+  color: #94a3b8;
+  cursor: not-allowed;
+}
+.hu-sku-group-check {
+  flex-shrink: 0;
+  pointer-events: none;
+}
+.hu-catalog-manage-footer {
+  display: flex;
+  flex-shrink: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 10px 5px 12px;
+  border-top: 1px solid #edf0f4;
+}
+.hu-catalog-manage-summary {
+  flex: 1 1 100%;
+  color: #334155;
+  font-size: 12px;
+  font-weight: 600;
+}
 .hu-catalog-search {
   width: 100%;
   margin-top: 12px;
@@ -3631,4 +3700,71 @@
   .hu-shift-group-filters { grid-column: 1 / -1; grid-row: 2; }
   .hu-shift-progress { grid-column: 2; grid-row: 1; font-size: 11px; }
   .hu-shift-family-search { margin-left: 0; flex-basis: 100%; }
+}
+
+/* AppContent's fixed 40px titlebar sits above dialogs. Start below it; the body
+   scrolls so the title and the Save button stay visible on short windows. */
+.hu-shift-scope-wrap.ant-modal-wrap {
+  top: 40px;
+  display: flex;
+  align-items: center;
+  padding: 12px 16px;
+  overflow: hidden;
+}
+.hu-shift-scope-modal {
+  max-width: 100%;
+  margin: 0 auto;
+  top: 0;
+  padding-bottom: 0;
+}
+.hu-shift-scope-modal .ant-modal-container {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  max-height: calc(100dvh - 64px);
+  overflow: hidden;
+}
+.hu-shift-scope-modal .ant-modal-header,
+.hu-shift-scope-modal .ant-modal-footer {
+  flex-shrink: 0;
+}
+.hu-shift-scope-modal .ant-modal-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: none;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.hu-shift-level-btn.is-open {
+  border-color: #00a651;
+  background: #f0fdf4;
+}
+.hu-shift-level-popover {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 240px;
+}
+.hu-shift-level-popover small {
+  color: #64748b;
+}
+.hu-shift-level-popover .ant-space {
+  display: flex;
+}
+
+.hu-shift-settings-btn {
+  height: 28px !important;
+  border-radius: 7px !important;
+}
+.hu-shift-settings-count {
+  margin-left: 6px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: #dcfce7;
+  color: #15803d;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 16px;
+  display: inline-block;
 }
