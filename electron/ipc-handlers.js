@@ -295,6 +295,7 @@ const { MAX_QUANTITY: HANDLING_UNIT_MAX_QUANTITY, assertPackageQuantity, readLab
 const { assertMergePolicy } = require("./handling-unit-merge-policy.cjs");
 const { recordShiftEvents, readShiftPolicy, reconcileShiftFines, saveShiftScope, saveShiftThreshold, saveShiftMinThreshold, canEditShiftScope, assigneeFor: shiftAssigneeFor, dayKey: shiftDayKey } = require("./handling-unit-shift-policy.cjs");
 const autoReturns = require('./handling-unit-auto-returns.cjs');
+const { payslipQrImageToDataUrl } = require('./payslip-qr-image.cjs');
 
 // 📦 Offline Queue — lưu scan khi mất mạng, sync lại khi có mạng
 const offlineQueue = require("./offline-queue");
@@ -634,11 +635,11 @@ function scheduleAutoReturnMaintenance() {
 }
 async function maintainHandlingUnitShiftFines() {
   try {
-    return await enqueueAttendanceMaintenance("handling-unit-shift", async () => {
-      try { await maintainAutoReturns(); }
-      catch (error) { console.warn('Automatic return merge:', error.message); }
-      return reconcileShiftFines(getPrismaDirectTx());
-    });
+    // Return merges write handling units, not the attendance document. Finish
+    // them before queueing so payroll writes do not wait behind every SKU.
+    try { await maintainAutoReturns(); }
+    catch (error) { console.warn('Automatic return merge:', error.message); }
+    return await enqueueAttendanceMaintenance("handling-unit-shift", () => reconcileShiftFines(getPrismaDirectTx()));
   } finally {
     invalidateAttendanceSnapshotCaches();
   }
@@ -32390,7 +32391,9 @@ ipcMain.handle("attendance:updatePayrollLock", async (event, payload = {}) => {
         }
       }
       throw lastConflict || new Error("Trạng thái khóa đang được cập nhật ở máy khác. Hãy thử lại.");
-    }, { maxQueueWaitMs: 15000 });
+      // The advisory and row locks serialize this write, and autosave never
+      // replaces lockedPeriods, so an explicit lock need not wait behind maintenance.
+    }, { priority: true, maxQueueWaitMs: 15000 });
 
     // The write changed the AppConfig revision.  Drop any period entries
     // before the next targeted read; the renderer receives the fresh snapshot
@@ -33112,6 +33115,10 @@ function applySameDayFullCheckExemptions(sessions) {
 }
 
 const TEMPORARY_DAILY_ONLY_MODE = false;
+// Daily and Saturday full counts ended here; end-of-shift checks in Handling
+// Units replace them. Stored sessions stay readable as history.
+const STOCK_CHECK_ROUTINE_RETIRED_DATE = "2026-11-03";
+const STOCK_CHECK_ROUTINE_RETIRED_MESSAGE = "Kiểm hàng hằng ngày và kiểm toàn bộ thứ 7 đã ngừng áp dụng; hiện dùng Kiểm cuối ca trong Quản lý kiện hàng.";
 
 function isEligibleStockCheckAssignee(user) {
   return (
@@ -33737,7 +33744,7 @@ ipcMain.handle("stockCheck:getSessions", async (_event, options = {}) => {
   try {
     requireRole("admin", "manager");
     let sessions;
-    if (options.maintenance === false) {
+    if (options.maintenance === false || getStockCheckTodayKey() >= STOCK_CHECK_ROUTINE_RETIRED_DATE) {
       const record = await prisma.appConfig.findUnique({
         where: { key: "stockCheckSessionsV2" },
       });
@@ -33820,6 +33827,9 @@ ipcMain.handle("stockCheck:getSessions", async (_event, options = {}) => {
 ipcMain.handle("stockCheck:ensureDailySession", async (event, payload = {}) => {
   try {
     requireRole("admin", "manager");
+    if (getStockCheckTodayKey() >= STOCK_CHECK_ROUTINE_RETIRED_DATE) {
+      throw new Error(STOCK_CHECK_ROUTINE_RETIRED_MESSAGE);
+    }
     if (isStockCheckSaturday()) {
       throw new Error("Thứ 7 chỉ mở phiên kiểm toàn bộ cho tất cả kho.");
     }
@@ -34017,6 +34027,9 @@ ipcMain.handle("stockCheck:ensureDailySession", async (event, payload = {}) => {
 ipcMain.handle("stockCheck:createFullSession", async (event, payload = {}) => {
   try {
     requireRole();
+    if (getStockCheckTodayKey() >= STOCK_CHECK_ROUTINE_RETIRED_DATE) {
+      throw new Error(STOCK_CHECK_ROUTINE_RETIRED_MESSAGE);
+    }
     if (TEMPORARY_DAILY_ONLY_MODE) {
       throw new Error("Tạm thời hệ thống chỉ cho phép tạo phiên kiểm hàng ngày.");
     }
@@ -40633,19 +40646,11 @@ async function fetchPayslipQrDataUrl(url) {
     try {
       const response = await fetch(url, {
         signal: controller.signal,
-        headers: { Accept: "image/png,image/jpeg" },
+        headers: { Accept: "image/png,image/jpeg,image/svg+xml" },
       });
       if (!response.ok) throw new Error(`VietQR phản hồi HTTP ${response.status}.`);
-      const image = Buffer.from(await response.arrayBuffer());
-      if (!image.length || image.length > 3 * 1024 * 1024) {
-        throw new Error("Ảnh VietQR trống hoặc vượt quá giới hạn 3 MB.");
-      }
-      const isPng =
-        image.length >= 8 &&
-        image.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
-      const isJpeg = image.length >= 3 && image[0] === 0xff && image[1] === 0xd8 && image[2] === 0xff;
-      if (!isPng && !isJpeg) throw new Error("VietQR không trả về tệp ảnh hợp lệ.");
-      return `data:${isPng ? "image/png" : "image/jpeg"};base64,${image.toString("base64")}`;
+      if (new URL(response.url).hostname !== "img.vietqr.io") throw new Error("VietQR chuyển hướng sang địa chỉ không được phép.");
+      return payslipQrImageToDataUrl(Buffer.from(await response.arrayBuffer()));
     } catch (error) {
       lastError = error;
     } finally {

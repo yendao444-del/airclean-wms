@@ -3260,7 +3260,7 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
                   <p><b>Hôm nay:</b> {workspace.shiftCheckPolicy.assignedTo}</p>
                   <p><b>Ngày mai:</b> {workspace.shiftCheckPolicy.nextAssignedTo}</p>
                   <p><b>Ca hiện tại:</b> {workspace.shiftCheckPolicy.shiftLabel || "ca chiều"} · hạn <b>{new Date(workspace.shiftCheckPolicy.deadline).toLocaleTimeString("vi-VN", { hour: "2-digit", minute: "2-digit", timeZone: "Asia/Bangkok" })}</b>.</p>
-                  <p>Ca trưa: <b>12:30</b> · Ca chiều: <b>19:00</b> (giờ Việt Nam).</p>
+                  <p>Ca trưa: <b>12:30</b> · Ca chiều: <b>20:00</b> (giờ Việt Nam).</p>
                   <p>Chưa nhập số đếm sau hạn sẽ phạt <b>{fmt(workspace.shiftCheckPolicy.fineAmount)}đ/ca</b>.</p>
                   <Typography.Paragraph type="secondary">
                     Kiện chưa kiểm chuyển sang ngày tiếp theo. Kết quả độc lập với Kiểm hàng trong Quản lý kho.
@@ -4713,7 +4713,7 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
               <small>
                 {shiftCheckFocusCode ? `Kiểm lại kiện ${shiftCheckFocusCode}, không phụ thuộc phát sinh xuất hàng` : shiftCheckScope === "mandatory"
                   ? "Chỉ gồm các kiện đang ở trạng thái Chờ kiểm"
-                  : `Đối chiếu kiện có biến động và kiện chờ kiểm · ${workspace.shiftCheckPolicy?.shiftLabel || "ca hiện tại"} · hạn ${workspace.shiftCheckPolicy?.currentShift === "midday" ? "12:30" : "19:00"}`}
+                  : `Đối chiếu kiện có biến động và kiện chờ kiểm · ${workspace.shiftCheckPolicy?.shiftLabel || "ca hiện tại"} · hạn ${workspace.shiftCheckPolicy?.currentShift === "midday" ? "12:30" : "20:00"}`}
               </small>
             </div>
             {!shiftCheckFocusCode && <ShiftFamilySearch

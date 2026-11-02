@@ -3736,21 +3736,10 @@
   overscroll-behavior: contain;
 }
 
-.hu-shift-level-btn.is-open {
-  border-color: #00a651;
-  background: #f0fdf4;
-}
-.hu-shift-level-popover {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  width: 240px;
-}
-.hu-shift-level-popover small {
-  color: #64748b;
-}
-.hu-shift-level-popover .ant-space {
-  display: flex;
+.hu-shift-level-input.ant-input-number,
+.hu-shift-level-input.ant-input-number-affix-wrapper {
+  flex-shrink: 0;
+  width: 76px;
 }
 
 .hu-shift-settings-btn {

@@ -1,6 +1,5 @@
-import { SettingOutlined } from "@ant-design/icons";
-import { Alert, Button, Checkbox, Empty, Input, InputNumber, Modal, Popover, Radio, Space, Tag, message } from "antd";
-import { useEffect, useMemo, useState } from "react";
+import { Alert, Button, Checkbox, Empty, Input, InputNumber, Modal, Radio, Space, Tag, Tooltip, message } from "antd";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 export type ShiftScopeProduct = { productId: number; name: string; openedCount: number; packageSize?: number };
 export type ShiftCheckThreshold = { percent: number; updatedBy?: string; effectiveAt?: string };
@@ -22,44 +21,51 @@ type Props = {
 };
 const searchText = (value: string) => value.normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/đ/gi, "d").toLocaleLowerCase("vi-VN");
 
-function ThresholdButton({ product, current, min, onSaved }: { product: ShiftScopeProduct; current?: ShiftCheckThreshold; min: number; onSaved: () => void }) {
-  const [open, setOpen] = useState(false);
-  const [percent, setPercent] = useState<number | null>(30);
+function ThresholdInput({ product, current, min, onSaved }: { product: ShiftScopeProduct; current?: ShiftCheckThreshold; min: number; onSaved: () => void }) {
+  const savedPercent = useRef<number | null>(current?.percent ?? null);
+  const [percent, setPercent] = useState<number | null>(current?.percent ?? null);
   const [saving, setSaving] = useState(false);
-  const apply = async () => {
-    if (percent === null) { message.warning("Hãy nhập mức cần kiểm."); return; }
+  useEffect(() => {
+    savedPercent.current = current?.percent ?? null;
+    setPercent(current?.percent ?? null);
+  }, [current?.percent]);
+  // Saves when the field loses focus or on Enter. There is no "no level" API, so blank restores.
+  const commit = async () => {
+    if (percent === null || percent === savedPercent.current) { setPercent(savedPercent.current); return; }
+    if (percent < min || percent > 100) {
+      message.warning(`${product.name}: mức cần kiểm phải từ ${min}% đến 100%.`);
+      setPercent(savedPercent.current);
+      return;
+    }
     setSaving(true);
     try {
       const response = await window.electronAPI?.handlingUnits?.setShiftCheckThreshold({ productId: product.productId, percent });
       if (!response?.success) throw new Error(response?.error || "Không lưu được mức cần kiểm.");
+      savedPercent.current = percent;
       message.success(`${product.name}: kiểm khi kiện còn ≤ ${percent}%.`);
-      setOpen(false);
       onSaved();
     } catch (error: any) {
+      setPercent(savedPercent.current);
       message.error(error?.message || "Không lưu được mức cần kiểm.");
     } finally {
       setSaving(false);
     }
   };
-  return <Popover open={open} trigger="click" placement="bottomRight" title="Mức cần kiểm"
-    onOpenChange={next => { if (saving) return; setOpen(next); if (next) setPercent(current?.percent ?? Math.max(30, min)); }}
-    content={<div className="hu-shift-level-popover">
-      <InputNumber<number> aria-label={`Mức cần kiểm ${product.name}`} style={{ width: "100%" }} value={percent} min={min} max={100} precision={0} suffix="%" disabled={saving} onChange={value => setPercent(value)} />
-      <small>{product.packageSize && percent !== null
-        ? `Kiện ${product.packageSize.toLocaleString("vi-VN")} gói → kiểm khi còn ≤ ${Math.floor(product.packageSize * percent / 100).toLocaleString("vi-VN")} gói`
-        : "Tính theo sức chứa của từng kiện"}</small>
-      {current?.updatedBy && <small>Đổi bởi {current.updatedBy}{current.effectiveAt ? ` lúc ${new Date(current.effectiveAt).toLocaleString("vi-VN")}` : ""}</small>}
-      <Space size={8} style={{ justifyContent: "flex-end" }}>
-        <Button size="small" disabled={saving} onClick={() => setOpen(false)}>Huỷ</Button>
-        <Button size="small" type="primary" loading={saving} onClick={apply}>Áp dụng</Button>
-      </Space>
-    </div>}>
-    <Button size="small" icon={<SettingOutlined />} className={open ? "hu-shift-level-btn is-open" : "hu-shift-level-btn"}>{current ? `Mức ${current.percent}%` : "Đặt mức"}</Button>
-  </Popover>;
+  const hint = [
+    product.packageSize && percent !== null
+      ? `Kiện ${product.packageSize.toLocaleString("vi-VN")} gói → kiểm khi còn ≤ ${Math.floor(product.packageSize * percent / 100).toLocaleString("vi-VN")} gói`
+      : "Mức cần kiểm, tính theo sức chứa của từng kiện",
+    current?.updatedBy ? `Đổi bởi ${current.updatedBy}${current.effectiveAt ? ` lúc ${new Date(current.effectiveAt).toLocaleString("vi-VN")}` : ""}` : "",
+  ].filter(Boolean).join(". ");
+  return <Tooltip title={hint}>
+    <InputNumber<number> aria-label={`Mức cần kiểm ${product.name}`} className="hu-shift-level-input" size="small" controls={false} placeholder="Mức"
+      value={percent} precision={0} suffix="%" disabled={saving} onChange={value => setPercent(value)}
+      onKeyDown={event => { if (event.key === "Enter") event.currentTarget.blur(); }} onBlur={() => void commit()} />
+  </Tooltip>;
 }
 
 // Admin or a named staff editor chooses which products the end-of-shift count
-// (and its fines) covers. Other staff only see the per-product level buttons.
+// (and its fines) covers. Other staff only see the per-product level inputs.
 export default function HandlingUnitShiftScopeModal(props: Props) {
   const [mode, setMode] = useState<"all" | "selected">("all");
   const [shiftMode, setShiftMode] = useState<ShiftCheckMode>("both");
@@ -121,7 +127,7 @@ export default function HandlingUnitShiftScopeModal(props: Props) {
         <Radio.Group value={shiftMode} onChange={event => setShiftMode(event.target.value)} disabled={saving}>
           <Space direction="vertical" size={4}>
             <Radio value="morning">Buổi sáng (hạn 12:30)</Radio>
-            <Radio value="afternoon">Buổi chiều (hạn 19:00)</Radio>
+            <Radio value="afternoon">Buổi chiều (hạn 20:00)</Radio>
             <Radio value="both">Cả buổi sáng và buổi chiều</Radio>
           </Space>
         </Radio.Group>
@@ -164,7 +170,7 @@ export default function HandlingUnitShiftScopeModal(props: Props) {
                 : product.name}
             </div>
             {product.openedCount > 0 && <Tag color="blue" style={{ marginInlineEnd: 0 }}>{product.openedCount} kiện đang khui</Tag>}
-            <ThresholdButton product={product} current={props.thresholds?.[product.productId]} min={levelMin} onSaved={props.onSaved} />
+            <ThresholdInput product={product} current={props.thresholds?.[product.productId]} min={levelMin} onSaved={props.onSaved} />
           </div>)}
         </div>
       </>

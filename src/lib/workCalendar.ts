@@ -28,6 +28,8 @@ export const STOCK_CHECK_MISSING_FINE_ENABLED = true;
 export const STOCK_CHECK_MISSING_FINE = 200000;
 export const STOCK_CHECK_FINE_EFFECTIVE_DATE = '2026-10-15';
 export const STOCK_CHECK_POLICY_START_DATE = '2026-05-06';
+// Daily and Saturday full counts ended on this date; earlier days keep their fines.
+export const STOCK_CHECK_RETIRED_DATE = '2026-11-03';
 
 // Price by the work date, not the month currently being viewed or the date
 // an administrator reviews the session. Earlier violations retain their rate.
@@ -61,6 +63,7 @@ export const isPastDailyReportWorkingDay = (date: Dayjs, now: Dayjs = dayjs()) =
 export const isPastStockCheckWorkingDay = (date: Dayjs, now: Dayjs = dayjs()) => {
     const policyStartDate = dayjs(STOCK_CHECK_POLICY_START_DATE).startOf('day');
     return !date.isBefore(policyStartDate, 'day')
+        && date.isBefore(dayjs(STOCK_CHECK_RETIRED_DATE), 'day')
         && date.isBefore(now, 'day')
         && !isDailyReportRestDay(date);
 };

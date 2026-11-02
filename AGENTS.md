@@ -2,6 +2,13 @@
 
 These instructions apply to every coding task in this repository.
 
+## Mandatory agreement before coding
+
+- Every request is a discussion until the user explicitly confirms. Do not edit code, change data, or start implementation until the user clearly agrees to the specific plan, for example "chốt", "đồng ý", or "làm đi".
+- A question, an idea, a described rule, or a statement of what the user wants is not approval, even when it sounds like a request. Discuss it, point out open issues, and ask for confirmation.
+- When in doubt, keep discussing and do not code. If the user says to stop, stop immediately.
+- Read-only investigation is allowed during discussion. Approval covers only the plan that was agreed; anything new goes back to discussion.
+
 ## Mandatory release classification
 
 Before changing code, identify the affected runtime layers. After changing code, state which release file is required. Never recommend or run a smaller release tier than the change requires.
@@ -74,10 +81,10 @@ Read [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) when a task crosses more tha
 ## Image Generation (External ChatGPT fallback)
 
 - When the user needs an AI image or mockup, run directly:
-  `"G:\CHATGPT IMAGES\.build-venv\Scripts\python.exe" "G:\DANGKHOA BILLABS	ools\dby_image.py" generate --prompt-file F [--size 1792x1024] [--out DIR]`
+  `"G:\CHATGPT IMAGES\.build-venv\Scripts\python.exe" "G:\DANGKHOA BILLABS\tools\dby_image.py" generate --prompt-file F [--size 1792x1024] [--out DIR]`
   Write the prompt to a file F in the scratchpad first; save demo images to `design-demos/` with `--out`.
 - It uses the user's DBY Images tool with their ChatGPT login through OpenAI OAuth; the login is stored encrypted and refreshes itself. Never ask the user for a session token, API key or to copy a session.
-- Only if the login has expired (`dby_image.py status` or a generate error says so), run `G:\DANGKHOA BILLABS	ools\dang-nhap-tao-anh.bat` in a terminal so the user can sign in with Google.
+- Only if the login has expired (`dby_image.py status` or a generate error says so), run `G:\DANGKHOA BILLABS\tools\dang-nhap-tao-anh.bat` in a terminal so the user can sign in with Google.
 - Do not use the 9Router endpoint for demos unless the user asks: it needs a key that is not set on this machine.
 - The tool takes a text prompt only, so describe the current UI and any reference image the user sent in words: colors, logo, labels, layout. Prompts must state what to preserve, the exact requested change, and an explicit `Avoid` list. Keep Vietnamese labels with correct diacritics, readable and unclipped.
 - When mocking one part of the UI (a menu, a header, a dialog), ask for that part alone; a full-page prompt redraws the whole interface, which the user does not want.

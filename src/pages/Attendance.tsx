@@ -3850,7 +3850,7 @@ export default function Attendance() {
                             'font-weight:700',
                             'text-align:center',
                         ].join(';');
-                        fallback.textContent = 'Không tải được QR chuyển khoản. Kiểm tra mạng và xuất lại phiếu lương.';
+                        fallback.textContent = 'Chưa tạo được QR chuyển khoản. Vui lòng xuất lại phiếu lương hoặc chuyển khoản theo số tài khoản.';
                         img.replaceWith(fallback);
                         console.warn('[PAYSLIP] VietQR unavailable:', error);
                     } else {
@@ -4003,8 +4003,11 @@ export default function Attendance() {
         const usersRes = await api.users?.getAll?.();
         const users = usersRes?.success && Array.isArray(usersRes.data) ? usersRes.data : [];
 
-        const toSend = freshPayrollData.filter(p => {
+        // Same audience as the visible payroll table; the fresh account list also
+        // catches a resignation saved after this page loaded.
+        const toSend = freshPayrollData.filter(isPayrollRowVisible).filter(p => {
             const account = findExactPayrollAccount(users, p);
+            if (account?.archived || account?.employmentStatus === 'resigned') return false;
             return Boolean(account?.email?.trim());
         });
 
@@ -6693,15 +6696,16 @@ export default function Attendance() {
         return rows;
     }, [lockedPayrollSnapshot, isPayrollDataReady, overviewFines, leaveRecords, workSchedules, overviewWareHousePacking, employees, overviewBonuses, overviewAttendanceLogs, overviewDateRange, overviewPackingLogs, packingCommission, employmentEndDates, payrollOverrides, overviewAttendanceLogsReady, activeSalesBonusSummary.bonusAmount]);
     const canUseCachedPayroll = !isPayrollDataReady && Boolean(cachedPayrollData?.length);
+    const isPayrollRowVisible = useCallback((row: any) => (
+        !hiddenEmployeeKeys.has(normalizeAttendanceText(row.username))
+        && !hiddenEmployeeKeys.has(normalizeAttendanceText(row.name))
+        && !hiddenEmployeeKeys.has(`id:${Number(row.userId)}`)
+        && !hiddenEmployeeKeys.has(`id:${Number(row.id)}`)
+    ), [hiddenEmployeeKeys]);
     const displayPayrollData = useMemo(() => {
         const source = canUseCachedPayroll ? cachedPayrollData! : payrollData;
-        return source.filter((row: any) => (
-            !hiddenEmployeeKeys.has(normalizeAttendanceText(row.username))
-            && !hiddenEmployeeKeys.has(normalizeAttendanceText(row.name))
-            && !hiddenEmployeeKeys.has(`id:${Number(row.userId)}`)
-            && !hiddenEmployeeKeys.has(`id:${Number(row.id)}`)
-        ));
-    }, [hiddenEmployeeKeys, cachedPayrollData, canUseCachedPayroll, payrollData]);
+        return source.filter(isPayrollRowVisible);
+    }, [isPayrollRowVisible, cachedPayrollData, canUseCachedPayroll, payrollData]);
     useEffect(() => {
         if (activeTab !== 'overview' || !isPayrollDataReady || !payrollData.length) return;
         const rows = isAdmin ? payrollData : payrollData.filter(row => {
@@ -11521,6 +11525,7 @@ const openConfigModal = () => {
             <Modal
                 title={null}
                 open={!!payslipModal && !bulkSendProgress?.running}
+                forceRender // Bulk Gmail builds each PDF from this content while the modal stays closed.
                 onCancel={() => { setPayslipModal(null); setPayslipPdfDetailOpen(false); }}
                 footer={null}
                 width={payslipPdfDetailOpen ? 'calc(100vw - 32px)' : 1180}

@@ -613,7 +613,8 @@ export default function ReturnsPage() {
                 const data = e.target?.result;
                 const isCSV = file.name.toLowerCase().endsWith('.csv');
                 const XLSX = await import('xlsx');
-                const workbook = XLSX.read(data, { type: isCSV ? 'string' : 'binary' });
+                // CSV dates are day/month text; SheetJS would otherwise read them as month/day.
+                const workbook = XLSX.read(data, { type: isCSV ? 'string' : 'binary', raw: isCSV });
                 const sheetName = workbook.SheetNames[0];
                 const worksheet = workbook.Sheets[sheetName];
                 const jsonData = XLSX.utils.sheet_to_json(worksheet);

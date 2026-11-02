@@ -15,8 +15,11 @@ const MAX_FINE_AMOUNT = 10000000;
 const ROTATION = ["nguyendinhtoan", "nguyenvankhanh"];
 const SHIFTS = {
   midday: { label: "ca trưa", deadline: "12:30" },
-  evening: { label: "ca chiều", deadline: "19:00" },
+  evening: { label: "ca chiều", deadline: "20:00" },
 };
+// Days before this date keep their original 19:00 evening deadline.
+const EVENING_DEADLINE_CHANGE_DATE = "2026-11-03";
+const LEGACY_EVENING_DEADLINE = "19:00";
 const SHIFT_KEYS = Object.keys(SHIFTS);
 const SHIFT_MODES = {
   morning: ["midday"],
@@ -36,8 +39,12 @@ function assigneeFor(date) {
   const offset = Math.round((Date.parse(`${date}T00:00:00Z`) - Date.parse("2026-09-29T00:00:00Z")) / 86400000);
   return ROTATION[((offset % ROTATION.length) + ROTATION.length) % ROTATION.length];
 }
+function deadlineLabel(date, shift = "evening") {
+  if (SHIFTS[shift] && shift !== "evening") return SHIFTS[shift].deadline;
+  return date < EVENING_DEADLINE_CHANGE_DATE ? LEGACY_EVENING_DEADLINE : SHIFTS.evening.deadline;
+}
 function deadlineFor(date, shift = "evening") {
-  return new Date(`${date}T${(SHIFTS[shift] || SHIFTS.evening).deadline}:00+07:00`);
+  return new Date(`${date}T${deadlineLabel(date, shift)}:00+07:00`);
 }
 function shiftForTimestamp(value) {
   return new Date(value) <= deadlineFor(dayKey(value), "midday") ? "midday" : "evening";
@@ -573,7 +580,7 @@ function buildFines(ledger, data = {}, now = new Date(), inScope = () => true, s
       fines.push({
         id: `fine-hu-shift-${date}-${shift}-${assignedTo}`, empId,
         type: `Chưa kiểm kiện ${SHIFTS[shift].label}`,
-        detail: `Chưa nhập số đếm thực tế ${missingUnits.length} kiện trước hạn ${SHIFTS[shift].deadline}; phạt ${amount.toLocaleString("vi-VN")}đ/ca.`,
+        detail: `Chưa nhập số đếm thực tế ${missingUnits.length} kiện trước hạn ${deadlineLabel(date, shift)}; phạt ${amount.toLocaleString("vi-VN")}đ/ca.`,
         amount, date: deadlineFor(date, shift).toISOString(),
         source: "handling-unit-shift-check", attendanceDate: date,
         scheduledSession: shift === "midday" ? "morning" : "afternoon", shift, assignedTo, missingUnits,

@@ -163,7 +163,7 @@ const defaultMechanisms: PolicyMechanisms = {
     refundOverdueFine: { firstFineAfterDays: 8, firstAmount: 30000, dailyIncrement: 10000, effectiveAt: '2026-09-04', excludesRestDays: true },
     taskDeadlineFine: { defaultAmount: 50000, configurablePerTask: true, splitBetweenRecipients: true },
     taskEvidenceFine: { defaultAmount: 30000, configurablePerTask: true, escalatesByCycle: true },
-    stockCheckMissingFine: { enabled: true, amount: STOCK_CHECK_MISSING_FINE, effectiveAt: STOCK_CHECK_FINE_EFFECTIVE_DATE, excludesRestDays: true },
+    stockCheckMissingFine: { enabled: false, amount: STOCK_CHECK_MISSING_FINE, effectiveAt: STOCK_CHECK_FINE_EFFECTIVE_DATE, excludesRestDays: true },
 };
 
 const defaultSnapshot: PolicySnapshot = {

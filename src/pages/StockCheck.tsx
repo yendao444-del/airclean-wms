@@ -50,6 +50,7 @@ import {
     STOCK_CHECK_MISSING_FINE,
     getStockCheckFineAmount,
     STOCK_CHECK_POLICY_START_DATE,
+    STOCK_CHECK_RETIRED_DATE,
     isVietnamRestDay,
 } from '../lib/workCalendar';
 import './StockCheck.css';
@@ -396,7 +397,7 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
     const [currentDate, setCurrentDate] = useState(dayjs());
     const [clockNow, setClockNow] = useState(dayjs());
     const wallDateKeyRef = useRef(dayjs().format('YYYY-MM-DD'));
-    const [activeTab, setActiveTab] = useState<'daily' | 'full' | 'inspection'>('daily');
+    const [activeTab, setActiveTab] = useState<'daily' | 'full' | 'inspection'>('inspection');
     const [sessions, setSessions] = useState<CheckSession[]>([]);
     const [sessionsLoaded, setSessionsLoaded] = useState(false);
     const [staffList, setStaffList] = useState<StaffUser[]>([]);
@@ -564,6 +565,8 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
         session => session.date === todayStr && session.type === 'full' && session.status !== 'cancelled'
     );
     const dailyDisabledByFull = !TEMPORARY_DAILY_ONLY_MODE && Boolean(fullSessionForDate);
+    // Old dates still open their stored daily/full sessions as history.
+    const routineChecksRetired = !currentDate.isBefore(dayjs(STOCK_CHECK_RETIRED_DATE), 'day');
     const cancelledDailyForDate = sessions.find(
         session => session.date === todayStr && session.type === 'daily' && session.status === 'cancelled'
     );
@@ -637,6 +640,10 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
             setActiveTab('full');
         }
     }, [activeTab, dailyDisabledByFull]);
+
+    useEffect(() => {
+        if (routineChecksRetired && activeTab !== 'inspection') setActiveTab('inspection');
+    }, [routineChecksRetired, activeTab]);
 
     const loadTopSellingProducts = useCallback(async (): Promise<TopSellingProduct[]> => {
         try {
@@ -1057,12 +1064,11 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
 
                     return (
                         <div style={{ display: 'inline-flex', alignItems: 'center', gap: 4, background: '#f1f5f9', padding: '3px 4px', borderRadius: 10, border: '1px solid #e2e8f0' }}>
-                            <button
+                            {!routineChecksRetired && <button
                                 disabled={dailyDisabledByFull}
                                 onClick={() => {
                                     if (dailyDisabledByFull) return;
                                     setActiveTab('daily');
-                                    setCurrentDate(dayjs());
                                 }}
                                 style={getTabButtonStyle(activeTab === 'daily', dailyDisabledByFull)}
                                 onMouseEnter={e => {
@@ -1083,14 +1089,13 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
                                 {dailyDisabledByFull ? (
                                     <span style={getBadgeStyle(activeTab === 'daily', 'alert')}>Tạm dừng</span>
                                 ) : null}
-                            </button>
+                            </button>}
 
                             {!TEMPORARY_DAILY_ONLY_MODE && (
                                 <>
-                                    <button
+                                    {!routineChecksRetired && <button
                                         onClick={() => {
                                             setActiveTab('full');
-                                            setCurrentDate(dayjs());
                                         }}
                                         style={getTabButtonStyle(activeTab === 'full')}
                                         onMouseEnter={e => {
@@ -1111,7 +1116,7 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
                                         {!fullWindowOpen && (
                                             <span style={getBadgeStyle(activeTab === 'full', 'time')}>16:00</span>
                                         )}
-                                    </button>
+                                    </button>}
 
                                     <button
                                         onClick={() => {
@@ -1562,7 +1567,7 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
     // keeps a linked Daily Tasks rotation in sync with the stock-check session.
     // Saturday is reserved for a warehouse-wide full count.
     useEffect(() => {
-        if (!isToday || !weekend || !fullWindowOpen || !sessionsLoaded || !contextProducts.length) return;
+        if (routineChecksRetired || !isToday || !weekend || !fullWindowOpen || !sessionsLoaded || !contextProducts.length) return;
         if (user?.role !== 'admin' && user?.role !== 'manager') return;
         if (sessions.some(session => session.date === todayStr && session.type === 'full' && session.status !== 'cancelled')) return;
         if (autoGeneratedSessionRef.current === `weekend-full-${todayStr}`) return;
@@ -1586,7 +1591,7 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
     }, [isToday, weekend, fullWindowOpen, sessionsLoaded, contextProducts, user?.role, assignableManagers, sessions, todayStr]); // eslint-disable-line react-hooks/exhaustive-deps
 
     useEffect(() => {
-        if (!sessionsLoaded || !isToday || weekend || !dailyWindowOpen || isVietnamRestDay(currentDate)
+        if (routineChecksRetired || !sessionsLoaded || !isToday || weekend || !dailyWindowOpen || isVietnamRestDay(currentDate)
             || activeTab !== 'daily' || dailyDisabledByFull || cancelledDailyForDate
             || (user?.role !== 'admin' && user?.role !== 'manager')) return;
         if (todaySession?.items.length || autoGeneratedSessionRef.current === `daily-${todayStr}`) return;
@@ -1605,6 +1610,7 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
     }, [sessionsLoaded, isToday, weekend, dailyWindowOpen, activeTab, dailyDisabledByFull, cancelledDailyForDate, user?.role, todaySession, todayStr]); // eslint-disable-line react-hooks/exhaustive-deps
 
     const handleGenerate = async () => {
+        if (routineChecksRetired) return;
         if (isPast) {
             message.warning('Ngày đã khóa, không thể tạo phiên kiểm.');
             return;
