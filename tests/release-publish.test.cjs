@@ -6,7 +6,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { spawnSync } = require('node:child_process');
 const AdmZip = require('adm-zip');
-const { validateArtifact, resolveTarget, publishRelease } = require('../scripts/release-publish.cjs');
+const { prepareExistingArtifact, validateArtifact, resolveTarget, publishRelease } = require('../scripts/release-publish.cjs');
 
 const version = '1.0.488';
 const target = '9'.repeat(40);
@@ -168,6 +168,50 @@ test('resume resolves original release commit rather than current branch tip', (
     assert.equal(command, 'git');
     return { stdout: args[0] === 'log' ? target : JSON.stringify({ version }) };
   }), target);
+});
+
+test('orphan ZIP is archived instead of overwritten', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dbyp-orphan-'));
+  const zip = path.join(dir, 'DBYPOS-PATCH-v1.0.489.zip');
+  fs.writeFileSync(zip, 'orphan');
+  const result = prepareExistingArtifact('1.0.489', dir);
+  assert.equal(result.status, 'archived');
+  assert.equal(fs.existsSync(zip), false);
+  assert.equal(fs.readFileSync(result.destination, 'utf8'), 'orphan');
+  fs.unlinkSync(result.destination);
+  fs.rmdirSync(path.dirname(result.destination));
+  fs.rmdirSync(path.join(dir, 'tmp'));
+  fs.rmdirSync(dir);
+});
+
+test('complete artifact pair blocks an accidental overwrite', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dbyp-pair-'));
+  const zip = path.join(dir, 'DBYPOS-PATCH-v1.0.489.zip');
+  fs.writeFileSync(zip, 'zip');
+  fs.writeFileSync(`${zip}.sha256`, 'checksum');
+  assert.equal(prepareExistingArtifact('1.0.489', dir).status, 'pair');
+  assert.equal(fs.existsSync(zip), true);
+  fs.unlinkSync(zip);
+  fs.unlinkSync(`${zip}.sha256`);
+  fs.rmdirSync(dir);
+});
+
+test('orphan checksum is preserved before a fresh build', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dbyp-checksum-'));
+  const checksum = path.join(dir, 'DBYPOS-PATCH-v1.0.489.zip.sha256');
+  fs.writeFileSync(checksum, 'original checksum');
+  const result = prepareExistingArtifact('1.0.489', dir);
+  assert.equal(result.status, 'archived');
+  assert.equal(fs.readFileSync(result.destination, 'utf8'), 'original checksum');
+  assert.equal(prepareExistingArtifact('1.0.489', dir).status, 'none');
+  fs.unlinkSync(result.destination);
+  fs.rmdirSync(path.dirname(result.destination));
+  fs.rmdirSync(path.join(dir, 'tmp'));
+  fs.rmdirSync(dir);
+});
+
+test('invalid version cannot move files outside the release directory', () => {
+  assert.throws(() => prepareExistingArtifact('../1.0.489'), /Expected a version/);
 });
 
 // Exercise the Windows BAT adapter with fake commands, never real Git/GitHub.

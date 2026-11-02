@@ -5,7 +5,7 @@ const {
   calculateAttendanceRewardSummary,
   monthlyTarget,
 } = require('../electron/attendance-rewards');
-const { reconcileLateAttendanceFines } = require('../electron/attendance-fines');
+const { calculateLateAttendanceFinePlan, reconcileLateAttendanceFines } = require('../electron/attendance-fines');
 
 const employee = { id: 1, name: 'Test User', username: 'test', type: 'Official' };
 
@@ -83,6 +83,28 @@ test('seven completed on-time days earn one mild late-fine waiver for the period
   assert.equal(summary.waiver.eligible, true);
   assert.equal(summary.waiver.earnedAt, '2026-09-10');
   assert.equal(summary.waiver.lateMaxMinutes, 15);
+  assert.equal(summary.waiver.maxPerPeriod, 1);
+});
+
+test('fifteen completed on-time days upgrade the same waiver to twenty minutes', () => {
+  const dates = [
+    '2026-09-01', '2026-09-03', '2026-09-04', '2026-09-05', '2026-09-07',
+    '2026-09-08', '2026-09-09', '2026-09-10', '2026-09-11', '2026-09-12',
+    '2026-09-14', '2026-09-15', '2026-09-16', '2026-09-17', '2026-09-18',
+  ];
+  const logs = dates.flatMap((date, index) => fullDay(index + 1, date));
+  const summary = calculateAttendanceRewardSummary({
+    employee,
+    employees: [employee],
+    logs,
+    now: '2026-09-18T23:00:00+07:00',
+    periodKey: '2026-09',
+  });
+  assert.equal(summary.currentStreak, 15);
+  assert.equal(summary.waiver.eligible, true);
+  assert.equal(summary.waiver.upgraded, true);
+  assert.equal(summary.waiver.upgradedAt, '2026-09-18');
+  assert.equal(summary.waiver.lateMaxMinutes, 20);
   assert.equal(summary.waiver.maxPerPeriod, 1);
 });
 
@@ -193,7 +215,127 @@ test('a seven-day streak automatically consumes one credit for a 6-15 minute lat
   assert.equal(result.waived[0].fine.attendanceLogId, 'late-am');
   assert.equal(saved.extraFines.length, 0);
   assert.equal(saved.fineWaivers.length, 1);
-  assert.match(saved.fineWaivers[0].reason, /miễn phạt mức Nhẹ/i);
+  assert.match(saved.fineWaivers[0].reason, /miễn phạt chuyên cần/i);
+});
+
+test('monthly reconciliation keeps a cross-month streak but writes fines only in the selected month', () => {
+  const logs = [
+    ...fullDay(1, '2026-09-25'),
+    ...fullDay(2, '2026-09-26'),
+    ...fullDay(3, '2026-09-28'),
+    ...fullDay(4, '2026-09-29'),
+    ...fullDay(5, '2026-09-30'),
+    ...fullDay(6, '2026-10-01'),
+    ...fullDay(7, '2026-10-02'),
+    log('late-october', '2026-10-03', 'morning_in', '08:10'),
+    log('late-september', '2026-09-24', 'morning_in', '08:10'),
+  ];
+  const data = {
+    config: { graceMinutes: 5 }, employees: [employee], workSchedules: [],
+    leaveRecords: [], extraFines: [], fineWaivers: [], fineAuditLog: [],
+  };
+  const result = calculateLateAttendanceFinePlan(data, logs, { month: '2026-10' });
+  assert.deepEqual(result.result.created, []);
+  assert.equal(result.result.waived.length, 1);
+  assert.equal(result.result.waived[0].fine.attendanceLogId, 'late-october');
+});
+
+async function reconcileAfterFifteenDayStreak(lateTime) {
+  const dates = [
+    '2026-09-01', '2026-09-03', '2026-09-04', '2026-09-05', '2026-09-07',
+    '2026-09-08', '2026-09-09', '2026-09-10', '2026-09-11', '2026-09-12',
+    '2026-09-14', '2026-09-15', '2026-09-16', '2026-09-17', '2026-09-18',
+  ];
+  const logs = [
+    ...dates.flatMap((date, index) => fullDay(index + 1, date)),
+    log(`late-${lateTime}`, '2026-09-19', 'morning_in', lateTime),
+  ];
+  let saved = null;
+  const attendanceData = {
+    config: { graceMinutes: 5 },
+    employees: [employee],
+    workSchedules: [],
+    leaveRecords: [],
+    extraFines: [],
+    fineWaivers: [],
+    fineAuditLog: [],
+  };
+  const tx = {
+    $executeRaw: async () => undefined,
+    appConfig: {
+      findUnique: async () => ({ value: JSON.stringify(attendanceData) }),
+      update: async ({ data }) => { saved = JSON.parse(data.value); },
+    },
+    attendanceLog: { findMany: async () => logs },
+  };
+  const prisma = { $transaction: async (work) => work(tx) };
+  return { result: await reconcileLateAttendanceFines(prisma), saved };
+}
+
+test('a fifteen-day streak waives a twenty-minute late arrival', async () => {
+  const { result, saved } = await reconcileAfterFifteenDayStreak('08:20');
+  assert.equal(result.created.length, 0);
+  assert.equal(result.waived.length, 1);
+  assert.equal(saved.extraFines.length, 0);
+  assert.match(saved.fineWaivers[0].reason, /20 phút/);
+  assert.match(saved.fineWaivers[0].reason, /15 ngày/);
+});
+
+test('a fifteen-day streak does not waive a twenty-one-minute late arrival', async () => {
+  const { result, saved } = await reconcileAfterFifteenDayStreak('08:21');
+  assert.equal(result.waived.length, 0);
+  assert.equal(result.created.length, 1);
+  assert.equal(saved.extraFines.length, 1);
+});
+
+test('an existing automatic late fine is converted to a waiver after approved leave restores the streak', async () => {
+  const dates = [
+    '2026-09-11', '2026-09-12', '2026-09-14', '2026-09-15', '2026-09-16', '2026-09-17', '2026-09-18',
+  ];
+  const logs = [
+    ...dates.flatMap((date, index) => fullDay(index + 1, date)),
+    log('late-existing', '2026-09-23', 'morning_in', '08:11'),
+  ];
+  const existingFine = {
+    id: 'fine-attendance-log-late-existing',
+    empId: 1,
+    type: 'Đi muộn',
+    detail: 'Đi muộn ca sáng 6 phút (Mức Nhẹ) — 23/9/2026',
+    amount: 50000,
+    date: '2026-09-23T01:11:00.000Z',
+    source: 'attendance',
+    attendanceLogId: 'late-existing',
+  };
+  let saved = null;
+  const attendanceData = {
+    config: { graceMinutes: 5 },
+    employees: [employee],
+    workSchedules: [],
+    leaveRecords: [
+      { empId: 1, date: '2026-09-19', session: 'morning' },
+      { empId: 1, date: '2026-09-19', session: 'afternoon' },
+    ],
+    extraFines: [existingFine],
+    fineWaivers: [],
+    fineAuditLog: [],
+  };
+  const tx = {
+    $executeRaw: async () => undefined,
+    appConfig: {
+      findUnique: async () => ({ value: JSON.stringify(attendanceData) }),
+      update: async ({ data }) => { saved = JSON.parse(data.value); },
+    },
+    attendanceLog: { findMany: async () => logs },
+  };
+  const prisma = { $transaction: async (work) => work(tx) };
+  const result = await reconcileLateAttendanceFines(prisma);
+
+  assert.equal(result.created.length, 0);
+  assert.equal(result.waived.length, 1);
+  assert.equal(saved.extraFines.length, 0);
+  assert.equal(saved.fineWaivers[0].fine.id, existingFine.id);
+  assert.equal(saved.fineAuditLog[0].action, 'delete');
+  assert.equal(saved.fineAuditLog[0].before.id, existingFine.id);
 });
 
 test('current month does not qualify before all scheduled days are complete', () => {
