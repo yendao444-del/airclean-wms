@@ -56,6 +56,8 @@ import { buildHandlingUnitSequenceMap, prepareHandlingUnitPrintUnits } from "../
 import { packedStockForSku, summarizeHandlingUnitAllocation, summarizePackedInventory, suggestHandlingUnitAllocation, looseRemainderForAllocation } from "../lib/handlingUnitAllocation";
 import HandlingUnitPackedStock from "../components/HandlingUnitPackedStock";
 import HandlingUnitShiftChecklist, { ShiftFamilySearch } from "../components/HandlingUnitShiftChecklist";
+import HandlingUnitShiftHistory from "../components/HandlingUnitShiftHistory";
+import { shiftChecksOnDay } from "../lib/handlingUnitShiftHistory";
 import HandlingUnitShiftScopeModal, { type ShiftCheckThreshold } from "../components/HandlingUnitShiftScopeModal";
 import { identifyShiftCandidates, scopeShiftCandidates, type ShiftIdentity } from "../lib/handlingUnitShiftScope";
 import HandlingUnitUnifiedHistory from "../components/HandlingUnitUnifiedHistory";
@@ -1197,6 +1199,7 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
   const [showShiftScopeModal, setShowShiftScopeModal] = useState(false);
   const [shiftCheckScope, setShiftCheckScope] = useState<"all" | "mandatory">("all");
   const [shiftCheckFocusCode, setShiftCheckFocusCode] = useState<string | null>(null);
+  const [shiftCheckView, setShiftCheckView] = useState<"pending" | "history">("pending");
   const [shiftCheckSnapshot, setShiftCheckSnapshot] = useState<ShiftCheckCandidate[]>([]);
   const [shiftCheckFamily, setShiftCheckFamily] = useState("all");
   const [shiftCheckDrafts, setShiftCheckDrafts] = useState<
@@ -2347,12 +2350,26 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
   });
 
   const openShiftCheck = (scope: "all" | "mandatory" = "all") => {
-    if (!canPerformUnitCheck) { message.info('Chỉ người được phân công hôm nay hoặc quản lý được chốt kiểm kiện.'); return; }
+    // Nothing to count, or not the assignee: show today's completed counts instead.
+    const openHistory = () => {
+      setShiftCheckScope("all");
+      setShiftCheckFocusCode(null);
+      setShiftCheckSnapshot([]);
+      setShiftCheckDrafts({});
+      setShiftCheckView("history");
+      setShowShiftCheckModal(true);
+    };
+    if (!canPerformUnitCheck) {
+      if (scope === "all") openHistory();
+      else message.info('Chỉ người được phân công hôm nay hoặc quản lý được chốt kiểm kiện.');
+      return;
+    }
     const candidates = scope === "mandatory"
       ? mandatoryShiftCheckCandidates
       : shiftCheckCandidates;
     const identified = identifyShiftCandidates(candidates, workspace.register, workspace.catalog);
     if (scopeShiftCandidates(identified, "all").length === 0) {
+      if (scope === "all") { openHistory(); return; }
       message.info(
         scope === "mandatory"
           ? "Không có kiện nào đang chờ kiểm."
@@ -2362,6 +2379,7 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
     }
     setShiftCheckScope(scope);
     setShiftCheckFocusCode(null);
+    setShiftCheckView("pending");
     // The end-of-shift modal is a cross-product review.  It must always open
     // on the complete list instead of inheriting the product family currently
     // selected behind the modal (which could silently leave it on e.g. Decor).
@@ -2383,6 +2401,17 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
     setShowShiftCheckModal(true);
   };
 
+  const todayShiftChecks = useMemo(
+    () => shiftChecksOnDay(workspace.recentTransactions, workspace.shiftCheckPolicy?.date || localDayKey(new Date())),
+    [workspace.recentTransactions, workspace.shiftCheckPolicy?.date],
+  );
+  const describeShiftHistoryUnit = (code: string) => {
+    if (code.startsWith("PACKED:")) return { name: "Combo đóng gói sẵn", unitName: "combo" };
+    const unit = workspace.register.find((item) => item.id.trim().toUpperCase() === code);
+    const product = unit ? workspace.catalog.find((item) => item.sku === unit.skuName) : undefined;
+    return { name: product?.variantName || unit?.skuName || "", unitName: unit?.unitName || "gói" };
+  };
+
   const openShiftCheckForUnit = (unit: UnitRow) => {
     if (!canPerformUnitCheck) { message.info('Chỉ người được phân công hôm nay hoặc quản lý được chốt kiểm kiện.'); return; }
     if (!canRecheckHandlingUnit(unit.status)) {
@@ -2392,6 +2421,7 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
     const candidate = shiftCheckCandidates.find((entry) => entry.unit.id === unit.id) || { unit, withdrawalCount: 0, withdrawnQuantity: 0, lastWithdrawalAt: 0 };
     setShiftCheckScope("all");
     setShiftCheckFocusCode(unit.id);
+    setShiftCheckView("pending");
     setShiftCheckSnapshot(identifyShiftCandidates([{ ...candidate, unit: { ...unit } }], workspace.register, workspace.catalog));
     shiftCheckRequestIdRef.current = `HU-SHIFT-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     setShiftCheckDrafts({
@@ -3290,7 +3320,18 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
             </Popover>
           )}
           {!isRolePreview && workspace.shiftCheckPolicy && (
-            <Tooltip title={canEditShiftScope ? "Cài đặt buổi kiểm, phạm vi sản phẩm và mức cần kiểm" : "Cài đặt mức cần kiểm của từng sản phẩm"}>
+            <Tooltip title={canPerformUnitCheck && allShiftCheckCandidates.length > 0
+              ? `${allShiftCheckCandidates.length} kiện đang khui hoặc chờ kiểm trên toàn bộ sản phẩm cần đối chiếu.`
+              : "Xem các lần kiểm cuối ca hôm nay."}>
+              <Button size="small" icon={<CheckCircleOutlined />} className="hu-shift-settings-btn hu-shift-top-check-btn"
+                onClick={() => openShiftCheck("all")}>
+                Kiểm cuối ca
+                {allShiftCheckCandidates.length > 0 && <span className="hu-shift-check-count">{allShiftCheckCandidates.length}</span>}
+              </Button>
+            </Tooltip>
+          )}
+          {!isRolePreview && workspace.shiftCheckPolicy && (
+            <Tooltip title={canEditShiftScope ?"Cài đặt buổi kiểm, phạm vi sản phẩm và mức cần kiểm" : "Cài đặt mức cần kiểm của từng sản phẩm"}>
               <Button size="small" icon={<SettingOutlined />} className="hu-shift-settings-btn" onClick={() => setShowShiftScopeModal(true)}>
                 Cài đặt ca
                 {canEditShiftScope && (
@@ -4716,7 +4757,19 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
                   : `Đối chiếu kiện có biến động và kiện chờ kiểm · ${workspace.shiftCheckPolicy?.shiftLabel || "ca hiện tại"} · hạn ${workspace.shiftCheckPolicy?.currentShift === "midday" ? "12:30" : "20:00"}`}
               </small>
             </div>
-            {!shiftCheckFocusCode && <ShiftFamilySearch
+            {!shiftCheckFocusCode && shiftCheckScope === "all" && (
+              <Segmented
+                className="hu-shift-check-views"
+                value={shiftCheckView}
+                disabled={isSubmittingShiftCheck}
+                onChange={(value) => setShiftCheckView(value as "pending" | "history")}
+                options={[
+                  { value: "pending", label: `Cần kiểm (${shiftCheckBatchCandidates.length})`, disabled: shiftCheckBatchCandidates.length === 0 },
+                  { value: "history", label: `Đã kiểm hôm nay (${todayShiftChecks.length})` },
+                ]}
+              />
+            )}
+            {!shiftCheckFocusCode && shiftCheckView === "pending" && <ShiftFamilySearch
               families={["all", ...shiftCheckFamilies]}
               family={shiftCheckFamily}
               busy={isSubmittingShiftCheck}
@@ -4735,7 +4788,8 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
         onOk={submitShiftCheck}
         okText={`${shiftCheckScope === "mandatory" ? "Chốt" : "Hoàn tất kiểm"} ${shiftCheckEnteredCount}/${shiftCheckBatchCandidates.length} kiện`}
         okButtonProps={{ disabled: !canSubmitShiftCheck }}
-        cancelText="Để kiểm sau"
+        footer={shiftCheckView === "history" ? (_, { CancelBtn }) => <CancelBtn /> : undefined}
+        cancelText={shiftCheckView === "history" ? "Đóng" : "Để kiểm sau"}
         confirmLoading={isSubmittingShiftCheck}
         closable={!isSubmittingShiftCheck}
         maskClosable={!isSubmittingShiftCheck}
@@ -4746,7 +4800,9 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
         destroyOnHidden
         className="hu-shift-check-modal"
       >
-        <HandlingUnitShiftChecklist
+        {shiftCheckView === "history" ? (
+          <HandlingUnitShiftHistory entries={todayShiftChecks} describe={describeShiftHistoryUnit} />
+        ) : <HandlingUnitShiftChecklist
           items={visibleShiftCheckCandidates}
           drafts={shiftCheckDrafts}
           family={shiftCheckFamily}
@@ -4760,7 +4816,7 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
           busy={isSubmittingShiftCheck}
           onFamily={setShiftCheckFamily}
           onDraft={updateShiftCheckDraft}
-        />
+        />}
       </Modal>
 
       {!isRolePreview && (

@@ -1,4 +1,4 @@
-import { Fragment, useState, useEffect, useMemo, useRef } from 'react';
+import { Fragment, useState, useEffect, useMemo, useRef, type CSSProperties } from 'react';
 import {
     Card,
     Button,
@@ -2601,7 +2601,10 @@ export default function PurchasePage() {
                 }}
                 footer={null}
                 width={1320}
-                style={{ maxWidth: 'calc(100vw - 48px)', top: 24 }}
+                // Start below the app's fixed 40px titlebar; the body scrolls so the
+                // title and close button stay visible on short windows.
+                style={{ maxWidth: 'calc(100vw - 32px)', top: 52, paddingBottom: 12 }}
+                styles={{ body: { maxHeight: 'calc(100dvh - 140px)', overflowY: 'auto', overflowX: 'hidden', paddingRight: 4 } }}
                 destroyOnClose
             >
                 {suppliers.length === 0 && products.length === 0 && !loadingData && (
@@ -2866,40 +2869,91 @@ export default function PurchasePage() {
                     {/* Items List */}
                     {purchaseItems.length > 0 && (
                         <div style={{ marginBottom: 24 }}>
-                            <div style={{ display: 'grid', gap: 10 }}>
-                                {purchaseItems.map((item, index) => {
-                                    const levels = getPackagingLevels(item);
-                                    const counts = getPackagingCounts(item, levels);
-                                    const firstInCompany = index === 0 || purchaseItems[index - 1]?.companyGroup !== item.companyGroup;
-                                    const firstForProduct = !purchaseItems.slice(0, index).some(entry => Number(entry.productId) === Number(item.productId));
-                                    return (
-                                        <Fragment key={`packaging-row-${index}`}>
-                                            {firstInCompany && <div style={{ padding: '7px 10px', background: '#f4f1ff', color: '#4e40bd', borderRadius: 6, fontWeight: 700, fontSize: 13 }}>Công ty / thương hiệu: {item.companyGroup || 'Chưa chọn'}</div>}
-                                        <div style={{ border: '1px solid #d9d9d9', borderRadius: 8, padding: 12, background: '#fff', maxWidth: '100%', overflow: 'hidden' }}>
-                                            <div style={{ display: 'grid', gridTemplateColumns: `24px minmax(170px, 1.2fr) minmax(145px, .9fr) minmax(120px, .75fr) 64px repeat(${levels.length}, minmax(72px, .58fr)) 88px 28px`, gap: 8, alignItems: 'center', width: '100%', minWidth: 0 }}>
-                                                <span style={{ color: '#8c8c8c', cursor: 'grab' }}>⠿</span>
-                                                <div><div style={{ fontWeight: 700 }}>{item.productName || 'Sản phẩm'}</div><div style={{ color: '#8c8c8c', fontSize: 12 }}>SKU: {item.variantSku || item.sku || '—'}</div></div>
-                                                <Tag color="blue" style={{ margin: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={item.companyGroup}>{item.companyGroup || 'Chưa gán'}</Tag>
-                                                <Select size="small" value={item.color || undefined} placeholder="Phân loại" disabled={!item.color} options={item.color ? [{ value: item.color, label: item.color }] : []} style={{ minWidth: 0 }} />
-                                                <Tag color="green" style={{ margin: 0, textAlign: 'center' }}>{item.unit || 'Cái'}</Tag>
-                                                {levels.map(level => <div key={level.id}><div style={{ fontSize: 11, textAlign: 'center', color: '#595959', marginBottom: 3 }}>{level.name}</div><InputNumber min={0} controls={false} size="small" value={counts[level.id] ?? undefined} placeholder="0" onWheel={event => event.currentTarget.blur()} onChange={value => updatePackagingCount(index, level.id, value)} style={{ width: '100%' }} /><div style={{ fontSize: 10, color: '#8c8c8c', textAlign: 'center', whiteSpace: 'nowrap' }}>1 {level.name} = {level.factor} {item.unit || 'ĐVT'}</div></div>)}
-                                                <div style={{ textAlign: 'right', whiteSpace: 'nowrap' }}><div style={{ fontSize: 11, color: '#8c8c8c' }}>Tổng ({item.unit || 'ĐVT'})</div><b style={{ color: '#00a854' }}>{new Intl.NumberFormat('vi-VN').format(item.quantity || 0)}</b></div>
-                                                <Button type="text" danger icon={<DeleteOutlined />} onClick={() => handleRemoveItem(index)} />
-                                            </div>
-                                            {firstForProduct && <div style={{ textAlign: 'right', marginTop: 8 }}><Button type="link" size="small" icon={<TagOutlined />} onClick={() => packagingSetupIndex === index ? setPackagingSetupIndex(null) : openPackagingSetup(index)}>Thiết lập quy cách {packagingSetupIndex === index ? '⌃' : '⌄'}</Button></div>}
-                                            {firstForProduct && packagingSetupIndex === index && (
-                                                <div style={{ marginTop: 8, border: '1px solid #d9f0e3', borderRadius: 8, overflow: 'hidden' }}>
-                                                    <div style={{ padding: '10px 12px', fontWeight: 600 }}>Thiết lập quy cách cho {item.productName?.replace(` - ${item.color}`, '') || item.sku}</div>
-                                                    <div style={{ padding: '0 12px 8px', color: '#595959', fontSize: 12 }}>Áp dụng chung cho mọi màu / SKU của sản phẩm này</div>
-                                                    {packagingDraft.map((level, draftIndex) => <div key={level.id} style={{ display: 'grid', gridTemplateColumns: '42px 28px 1fr 28px 1fr 34px', gap: 8, padding: '6px 12px', alignItems: 'center', borderTop: '1px solid #f0f0f0' }}><span>{draftIndex + 1}</span><span style={{ color: '#8c8c8c' }}>1</span><Input size="small" value={level.name} onChange={event => setPackagingDraft(prev => prev.map(entry => entry.id === level.id ? { ...entry, name: event.target.value } : entry))} /><span style={{ color: '#8c8c8c' }}>=</span><InputNumber size="small" min={1} controls={false} value={level.factor} addonAfter={item.unit || 'ĐVT'} onWheel={event => event.currentTarget.blur()} onChange={value => setPackagingDraft(prev => prev.map(entry => entry.id === level.id ? { ...entry, factor: Number(value || 1) } : entry))} /><Button type="text" danger icon={<DeleteOutlined />} disabled={packagingDraft.length <= 1} onClick={() => setPackagingDraft(prev => prev.filter(entry => entry.id !== level.id))} /></div>)}
-                                                    <div style={{ padding: 10, display: 'flex', justifyContent: 'space-between' }}><Button size="small" type="dashed" icon={<PlusOutlined />} onClick={() => setPackagingDraft(prev => [...prev, { id: `level-${Date.now()}`, name: 'Quy cách mới', factor: 1 }])}>Thêm cấp quy cách</Button><Button size="small" type="primary" onClick={savePackagingSetup}>Lưu quy cách</Button></div>
-                                                </div>
-                                            )}
-                                        </div>
-                                        </Fragment>
-                                    );
-                                })}
-                            </div>
+                            {(() => {
+                                // One aligned column per packaging level across every line. A
+                                // product without that level shows "—" in the same column.
+                                const fmtQty = (value: number) => new Intl.NumberFormat('vi-VN').format(value);
+                                const columnKey = (level: PackagingLevel) => Number(level.factor) === 1 ? 'base' : level.name.trim().toLocaleLowerCase('vi-VN');
+                                const columns: Array<{ key: string; name: string; factors: Set<string> }> = [];
+                                purchaseItems.forEach(item => getPackagingLevels(item).forEach(level => {
+                                    const key = columnKey(level);
+                                    let column = columns.find(entry => entry.key === key);
+                                    if (!column) { column = { key, name: level.name, factors: new Set() }; columns.push(column); }
+                                    column.factors.add(`${fmtQty(Number(level.factor))} ${(item.unit || 'ĐVT').toLocaleLowerCase('vi-VN')}`);
+                                }));
+                                columns.sort((left, right) => (left.key === 'base' ? -1 : right.key === 'base' ? 1 : 0));
+                                const units = new Set(purchaseItems.map(item => (item.unit || 'ĐVT').toLocaleLowerCase('vi-VN')));
+                                const headerName = (column: typeof columns[number]) => column.key === 'base'
+                                    ? (units.size === 1 ? [...units][0] : 'lẻ') : column.name.toLocaleLowerCase('vi-VN');
+                                const cell: CSSProperties = { padding: '4px 8px', borderBottom: '1px solid #f0f0f0', verticalAlign: 'middle' };
+                                const head: CSSProperties = { padding: '6px 8px', background: '#f5f7fa', color: '#262626', fontWeight: 600, fontSize: 12, borderBottom: '1px solid #e8e8e8' };
+                                const colSpan = 5 + columns.length;
+                                return <div style={{ border: '1px solid #e8e8e8', borderRadius: 10, overflowX: 'auto' }}>
+                                    <table style={{ width: '100%', minWidth: 480 + columns.length * 80, borderCollapse: 'collapse' }}>
+                                        <thead>
+                                            <tr>
+                                                <th style={{ ...head, textAlign: 'left' }}>Sản phẩm</th>
+                                                <th style={{ ...head, textAlign: 'left', width: 120 }}>Màu</th>
+                                                <th style={{ ...head, textAlign: 'center', width: 56 }}>ĐVT</th>
+                                                {columns.map(column => <th key={column.key} style={{ ...head, textAlign: 'right', width: 95 }}>
+                                                    <div>SL {headerName(column)}</div>
+                                                    {column.key !== 'base' && column.factors.size === 1 && <div style={{ fontWeight: 400, fontSize: 11, color: '#8c8c8c' }}>1 {headerName(column)} = {[...column.factors][0]}</div>}
+                                                </th>)}
+                                                <th style={{ ...head, textAlign: 'right', width: 90 }}>Tổng ({units.size === 1 ? [...units][0] : 'ĐVT'})</th>
+                                                <th style={{ ...head, width: 36 }}></th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {purchaseItems.map((item, index) => {
+                                                const levels = getPackagingLevels(item);
+                                                const counts = getPackagingCounts(item, levels);
+                                                const firstInCompany = index === 0 || purchaseItems[index - 1]?.companyGroup !== item.companyGroup;
+                                                const firstForProduct = !purchaseItems.slice(0, index).some(entry => Number(entry.productId) === Number(item.productId));
+                                                return (
+                                                    <Fragment key={`packaging-row-${index}`}>
+                                                        {firstInCompany && <tr><td colSpan={colSpan} style={{ padding: '7px 10px', background: '#f4f1ff', color: '#4e40bd', fontWeight: 700, fontSize: 13 }}>Công ty / thương hiệu: {item.companyGroup || 'Chưa chọn'}</td></tr>}
+                                                        <tr style={{ background: index % 2 ? '#fafbfc' : '#fff' }}>
+                                                            <td style={cell}>
+                                                                <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', fontSize: 13, lineHeight: 1.35 }}>
+                                                                    <b>{item.productName?.replace(` - ${item.color}`, '') || 'Sản phẩm'}</b>
+                                                                    <Tag color="blue" style={{ margin: 0, fontSize: 11, lineHeight: '16px', paddingInline: 5 }}>{item.companyGroup || 'Chưa gán'}</Tag>
+                                                                </div>
+                                                                <div style={{ color: '#8c8c8c', fontSize: 11, lineHeight: 1.35 }}>SKU {item.variantSku || item.sku || '—'}
+                                                                    {firstForProduct && <Button type="link" size="small" icon={<TagOutlined />} style={{ fontSize: 11, height: 'auto', padding: '0 0 0 6px' }} onClick={() => packagingSetupIndex === index ? setPackagingSetupIndex(null) : openPackagingSetup(index)}>Thiết lập quy cách {packagingSetupIndex === index ? '⌃' : '⌄'}</Button>}
+                                                                </div>
+                                                            </td>
+                                                            <td style={cell}><Select size="small" value={item.color || undefined} placeholder="Phân loại" disabled={!item.color} options={item.color ? [{ value: item.color, label: item.color }] : []} style={{ width: '100%' }} /></td>
+                                                            <td style={{ ...cell, textAlign: 'center' }}>{item.unit || 'Cái'}</td>
+                                                            {columns.map(column => {
+                                                                const level = levels.find(entry => columnKey(entry) === column.key);
+                                                                return <td key={column.key} style={{ ...cell, textAlign: 'right' }}>
+                                                                    {level ? <>
+                                                                        <InputNumber min={0} controls={false} size="small" value={counts[level.id] ?? undefined} placeholder="0" aria-label={`SL ${headerName(column)} ${item.variantSku || item.sku || ''}`}
+                                                                            onWheel={event => event.currentTarget.blur()} onChange={value => updatePackagingCount(index, level.id, value)} style={{ width: '100%' }} />
+                                                                        {column.key !== 'base' && column.factors.size > 1 && <div style={{ fontSize: 10, color: '#8c8c8c' }}>1 {level.name} = {fmtQty(Number(level.factor))} {item.unit || 'ĐVT'}</div>}
+                                                                    </> : <span style={{ color: '#bfbfbf' }}>—</span>}
+                                                                </td>;
+                                                            })}
+                                                            <td style={{ ...cell, textAlign: 'right' }}><b style={{ color: '#00a854', fontSize: 14 }}>{fmtQty(item.quantity || 0)}</b></td>
+                                                            <td style={{ ...cell, textAlign: 'center' }}><Button type="text" size="small" danger icon={<DeleteOutlined />} onClick={() => handleRemoveItem(index)} /></td>
+                                                        </tr>
+                                                        {firstForProduct && packagingSetupIndex === index && (
+                                                            <tr><td colSpan={colSpan} style={{ padding: 10, background: '#fcfffd' }}>
+                                                                <div style={{ border: '1px solid #d9f0e3', borderRadius: 8, overflow: 'hidden', background: '#fff' }}>
+                                                                    <div style={{ padding: '10px 12px', fontWeight: 600 }}>Thiết lập quy cách cho {item.productName?.replace(` - ${item.color}`, '') || item.sku}</div>
+                                                                    <div style={{ padding: '0 12px 8px', color: '#595959', fontSize: 12 }}>Áp dụng chung cho mọi màu / SKU của sản phẩm này</div>
+                                                                    {packagingDraft.map((level, draftIndex) => <div key={level.id} style={{ display: 'grid', gridTemplateColumns: '42px 28px 1fr 28px 1fr 34px', gap: 8, padding: '6px 12px', alignItems: 'center', borderTop: '1px solid #f0f0f0' }}><span>{draftIndex + 1}</span><span style={{ color: '#8c8c8c' }}>1</span><Input size="small" value={level.name} onChange={event => setPackagingDraft(prev => prev.map(entry => entry.id === level.id ? { ...entry, name: event.target.value } : entry))} /><span style={{ color: '#8c8c8c' }}>=</span><InputNumber size="small" min={1} controls={false} value={level.factor} addonAfter={item.unit || 'ĐVT'} onWheel={event => event.currentTarget.blur()} onChange={value => setPackagingDraft(prev => prev.map(entry => entry.id === level.id ? { ...entry, factor: Number(value || 1) } : entry))} /><Button type="text" danger icon={<DeleteOutlined />} disabled={packagingDraft.length <= 1} onClick={() => setPackagingDraft(prev => prev.filter(entry => entry.id !== level.id))} /></div>)}
+                                                                    <div style={{ padding: 10, display: 'flex', justifyContent: 'space-between' }}><Button size="small" type="dashed" icon={<PlusOutlined />} onClick={() => setPackagingDraft(prev => [...prev, { id: `level-${Date.now()}`, name: 'Quy cách mới', factor: 1 }])}>Thêm cấp quy cách</Button><Button size="small" type="primary" onClick={savePackagingSetup}>Lưu quy cách</Button></div>
+                                                                </div>
+                                                            </td></tr>
+                                                        )}
+                                                    </Fragment>
+                                                );
+                                            })}
+                                        </tbody>
+                                    </table>
+                                </div>;
+                            })()}
                             <div style={{ display: 'none', overflowX: 'auto' }}>
                             <table style={{ width: '100%', minWidth: 840, borderCollapse: 'collapse', tableLayout: 'fixed' }}>
                                 <thead>

@@ -497,7 +497,8 @@ export default function RefundsPage() {
                 ...restoredItems.map((item: any) => ({ sku: item.sku, name: item.name || '', qty: item.quantity, orderId: reference, time: dayjs().format('HH:mm:ss DD/MM') })),
                 ...prev,
             ]);
-            message.success(`Đã cộng ${restoredItems.reduce((sum: number, item: any) => sum + Number(item.quantity || 0), 0)} SP vào kho${autoMergedQuantity ? ` và tự động gộp ${autoMergedQuantity} SP vào kiện đang khui` : ""}${returnUnits.length ? `; còn tạo ${returnUnits.length} kiện Hàng hoàn` : ""}.`);
+            const skippedGiftLines = Number(result.data?.skippedGiftLines || 0);
+            message.success(`Đã cộng ${restoredItems.reduce((sum: number, item: any) => sum + Number(item.quantity || 0), 0)} SP vào kho${autoMergedQuantity ? ` và tự động gộp ${autoMergedQuantity} SP vào kiện đang khui` : ""}${returnUnits.length ? `; còn tạo ${returnUnits.length} kiện Hàng hoàn` : ""}${skippedGiftLines ? `; bỏ qua ${skippedGiftLines} dòng quà tặng không có SKU` : ""}.`);
             playSuccess();
         } catch (error: any) {
             console.error('Confirm full error:', error);
@@ -852,6 +853,11 @@ export default function RefundsPage() {
             const orderMap = new Map<string, any[]>();
             let tiktokCount = 0;
             let shopeeCount = 0;
+            // An ordinary order/pick export shares these columns. Only rows that
+            // were cancelled or returned may become refund records.
+            let skippedNonRefundRows = 0;
+            const returnQuantity = (value: unknown) => Number.parseInt(String(value ?? '').trim(), 10);
+            const isRefundStatus = (value: unknown) => /hủy|huỷ|hoàn|trả hàng|cancel|return|refund/i.test(String(value || ''));
 
             for (const fileInfo of filesData) {
                 const { name: fileName, data: fileData } = fileInfo;
@@ -885,6 +891,12 @@ export default function RefundsPage() {
                         const cancelReason = row['Cancel Reason'] || row['Order Substatus'] || 'Hủy đơn TikTok';
 
                         if (!orderId || !productName) return;
+                        const tiktokReturnQty = returnQuantity(row['Sku Quantity of return'] ?? row['Quantity of return']);
+                        const isTikTokRefundRow = String(row['Cancelled Time'] || '').trim() !== ''
+                            || String(row['Cancel Reason'] || '').trim() !== ''
+                            || tiktokReturnQty > 0
+                            || isRefundStatus(row['Order Status']);
+                        if (!isTikTokRefundRow) { skippedNonRefundRows++; return; }
 
                         const item = {
                             productId: 0,
@@ -919,6 +931,11 @@ export default function RefundsPage() {
                         const totalAmount = parseFloat(row['Tổng số tiền Hoàn trả'] || row['Tổng giá bán (sản phẩm)'] || row['Tổng cộng'] || '0');
 
                         if (!orderId || !productName) return;
+                        const isShopeeRefundRow = String(row['Mã số khiếu nại'] || '').trim() !== ''
+                            || returnQuantity(row['Số lượng Hoàn']) > 0
+                            || String(row['Lí do Trả hàng/Hoàn tiền'] || '').trim() !== ''
+                            || isRefundStatus(row['Trạng Thái Đơn Hàng'] || row['Trạng thái Trả hàng/Hoàn tiền']);
+                        if (!isShopeeRefundRow) { skippedNonRefundRows++; return; }
 
                         const item = {
                             productId: 0,
@@ -993,7 +1010,9 @@ export default function RefundsPage() {
             });
 
             if (newRefunds.length === 0) {
-                message.warning('Không tìm thấy dữ liệu hợp lệ trong các file Excel!');
+                message.warning(skippedNonRefundRows > 0
+                    ? `File không phải file hàng hoàn: ${skippedNonRefundRows} dòng đều là đơn chưa hủy/hoàn. Không có phiếu nào được tạo.`
+                    : 'Không tìm thấy dữ liệu hợp lệ trong các file Excel!');
                 return;
             }
 
@@ -1029,10 +1048,11 @@ export default function RefundsPage() {
             if (shopeeCount > 0) sources.push(`Shopee(${shopeeCount})`);
             const totalDuplicateCount = duplicateCount + serverDuplicateCount;
             const dupMsg = totalDuplicateCount > 0 ? ` (bỏ qua ${totalDuplicateCount} trùng)` : '';
+            const skippedMsg = skippedNonRefundRows > 0 ? ` Bỏ qua ${skippedNonRefundRows} dòng không phải đơn hủy/hoàn.` : '';
             if (createdCount === 0) {
-                message.warning(`Không có phiếu hoàn mới để import${dupMsg}.`);
+                message.warning(`Không có phiếu hoàn mới để import${dupMsg}.${skippedMsg}`);
             } else {
-                message.success(`✅ Đã import ${createdCount} phiếu hoàn [${sources.join(' + ')}]!${dupMsg}`);
+                message.success(`✅ Đã import ${createdCount} phiếu hoàn [${sources.join(' + ')}]!${dupMsg}${skippedMsg}`);
             }
         } catch (error: any) {
             console.error('Import error:', error);

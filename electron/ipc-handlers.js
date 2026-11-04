@@ -5274,7 +5274,7 @@ ipcMain.handle("refunds:adjustStock", async (event, data) => {
 
 // Complete a refund only after every stock movement succeeds. This keeps a
 // failed combo restore visible for retry instead of silently marking it done.
-const { normalizeRefundItems, loadLegacyRefundStockPlan } = require('./refund-stock-plan.cjs');
+const { normalizeRefundItems, countGiftLines, loadLegacyRefundStockPlan } = require('./refund-stock-plan.cjs');
 ipcMain.handle("refunds:completeAndRestore", async (event, data = {}) => {
   try {
     requireRole("admin", "manager");
@@ -5308,6 +5308,7 @@ ipcMain.handle("refunds:completeAndRestore", async (event, data = {}) => {
           }
 
           const normalizedItems = normalizeRefundItems(data.isCustom ? data.items : persistedItems);
+          const skippedGiftLines = data.isCustom ? 0 : countGiftLines(persistedItems);
 
           const reference = String(
             refund.orderNumber || refund.refundCode || `P.Hoan ${refund.id}`,
@@ -5439,7 +5440,7 @@ ipcMain.handle("refunds:completeAndRestore", async (event, data = {}) => {
             where: { id: refund.id },
             data: { status: "completed", notes: nextNotes },
           });
-          return { refund: updatedRefund, items: physicalReturnItems, reference, returnUnits, autoMerged };
+          return { refund: updatedRefund, items: physicalReturnItems, reference, returnUnits, autoMerged, skippedGiftLines };
         },
         { timeout: 30000, maxWait: 10000 },
       ),

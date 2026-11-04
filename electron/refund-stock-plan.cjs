@@ -1,5 +1,17 @@
 // Receipt planning uses immutable shipment evidence, never today's combo mix.
-function normalizeRefundItems(items) {
+// A free gift line ("Quà Chỉ Tặng Không Bán") has no SKU and no stock. Only a
+// SKU-less line named as a gift is dropped; any other blank SKU still fails.
+function isGiftLineWithoutSku(item) {
+  if (String(item?.sku || item?.variantSku || '').trim()) return false;
+  const name = String(item?.name || item?.productName || '').normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '').replace(/đ/gi, 'd').toLowerCase();
+  return /\b(qua tang|chi tang|khong ban|gift)\b/.test(name);
+}
+function countGiftLines(items) {
+  return Array.isArray(items) ? items.filter(isGiftLineWithoutSku).length : 0;
+}
+function normalizeRefundItems(rawItems) {
+  const items = Array.isArray(rawItems) ? rawItems.filter(item => !isGiftLineWithoutSku(item)) : rawItems;
   if (!Array.isArray(items) || items.length === 0 || items.length > 200) {
     throw new Error('Phải nhập SKU và số lượng hàng thực nhận (tối đa 200 dòng).');
   }
@@ -77,4 +89,4 @@ async function loadLegacyRefundStockPlan(tx, reference, items, state) {
   return legacyRefundStockPlan({ reference, items, exports, logs, state });
 }
 
-module.exports = { normalizeRefundItems, legacyRefundStockPlan, loadLegacyRefundStockPlan };
+module.exports = { normalizeRefundItems, countGiftLines, legacyRefundStockPlan, loadLegacyRefundStockPlan };

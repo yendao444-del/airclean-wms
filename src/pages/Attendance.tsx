@@ -3,6 +3,7 @@ import AttendancePackingChart from '../components/AttendancePackingChart';
 import SalesBonusSettingsModal from '../components/SalesBonusSettingsModal';
 import { fineBulkSelectionKey, fineBulkDeleteItem, applyBulkFineDeletions } from '../lib/attendanceFineBulkDelete';
 import { groupPayslipFines } from '../lib/payslipFineGroups';
+import { accruedBonusItems, summarizeBonusItems } from '../lib/payrollBonusBreakdown';
 import { isApprovedDayOff, isExcusedDailyWorkFine, dailyFineWorkDate } from '../../electron/attendance-workday-policy.mjs';
 import { awaitPackingRequest, packingRequestIdentity } from '../lib/packingRequest';
 import { Medal } from '@phosphor-icons/react';
@@ -1787,6 +1788,7 @@ function calculatePayroll(
 
         const fineShare = 0;
 
+        // Keep in step with accruedBonusItems, which lists these same records in the overview.
         const mBonus = bonusesData.filter(b => b.empId === emp.id && isAccruedDuringEmployment(b)).reduce((sum, b) => sum + b.amount, 0);
         const salesBonus = emp.type === 'Official'
             && ov?.salesBonusEligible !== false
@@ -3695,6 +3697,7 @@ export default function Attendance() {
     const [payslipModal, setPayslipModal] = useState<any>(null);
     const [pdfExporting, setPdfExporting] = useState(false);
     const [payslipPdfDetailOpen, setPayslipPdfDetailOpen] = useState(false);
+    const [bonusDetailRow, setBonusDetailRow] = useState<any>(null);
     const [gmailSending, setGmailSending] = useState(false);
     const pdfImageCacheRef = useRef(new Map<string, Promise<string>>());
     const [staffBreakdownDetail, setStaffBreakdownDetail] = useState<{
@@ -8530,7 +8533,24 @@ const openConfigModal = () => {
                     },
                     {
                         title: 'Thưởng', dataIndex: 'totalBonus', key: 'bonus', align: 'right' as const, width: '9%', className: 'att-overview-cell att-overview-cell--bonus',
-                        render: (v: number) => renderPendingValue(`+ ${fmt(v)}`, isBonusAmountReady, 'att-money-emerald'),
+                        render: (v: number, r: any) => {
+                            const value = renderPendingValue(`+ ${fmt(v)}`, isBonusAmountReady, 'att-money-emerald');
+                            if (!isBonusAmountReady) return value;
+                            const groups = summarizeBonusItems(accruedBonusItems(overviewBonuses, Number(r.id), r.employmentEndDate));
+                            return (
+                                <Tooltip title={
+                                    <div className="att-bonus-tip">
+                                        {groups.map(group => <div key={group.type}><span>{group.type}{group.count > 1 ? ` (${group.count} lần)` : ''}</span><b>+{fmt(group.amount)}</b></div>)}
+                                        {r.salesBonus > 0 && <div><span>Thưởng doanh số {(activeSalesBonusSummary.rate * 100).toLocaleString('vi-VN')}%</span><b>+{fmt(r.salesBonus)}</b></div>}
+                                        {!groups.length && !(r.salesBonus > 0) && <div><span>Không có khoản thưởng trong kỳ</span></div>}
+                                        <div className="att-bonus-tip-total"><span>Tổng</span><b>+{fmt(v)}</b></div>
+                                        <small>Bấm để xem từng khoản</small>
+                                    </div>
+                                }>
+                                    <button type="button" className="att-bonus-cell" aria-label={`Xem chi tiết thưởng của ${r.name}`} onClick={() => setBonusDetailRow(r)}>{value}</button>
+                                </Tooltip>
+                            );
+                        },
                     },
                     {
                         title: 'Phạt', dataIndex: 'myFines', key: 'fine', align: 'right' as const, width: '9%', className: 'att-overview-cell att-overview-cell--fine',
@@ -11520,6 +11540,48 @@ const openConfigModal = () => {
             <div className={`att-tab-content${!isAdmin ? ' att-tab-content--staff' : ''}${activeTab === 'attendance' ? ' att-tab-content--attendance' : ''}`}>
                 {renderActiveTabContent()}
             </div>
+
+            {/* ===== MODAL: Chi tiết thưởng ===== */}
+            <Modal
+                title={bonusDetailRow ? `Chi tiết thưởng · ${bonusDetailRow.name}` : 'Chi tiết thưởng'}
+                open={!!bonusDetailRow}
+                onCancel={() => setBonusDetailRow(null)}
+                footer={<Button onClick={() => setBonusDetailRow(null)}>Đóng</Button>}
+                width={760}
+                destroyOnHidden
+            >
+                {bonusDetailRow && (() => {
+                    const items = accruedBonusItems(overviewBonuses, Number(bonusDetailRow.id), bonusDetailRow.employmentEndDate)
+                        .slice().sort((a, b) => String(a.date || '').localeCompare(String(b.date || '')));
+                    const rows = [
+                        ...items.map(item => ({ key: item.id, date: item.date ? dayjs(item.date).format('DD/MM/YYYY') : '—', type: item.type, detail: item.detail, amount: item.amount, by: item.createdByName || item.createdBy || 'Hệ thống' })),
+                        ...(bonusDetailRow.salesBonus > 0 ? [{ key: 'sales-bonus', date: 'Cả kỳ', type: 'Thưởng doanh số', detail: `${(activeSalesBonusSummary.rate * 100).toLocaleString('vi-VN')}% doanh số kỳ lương`, amount: bonusDetailRow.salesBonus, by: 'Hệ thống' }] : []),
+                    ];
+                    return (
+                        <Table
+                            size="small"
+                            pagination={false}
+                            dataSource={rows}
+                            locale={{ emptyText: 'Không có khoản thưởng trong kỳ' }}
+                            scroll={{ y: 420 }}
+                            columns={[
+                                { title: 'Ngày', dataIndex: 'date', width: 100 },
+                                { title: 'Loại', dataIndex: 'type', width: 170 },
+                                { title: 'Nội dung', dataIndex: 'detail' },
+                                { title: 'Số tiền', dataIndex: 'amount', align: 'right' as const, width: 120, render: (value: number) => <span className="att-money-emerald">+{fmt(value)}</span> },
+                                { title: 'Người tạo', dataIndex: 'by', width: 120 },
+                            ]}
+                            summary={() => (
+                                <Table.Summary.Row>
+                                    <Table.Summary.Cell index={0} colSpan={3}><b>Tổng thưởng</b></Table.Summary.Cell>
+                                    <Table.Summary.Cell index={3} align="right"><b className="att-money-emerald">+{fmt(bonusDetailRow.totalBonus)}</b></Table.Summary.Cell>
+                                    <Table.Summary.Cell index={4} />
+                                </Table.Summary.Row>
+                            )}
+                        />
+                    );
+                })()}
+            </Modal>
 
             {/* ===== MODAL: Phiếu Lương ===== */}
             <Modal

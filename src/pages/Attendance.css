@@ -7532,3 +7532,10 @@ body:has(.role-preview-banner) .ps-modal-detail-mode { max-height: calc(100vh - 
     .packing-sale-row { grid-template-columns: 1fr !important; }
     .packing-rate-editor > div:first-child { align-items: flex-start !important; flex-direction: column; }
 }
+
+.att-bonus-cell { padding: 0; border: 0; background: none; font: inherit; color: inherit; cursor: pointer; border-bottom: 1px dashed currentColor; }
+.att-bonus-cell:focus-visible { outline: 2px solid #10b981; outline-offset: 2px; border-radius: 4px; }
+.att-bonus-tip { display: flex; flex-direction: column; gap: 4px; min-width: 220px; }
+.att-bonus-tip > div { display: flex; justify-content: space-between; gap: 16px; }
+.att-bonus-tip-total { margin-top: 2px; padding-top: 4px; border-top: 1px solid rgba(255, 255, 255, 0.3); }
+.att-bonus-tip small { opacity: 0.7; }
