@@ -35,10 +35,26 @@ function dayKey(value) {
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? "" : date.toLocaleDateString("sv-SE", { timeZone: "Asia/Bangkok" });
 }
-function assigneeFor(date) {
+function legacyAssigneeFor(date) {
   const offset = Math.round((Date.parse(`${date}T00:00:00Z`) - Date.parse("2026-09-29T00:00:00Z")) / 86400000);
   return ROTATION[((offset % ROTATION.length) + ROTATION.length) % ROTATION.length];
 }
+// From this day the duty stays with the same person after a fined day and
+// passes to the other person only after a day without a shift-check fine.
+const ASSIGNMENT_RULE_START = "2026-11-07";
+function assigneeFor(date, ledger) {
+  if (!ledger || date < ASSIGNMENT_RULE_START) return legacyAssigneeFor(date);
+  const fined = new Set(Array.isArray(ledger.finedDays) ? ledger.finedDays : []);
+  const other = person => ROTATION[(ROTATION.indexOf(person) + 1) % ROTATION.length];
+  let previous = new Date(Date.parse(`${ASSIGNMENT_RULE_START}T00:00:00Z`) - 86400000).toISOString().slice(0, 10);
+  let person = legacyAssigneeFor(previous);
+  for (let day = ASSIGNMENT_RULE_START; day <= date; day = nextDay(day)) {
+    if (!fined.has(previous)) person = other(person);
+    previous = day;
+  }
+  return person;
+}
+const isPackedCode = code => String(code || "").toUpperCase().startsWith("PACKED:");
 function deadlineLabel(date, shift = "evening") {
   if (SHIFTS[shift] && shift !== "evening") return SHIFTS[shift].deadline;
   return date < EVENING_DEADLINE_CHANGE_DATE ? LEGACY_EVENING_DEADLINE : SHIFTS.evening.deadline;
@@ -100,7 +116,7 @@ function parseLedger(row) {
   return data;
 }
 function ensureDuty(ledger, date, code, timestamp, requiredShifts) {
-  const day = ledger.days[date] ||= { assignedTo: assigneeFor(date), units: {} };
+  const day = ledger.days[date] ||= { assignedTo: assigneeFor(date, ledger), units: {} };
   const unit = day.units[code] ||= {
     requiredAt: timestamp, requiredShifts: requiredShifts === undefined ? requiredShiftsFor(timestamp) : [...requiredShifts],
     shiftChecks: { midday: null, evening: null }, shiftRequiredAt: {}, missedShifts: {},
@@ -113,6 +129,10 @@ function isOutstanding(unit, shift) {
 }
 // Latch deadline outcomes BEFORE processing a later movement/check/resolution.
 // A delayed maintenance pass can still charge a missed deadline correctly.
+function isShiftClosed(day, shift, at) {
+  const closedAt = Date.parse(day?.closedShifts?.[shift]);
+  return Number.isFinite(closedAt) && closedAt <= new Date(at).getTime();
+}
 function freezeDeadlines(ledger, now) {
   for (const [date, day] of Object.entries(ledger.days)) {
     if (date < EFFECTIVE_DATE || date > dayKey(now)) continue;
@@ -121,6 +141,7 @@ function freezeDeadlines(ledger, now) {
       for (const shift of unit.requiredShifts) {
         const deadline = deadlineFor(date, shift);
         if (new Date(now) <= deadline || new Date(unit.shiftRequiredAt[shift]) > deadline) continue;
+        if (isShiftClosed(day, shift, deadline)) continue;
         const checked = unit.shiftChecks[shift]?.checkedAt;
         if (!checked || new Date(checked) > deadline) unit.missedShifts[shift] ||= deadline.toISOString();
       }
@@ -136,6 +157,7 @@ function carryDuties(ledger, now) {
   if (!dates.length) return ledger;
   for (let date = dates[0]; date < today; date = nextDay(date)) {
     for (const [code, raw] of Object.entries(ledger.days[date]?.units || {})) {
+      if (isPackedCode(code)) continue;
       const unit = normalizeUnit(raw, date);
       if (!unit.requiredShifts.some(shift => isOutstanding(unit, shift))) continue;
       const requiredAt = unit.activityRequiredAt || new Date(Math.max(Date.parse(unit.requiredAt),
@@ -178,7 +200,7 @@ function applyEvents(ledger, entries, options = {}) {
   for (const entry of [...entries].sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt))) {
     const code = String(entry?.unitId || "").trim().toUpperCase();
     const date = dayKey(entry.createdAt);
-    if (!code || !date) continue;
+    if (!code || !date || isPackedCode(code)) continue;
     const timestamp = new Date(entry.createdAt).toISOString();
     carryDuties(ledger, timestamp);
     freezeDeadlines(ledger, timestamp);
@@ -293,7 +315,9 @@ async function observeActiveUnits(tx, ledger, now, configuredShifts = SHIFT_KEYS
   });
   const inventory = packing.decodeInventory(await tx.appConfig.findUnique({ where: { key: packing.INVENTORY_KEY } }));
   const packed = inventory.lots.filter(lot => ["submitted", "ready", "issued"].includes(lot.status) && lot.packedQty - (lot.issuedQty || 0) > 0);
-  const codes = new Set([...activeUnits.map(unit => unit.code.toUpperCase()), ...packed.map(lot => `PACKED:${lot.assignmentId}`.toUpperCase())]);
+  // Pre-packed combos are no longer counted at the end of a shift.
+  void packed;
+  const codes = new Set(activeUnits.map(unit => unit.code.toUpperCase()));
   const date = dayKey(now);
   // If a stale ledger still mentions a sealed/retired package, the current
   // physical state wins for today's checklist. Prior deadline facts remain.
@@ -351,6 +375,17 @@ function requiredShiftsAt(scope, at) {
   // An explicitly saved schedule is recurring. If today's selected deadline
   // has passed, keep the duty so carry-over places it on the next day.
   return due.length || !SHIFT_MODES[entry?.shiftMode] ? due : [...configured];
+}
+// Staff may count from these times on each day; late counts after the
+// deadline stay allowed. Admins are not limited.
+const SHIFT_OPEN_TIMES = { midday: "10:30", evening: "17:00" };
+function shiftCheckOpensAt(scope, now = new Date()) {
+  const date = dayKey(now);
+  return new Date(Math.min(...configuredShiftsAt(scope, now)
+    .map(shift => Date.parse(`${date}T${SHIFT_OPEN_TIMES[shift]}:00+07:00`))));
+}
+function isShiftCheckOpen(scope, now = new Date()) {
+  return new Date(now) >= shiftCheckOpensAt(scope, now);
 }
 // The saved shift mode governs every open duty, including duties carried over
 // from before the mode changed. Deadlines already missed stay as history.
@@ -539,6 +574,7 @@ function policySnapshot(ledger, now = new Date(), inScope = () => true, scope = 
   const trackedCodes = new Set();
   for (const day of Object.values(ledger.days)) for (const code of Object.keys(day.units)) trackedCodes.add(code);
   for (const [code, raw] of Object.entries(ledger.days[date]?.units || {})) {
+    if (isPackedCode(code) || isShiftClosed(ledger.days[date], shift, now)) continue;
     const unit = normalizeUnit(raw, date);
     if (isOutstanding(unit, shift) && inScope(code, now) && !exempt.has(code)) outstanding.push({ code, requiredAt: unit.shiftRequiredAt[shift], date,
       ...(unit.requiresPhysicalCheck ? { requiresPhysicalCheck: true } : {}) });
@@ -551,9 +587,11 @@ function policySnapshot(ledger, now = new Date(), inScope = () => true, scope = 
   }
   return {
     date, scopeEditors: SHIFT_SCOPE_EDITORS, effectiveDate: EFFECTIVE_DATE, fineAmount: fineAmountAt(scope, now),
-    assignedTo: assigneeFor(date), nextAssignedTo: assigneeFor(nextDay(date)),
+    assignedTo: ledger.days[date]?.assignedTo || assigneeFor(date, ledger), nextAssignedTo: assigneeFor(nextDay(date), ledger),
+    shiftClosedAt: ledger.days[date]?.closedShifts?.[shift] || null,
     currentShift: shift, shiftLabel: SHIFTS[shift].label,
     deadline: shiftDeadline.toISOString(),
+    checkOpensAt: shiftCheckOpensAt(scope, now).toISOString(),
     deadlines: Object.fromEntries(SHIFT_KEYS.map(key => [key, deadlineFor(date, key).toISOString()])),
     outstanding, trackedCodes: [...trackedCodes], todayRemaining: outstanding.length,
     checkProductIds: latestScope?.productIds ?? null,
@@ -575,6 +613,21 @@ async function readShiftPolicy(tx, now = new Date()) {
   const thresholds = await readShiftThresholds(tx);
   return policySnapshot(ledger, now, scopeFilter(scope, productIds), scope, thresholds, await readExemptCodes(tx, ledger, thresholds, now));
 }
+// The assignee finished the whole list shown when the check was opened, so
+// that shift is done for the day: later movements no longer reopen it or fine.
+async function closeShiftAfterFullCount(tx, { now = new Date(), snapshotAt } = {}) {
+  const policy = await readShiftPolicy(tx, now);
+  const opened = Date.parse(snapshotAt);
+  const cutoff = Number.isFinite(opened) && opened <= new Date(now).getTime() ? opened : new Date(now).getTime();
+  if (policy.outstanding.some(item => !(Date.parse(item.requiredAt) > cutoff))) return null;
+  const row = await tx.appConfig.findUnique({ where: { key: LEDGER_KEY } });
+  const ledger = parseLedger(row);
+  const day = ledger.days[policy.date] ||= { assignedTo: assigneeFor(policy.date, ledger), units: {} };
+  day.closedShifts = { ...(day.closedShifts || {}), [policy.currentShift]: new Date(now).toISOString() };
+  const value = JSON.stringify(ledger);
+  await tx.appConfig.upsert({ where: { key: LEDGER_KEY }, create: { key: LEDGER_KEY, value }, update: { value } });
+  return policy.currentShift;
+}
 function employeeFor(data, username) {
   const matches = (data.employees || []).filter(employee => String(employee.username || "").trim().toLowerCase() === username);
   if (matches.length !== 1 || !Number.isSafeInteger(Number(matches[0].id)) || Number(matches[0].id) <= 0) return null;
@@ -588,13 +641,13 @@ function buildFines(ledger, data = {}, now = new Date(), inScope = () => true, s
   for (const [date, day] of Object.entries(ledger.days)) {
     if (date < EFFECTIVE_DATE || date > today) continue;
     if ((data.lockedPeriods || []).some(period => date >= dayKey(period.start) && date <= dayKey(period.end))) continue;
-    const assignedTo = day.assignedTo || assigneeFor(date);
+    const assignedTo = day.assignedTo || assigneeFor(date, ledger);
     const empId = employeeFor(data, assignedTo);
     if (!empId) continue;
     for (const shift of SHIFT_KEYS) {
       if (new Date(now) <= deadlineFor(date, shift)) continue;
       const missingUnits = Object.entries(day.units)
-        .filter(([code, raw]) => normalizeUnit(raw, date).missedShifts[shift] && inScope(code, deadlineFor(date, shift)))
+        .filter(([code, raw]) => !isPackedCode(code) && normalizeUnit(raw, date).missedShifts[shift] && inScope(code, deadlineFor(date, shift)))
         .map(([code]) => code).sort();
       if (!missingUnits.length) continue;
       const amount = fineAmountAt(scope, deadlineFor(date, shift));
@@ -681,6 +734,14 @@ async function reconcileShiftFines(prisma, { now = new Date() } = {}) {
           ) AS fine_fields
         )::text, "updatedAt" = NOW() WHERE "key" = 'attendanceData'
       `;
+      const finedDays = [...new Set([...existing, ...created]
+        .filter(fine => isHandlingUnitShiftFine(fine) && !deletedIds.has(String(fine.id)) && fine.attendanceDate)
+        .map(fine => String(fine.attendanceDate)))].sort();
+      if (JSON.stringify(ledger.finedDays || []) !== JSON.stringify(finedDays)) {
+        ledger.finedDays = finedDays;
+        const nextValue = JSON.stringify(ledger);
+        await tx.appConfig.upsert({ where: { key: LEDGER_KEY }, create: { key: LEDGER_KEY, value: nextValue }, update: { value: nextValue } });
+      }
       return { created: created.map(fine => fine.id), removed: [], checked: allFines.length, skipped: "policy_active" };
     }, { isolationLevel: "Serializable", timeout: 20000, maxWait: 5000 });
   } catch (error) {
@@ -690,4 +751,4 @@ async function reconcileShiftFines(prisma, { now = new Date() } = {}) {
     throw error;
   }
 }
-module.exports = { LEDGER_KEY, SCOPE_KEY, THRESHOLD_KEY, canEditShiftScope, SHIFT_SCOPE_EDITORS, readShiftThresholds, saveShiftThreshold, saveShiftMinThreshold, thresholdFilter, readShiftScope, saveShiftScope, scopeAt, requiredShiftsAt, configuredShiftsAt, scopeFilter, EFFECTIVE_DATE, FINE_AMOUNT, LEGACY_FINE_AMOUNT, fineAmountAt, SHIFTS, SHIFT_MODES, assigneeFor, deadlineFor, shiftForTimestamp, currentShift, dayKey, applyEvents, policySnapshot, recordShiftEvents, readShiftPolicy, buildFines, reconcileShiftFines, isHandlingUnitShiftFine };
+module.exports = { ASSIGNMENT_RULE_START, closeShiftAfterFullCount, SHIFT_OPEN_TIMES, shiftCheckOpensAt, isShiftCheckOpen, LEDGER_KEY, SCOPE_KEY, THRESHOLD_KEY, canEditShiftScope, SHIFT_SCOPE_EDITORS, readShiftThresholds, saveShiftThreshold, saveShiftMinThreshold, thresholdFilter, readShiftScope, saveShiftScope, scopeAt, requiredShiftsAt, configuredShiftsAt, scopeFilter, EFFECTIVE_DATE, FINE_AMOUNT, LEGACY_FINE_AMOUNT, fineAmountAt, SHIFTS, SHIFT_MODES, assigneeFor, deadlineFor, shiftForTimestamp, currentShift, dayKey, applyEvents, policySnapshot, recordShiftEvents, readShiftPolicy, buildFines, reconcileShiftFines, isHandlingUnitShiftFine };

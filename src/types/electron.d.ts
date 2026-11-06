@@ -611,6 +611,8 @@ export interface ElectronAPI {
       }>;
       shift?: "midday" | "evening";
       idempotencyKey?: string;
+      fullChecklist?: boolean;
+      snapshotAt?: string;
     }) => Promise<{ success: boolean; data?: any; error?: string }>;
     setHiddenSkus: (data: { skus: string[]; hidden: boolean }) => Promise<{ success: boolean; data?: { hiddenSkus: string[] }; error?: string }>;
     setShiftCheckThreshold: (data: { productId: number; percent: number }) => Promise<{ success: boolean; data?: any; error?: string }>;

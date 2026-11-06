@@ -158,6 +158,7 @@ type Workspace = {
     assignedTo: string;
     nextAssignedTo: string;
     deadline: string;
+    checkOpensAt?: string;
     currentShift?: "midday" | "evening";
     shiftLabel?: string;
     deadlines?: Record<string, string>;
@@ -1207,6 +1208,7 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
   >({});
   const [isSubmittingShiftCheck, setIsSubmittingShiftCheck] = useState(false);
   const shiftCheckRequestIdRef = useRef("");
+  const shiftCheckOpenedAtRef = useRef("");
 
   const loadWorkspace = async (prioritizeFreshData = false) => {
     if (workspaceLoadInFlightRef.current) {
@@ -2336,6 +2338,17 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
     : scopeShiftCandidates(shiftCheckBatchCandidates, shiftCheckFamily);
   const canEditShiftScope = isAdmin || (workspace.shiftCheckPolicy?.scopeEditors || []).includes(String(user?.username || "").trim().toLowerCase());
   const canPerformUnitCheck = !isRolePreview && (isAdmin || user?.role === 'manager' || (user?.role === 'staff' && user.username === workspace.shiftCheckPolicy?.assignedTo));
+  // Staff and managers count only from the opening time; the server enforces the same rule.
+  const shiftCheckOpensAt = workspace.shiftCheckPolicy?.checkOpensAt;
+  const [shiftCheckClock, setShiftCheckClock] = useState(() => Date.now());
+  useEffect(() => {
+    const wait = shiftCheckOpensAt ? Date.parse(shiftCheckOpensAt) - Date.now() : 0;
+    if (!(wait > 0)) return;
+    const timer = window.setTimeout(() => setShiftCheckClock(Date.now()), wait + 500);
+    return () => window.clearTimeout(timer);
+  }, [shiftCheckOpensAt]);
+  const isShiftCheckWindowOpen = isAdmin || !shiftCheckOpensAt || shiftCheckClock >= Date.parse(shiftCheckOpensAt);
+  const shiftCheckClosedMessage = () => message.info(`Chưa đến giờ kiểm cuối ca. Mở kiểm lúc ${new Date(shiftCheckOpensAt || Date.now()).toLocaleTimeString("vi-VN", { hour: "2-digit", minute: "2-digit", timeZone: "Asia/Bangkok" })}.`);
 
   const shiftCheckEnteredCount = shiftCheckBatchCandidates.filter(({ unit }) => {
     const actual = shiftCheckDrafts[unit.id]?.actualQuantity;
@@ -2350,6 +2363,7 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
   });
 
   const openShiftCheck = (scope: "all" | "mandatory" = "all") => {
+    if (scope === "all" && !isShiftCheckWindowOpen) { shiftCheckClosedMessage(); return; }
     // Nothing to count, or not the assignee: show today's completed counts instead.
     const openHistory = () => {
       setShiftCheckScope("all");
@@ -2398,6 +2412,7 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
     shiftCheckRequestIdRef.current = `HU-SHIFT-${Date.now()}-${Math.random()
       .toString(36)
       .slice(2, 8)}`;
+    shiftCheckOpenedAtRef.current = new Date().toISOString();
     setShowShiftCheckModal(true);
   };
 
@@ -2414,6 +2429,8 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
 
   const openShiftCheckForUnit = (unit: UnitRow) => {
     if (!canPerformUnitCheck) { message.info('Chỉ người được phân công hôm nay hoặc quản lý được chốt kiểm kiện.'); return; }
+    // A package waiting for its final count may be closed out at any time.
+    if (!isShiftCheckWindowOpen && unit.status !== "Chờ kiểm" && unit.status !== "pending_check") { shiftCheckClosedMessage(); return; }
     if (!canRecheckHandlingUnit(unit.status)) {
       message.info("Kiện này đã hết hoặc đã tách, không còn hoạt động để kiểm lại.");
       return;
@@ -2480,6 +2497,9 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
         items,
         shift: workspace.shiftCheckPolicy?.currentShift,
         idempotencyKey: shiftCheckRequestIdRef.current,
+        // Completing the whole list closes this shift for the day.
+        fullChecklist: !shiftCheckFocusCode && shiftCheckScope === "all",
+        snapshotAt: shiftCheckOpenedAtRef.current,
       });
       if (!response?.success) {
         throw new Error(response?.error || "Không thể hoàn tất kiểm cuối ca.");
@@ -3319,7 +3339,7 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
               </button>
             </Popover>
           )}
-          {!isRolePreview && workspace.shiftCheckPolicy && (
+          {!isRolePreview && workspace.shiftCheckPolicy && isShiftCheckWindowOpen && (
             <Tooltip title={canPerformUnitCheck && allShiftCheckCandidates.length > 0
               ? `${allShiftCheckCandidates.length} kiện đang khui hoặc chờ kiểm trên toàn bộ sản phẩm cần đối chiếu.`
               : "Xem các lần kiểm cuối ca hôm nay."}>
@@ -3625,23 +3645,6 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
                   </div>
                 </div>
                 <div className="hu-header-right hu-selected-actions">
-                  {allShiftCheckCandidates.length > 0 && (
-                    <Tooltip
-                      title={`${allShiftCheckCandidates.length} kiện đang khui hoặc chờ kiểm trên toàn bộ sản phẩm cần đối chiếu.`}
-                    >
-                      <Button
-                        icon={<CheckCircleOutlined />}
-                        className="hu-btn-secondary hu-btn-shift-check"
-                        disabled={!canPerformUnitCheck}
-                        onClick={() => openShiftCheck("all")}
-                      >
-                        Kiểm cuối ca
-                        <span className="hu-shift-check-count">
-                          {allShiftCheckCandidates.length}
-                        </span>
-                      </Button>
-                    </Tooltip>
-                  )}
                   {(isAdmin || user?.role === "manager") && (
                     <Button
                       icon={<PrinterOutlined />}

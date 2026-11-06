@@ -293,7 +293,7 @@ const { isEcommerceOrderFine } = require("./ecommerce-order-fines");
 const { reconcilePrepackShortfallFines, isPrepackShortfallFine } = require("./prepack-fines");
 const { MAX_QUANTITY: HANDLING_UNIT_MAX_QUANTITY, assertPackageQuantity, readLabelNumbers, assignLabelNumbers } = require("./handling-unit-labels.cjs");
 const { assertMergePolicy } = require("./handling-unit-merge-policy.cjs");
-const { recordShiftEvents, readShiftPolicy, reconcileShiftFines, saveShiftScope, saveShiftThreshold, saveShiftMinThreshold, canEditShiftScope, assigneeFor: shiftAssigneeFor, dayKey: shiftDayKey } = require("./handling-unit-shift-policy.cjs");
+const { closeShiftAfterFullCount, isShiftCheckOpen, shiftCheckOpensAt, readShiftScope, recordShiftEvents, readShiftPolicy, reconcileShiftFines, saveShiftScope, saveShiftThreshold, saveShiftMinThreshold, canEditShiftScope, assigneeFor: shiftAssigneeFor, dayKey: shiftDayKey } = require("./handling-unit-shift-policy.cjs");
 const autoReturns = require('./handling-unit-auto-returns.cjs');
 const { payslipQrImageToDataUrl } = require('./payslip-qr-image.cjs');
 
@@ -13270,7 +13270,7 @@ ipcMain.handle("handlingUnits:finalizeShiftCheck", async (_event, payload = {}) 
   try {
     requireRole("admin", "manager", "staff");
     const actor = { ...currentSession };
-    if (actor.role === "staff" && actor.username !== shiftAssigneeFor(shiftDayKey(new Date()))) {
+    if (actor.role === "staff" && prisma && actor.username !== (await readShiftPolicy(prisma)).assignedTo) {
       throw new Error("Bạn không phải người được phân công kiểm cuối ca hôm nay.");
     }
     if (!prisma) throw new Error("Không kết nối được cơ sở dữ liệu kiện hàng.");
@@ -13329,6 +13329,21 @@ ipcMain.handle("handlingUnits:finalizeShiftCheck", async (_event, payload = {}) 
       await tx.$queryRaw(
         Prisma.sql`SELECT "id" FROM "HandlingUnit" WHERE "code" IN (${Prisma.join(normalizedItems.map((item) => item.code))}) FOR UPDATE`,
       );
+      // Before the opening time only admins may count; a package waiting for its
+      // final count (Chờ kiểm) can still be closed out by anyone at any time.
+      if (actor.role !== "admin") {
+        const shiftScope = await readShiftScope(tx);
+        if (!isShiftCheckOpen(shiftScope, checkTime)) {
+          const pending = new Set((await tx.handlingUnit.findMany({
+            where: { code: { in: normalizedItems.map((item) => item.code) }, status: "pending_check" },
+            select: { code: true },
+          })).map((row) => String(row.code).toUpperCase()));
+          if (normalizedItems.some((item) => !pending.has(item.code.toUpperCase()))) {
+            const opensAt = shiftCheckOpensAt(shiftScope, checkTime).toLocaleTimeString("vi-VN", { hour: "2-digit", minute: "2-digit", timeZone: "Asia/Bangkok" });
+            throw new Error(`Chưa đến giờ kiểm cuối ca. Mở kiểm lúc ${opensAt}.`);
+          }
+        }
+      }
       const checked = await finalizeCountsInTx(tx, normalizedItems, {
         actor, packedInventory, updateStock: updateProductStockInTx,
         appendHistory: appendHandlingUnitsTransactions, reference: operationKey,
@@ -13336,6 +13351,9 @@ ipcMain.handle("handlingUnits:finalizeShiftCheck", async (_event, payload = {}) 
       await tx.appConfig.create({
         data: { key: operationKey, value: JSON.stringify(checked.items) },
       });
+      if (payload.fullChecklist === true) {
+        await closeShiftAfterFullCount(tx, { now: checkTime, snapshotAt: payload.snapshotAt });
+      }
       return { ...checked, duplicate: false };
     }, { timeout: 30000, maxWait: 10000 });
 
