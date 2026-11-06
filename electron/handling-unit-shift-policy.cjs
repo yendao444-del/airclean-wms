@@ -237,6 +237,7 @@ async function recordShiftEvents(tx, entries) {
   await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${LEDGER_KEY}))`;
   const ledger = parseLedger(await tx.appConfig.findUnique({ where: { key: LEDGER_KEY } }));
   const scope = await readShiftScope(tx);
+  applyShiftModeToDuties(ledger, scope);
   applyEvents(ledger, entries, { requiredShiftsForAt: timestamp => requiredShiftsAt(scope, timestamp) });
   const value = JSON.stringify(ledger);
   await tx.appConfig.upsert({ where: { key: LEDGER_KEY }, create: { key: LEDGER_KEY, value }, update: { value } });
@@ -350,6 +351,19 @@ function requiredShiftsAt(scope, at) {
   // An explicitly saved schedule is recurring. If today's selected deadline
   // has passed, keep the duty so carry-over places it on the next day.
   return due.length || !SHIFT_MODES[entry?.shiftMode] ? due : [...configured];
+}
+// The saved shift mode governs every open duty, including duties carried over
+// from before the mode changed. Deadlines already missed stay as history.
+function applyShiftModeToDuties(ledger, scope) {
+  for (const [date, day] of Object.entries(ledger.days)) {
+    if (date < EFFECTIVE_DATE) continue;
+    for (const [code, raw] of Object.entries(day.units)) {
+      const unit = day.units[code] = normalizeUnit(raw, date);
+      unit.requiredShifts = unit.requiredShifts.filter(shift =>
+        unit.missedShifts[shift] || configuredShiftsAt(scope, deadlineFor(date, shift)).includes(shift));
+    }
+  }
+  return ledger;
 }
 function validFineAmount(value) {
   return Number.isSafeInteger(value) && value >= MIN_FINE_AMOUNT && value <= MAX_FINE_AMOUNT;
@@ -513,7 +527,13 @@ function scopeFilter(scope, productIds) {
 function policySnapshot(ledger, now = new Date(), inScope = () => true, scope = { history: [] }, thresholds = { history: [], minPercent: DEFAULT_MIN_THRESHOLD }, exemptCodes = []) {
   carryDuties(ledger, now);
   const date = dayKey(now);
-  const shift = currentShift(now);
+  // Show the checkpoint the saved mode requires, not the one the clock falls in:
+  // an afternoon-only day counts toward 20:00 even in the morning.
+  const clockShift = currentShift(now);
+  const allowedShifts = configuredShiftsAt(scope, now);
+  const shift = allowedShifts.includes(clockShift) ? clockShift : allowedShifts[0];
+  const shiftDeadline = shift !== clockShift && new Date(now) > deadlineFor(date, shift)
+    ? deadlineFor(nextDay(date), shift) : deadlineFor(date, shift);
   const exempt = new Set(exemptCodes);
   const outstanding = [];
   const trackedCodes = new Set();
@@ -533,7 +553,7 @@ function policySnapshot(ledger, now = new Date(), inScope = () => true, scope = 
     date, scopeEditors: SHIFT_SCOPE_EDITORS, effectiveDate: EFFECTIVE_DATE, fineAmount: fineAmountAt(scope, now),
     assignedTo: assigneeFor(date), nextAssignedTo: assigneeFor(nextDay(date)),
     currentShift: shift, shiftLabel: SHIFTS[shift].label,
-    deadline: deadlineFor(date, shift).toISOString(),
+    deadline: shiftDeadline.toISOString(),
     deadlines: Object.fromEntries(SHIFT_KEYS.map(key => [key, deadlineFor(date, key).toISOString()])),
     outstanding, trackedCodes: [...trackedCodes], todayRemaining: outstanding.length,
     checkProductIds: latestScope?.productIds ?? null,
@@ -545,9 +565,10 @@ function policySnapshot(ledger, now = new Date(), inScope = () => true, scope = 
 }
 async function readShiftPolicy(tx, now = new Date()) {
   const ledger = parseLedger(await tx.appConfig.findUnique({ where: { key: LEDGER_KEY } }));
-  carryDuties(ledger, now);
   const scope = await readShiftScope(tx);
+  carryDuties(applyShiftModeToDuties(ledger, scope), now);
   await observeActiveUnits(tx, ledger, now, configuredShiftsAt(scope, now));
+  applyShiftModeToDuties(ledger, scope);
   const productIds = scopeAt(scope, now)
     ? await productIdsByCode(tx, Object.keys(ledger.days[dayKey(now)]?.units || {}))
     : new Map();
@@ -602,9 +623,10 @@ async function reconcileShiftFines(prisma, { now = new Date() } = {}) {
       if (!locks?.[0]?.locked) return { created: [], removed: [], checked: 0, skipped: "lock_busy" };
       const ledgerRow = await tx.appConfig.findUnique({ where: { key: LEDGER_KEY } });
       const ledger = parseLedger(ledgerRow);
-      carryDuties(ledger, now);
       const scope = await readShiftScope(tx);
+      carryDuties(applyShiftModeToDuties(ledger, scope), now);
       await observeActiveUnits(tx, ledger, now, configuredShiftsAt(scope, now));
+      applyShiftModeToDuties(ledger, scope);
       buildFines(ledger, {}, now); // Latch deadline facts even without payroll profiles.
       const value = JSON.stringify(ledger);
       if (ledgerRow?.value !== value) await tx.appConfig.upsert({ where: { key: LEDGER_KEY }, create: { key: LEDGER_KEY, value }, update: { value } });
