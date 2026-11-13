@@ -1,0 +1,65 @@
+/* Same visual language as the "Gợi ý đóng gói" list (PrepackManagement.css). */
+.prepack-plan { padding: 16px; color: #10244a; font-family: 'Segoe UI', sans-serif; text-align: left; }
+.prepack-plan-card { border: 1px solid #e3eaf2; border-radius: 8px; overflow: hidden; background: #fff; }
+.prepack-plan-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 48px; padding: 8px 16px; background: #f1f6fa; }
+.prepack-plan-header h3 { display: flex; align-items: center; gap: 8px; margin: 0; color: #10244a; font-size: 17px; font-weight: 700; }
+.prepack-plan-header small { display: block; margin-top: 2px; color: #7288aa; font-size: 12px; }
+.prepack-plan-actions { display: flex; gap: 8px; flex-shrink: 0; }
+.prepack-plan-create.ant-btn { background: #00a76d; border-color: #00a76d; font-weight: 600; }
+.prepack-plan-create.ant-btn:hover { background: #008f5d !important; border-color: #008f5d !important; }
+.prepack-plan-tools { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; padding: 12px 16px 8px; }
+.prepack-plan-tools .ant-input-affix-wrapper { width: 320px; max-width: 100%; height: 36px; }
+.prepack-plan-loading { display: grid; place-items: center; min-height: 200px; }
+.prepack-plan-groups { padding: 0 8px 8px; }
+.prepack-plan-group + .prepack-plan-group { margin-top: 8px; }
+/* Packer name stands out from the pattern rows: blue band with a left accent. */
+.prepack-plan-group-title { padding: 7px 10px; border-left: 4px solid #1677ff; border-radius: 6px; background: #e8f1ff; color: #3b5b8c; font-size: 13px; }
+.prepack-plan-group-title strong { color: #0b4fb3; font-size: 14px; }
+.prepack-plan-group-title.is-unassigned strong { color: #b54708; }
+.prepack-plan-row { display: grid; grid-template-columns: 24px minmax(0, 1fr) 130px 80px; align-items: center; gap: 10px; min-height: 44px; padding: 3px 6px; border-bottom: 1px solid #eef2f7; }
+.prepack-plan-rank { display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; border-radius: 5px; background: #f1f6fa; font-size: 11px; font-weight: 700; }
+.prepack-plan-name { min-width: 0; }
+.prepack-plan-name strong { display: block; overflow: hidden; font-size: 13px; font-weight: 700; text-overflow: ellipsis; white-space: nowrap; }
+.prepack-plan-name small { display: flex; align-items: center; gap: 6px; overflow: hidden; color: #7288aa; font-size: 11px; white-space: nowrap; }
+.prepack-plan-tag.ant-tag { margin: 0; padding: 0 5px; font-size: 10px; line-height: 16px; color: #1d4ed8; background: #eaf3ff; border-color: #c7dcff; }
+.prepack-plan-stat { display: flex; flex-direction: column; gap: 3px; font-size: 12px; font-variant-numeric: tabular-nums; }
+.prepack-plan-stat i { display: block; height: 6px; border-radius: 3px; background: #e9eef4; overflow: hidden; }
+.prepack-plan-stat i b { display: block; height: 100%; border-radius: 3px; background: #00a76d; }
+.prepack-plan-target-value { font-weight: 700; color: #10244a; background: none; }
+/* Admin: the whole number cell is one big click target. */
+.prepack-plan-stat.is-clickable { margin: -4px -6px; padding: 4px 6px; border: 1px solid transparent; border-radius: 6px; cursor: text; }
+.prepack-plan-stat.is-clickable:hover { border-color: #91caff; background: #f5faff; }
+.prepack-plan-stat.is-clickable .prepack-plan-target-value { color: #1677ff; }
+/* The first line is a fixed 18px in both modes so rows never jump. */
+.prepack-plan-stat > span { display: flex; align-items: center; gap: 4px; height: 18px; line-height: 18px; white-space: nowrap; }
+.prepack-plan-inline .ant-input-number { width: 64px; height: 18px; border-radius: 4px; font-size: 12px; }
+.prepack-plan-inline .ant-input-number .ant-input-number-input { height: 16px; padding: 0 4px; font-size: 12px; font-weight: 700; }
+.prepack-plan-stat.is-editing { border-color: #1677ff; background: #fff; }
+.prepack-plan-pill { justify-self: end; padding: 1px 8px; border-radius: 6px; font-size: 12px; font-weight: 600; white-space: nowrap; }
+.prepack-plan-pill.is-missing { color: #d92d20; background: #fdecec; }
+.prepack-plan-pill.is-enough { color: #166534; background: #e8f7ee; }
+.prepack-plan-pill.is-extra { color: #b54708; background: #fff4e5; }
+.prepack-plan-row.is-editable { cursor: pointer; user-select: none; }
+.prepack-plan-row.is-editable:hover { background: #f8fbff; }
+.prepack-plan-columns { min-height: 30px; border-bottom: 1px solid #e3eaf2; color: #7288aa; font-size: 12px; font-weight: 600; }
+.prepack-plan-columns > span:last-child { justify-self: end; }
+.prepack-plan-assign-tools { display: flex; align-items: center; gap: 8px; }
+.prepack-plan-assign-tools .ant-input-affix-wrapper { flex: 1; }
+.prepack-plan-assign-list { max-height: 380px; overflow-y: auto; border: 1px solid #eef2f7; border-radius: 6px; }
+.prepack-plan-form label.prepack-plan-assign-row { display: grid; grid-template-columns: 20px 24px minmax(0, 1fr) auto; flex-direction: row; align-items: center; gap: 8px; padding: 5px 8px; border-bottom: 1px solid #eef2f7; font-weight: 400; cursor: pointer; }
+.prepack-plan-assign-meta { color: #7288aa; font-size: 12px; white-space: nowrap; }
+.prepack-plan-form label.prepack-plan-assign-row.is-blocked { cursor: not-allowed; opacity: .55; }
+.prepack-plan-assign-row.is-blocked .prepack-plan-assign-meta { color: #b54708; }
+.prepack-plan-form { display: flex; flex-direction: column; gap: 12px; }
+.prepack-plan-form p { margin: 0; }
+.prepack-plan-form small { color: #7288aa; }
+.prepack-plan-form label { display: flex; flex-direction: column; gap: 6px; font-weight: 600; }
+.prepack-plan-target { display: flex; gap: 8px; }
+.prepack-plan-target .ant-input-number { width: 140px; }
+.prepack-plan-preview { padding: 8px 10px; border-radius: 6px; background: #f8fafc; font-size: 13px; }
+@media (max-width: 700px) {
+  .prepack-plan { padding: 10px; }
+  .prepack-plan-header { flex-direction: column; align-items: flex-start; }
+  .prepack-plan-row { grid-template-columns: 24px minmax(0, 1fr) 72px; }
+  .prepack-plan-stat { grid-column: 2; }
+}

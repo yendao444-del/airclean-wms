@@ -66,8 +66,10 @@ import { isDedicatedReceivingOperator } from "../lib/permissions";
 import { canCreatePackagePacking } from "../lib/packagePackingPermissions";
 import { canRecheckHandlingUnit } from "../lib/handlingUnitCheck";
 import PrepackManagement from "./PrepackManagement";
-import PrepackInventoryView from "../components/PrepackInventoryView";
-import type { PackingLot } from "../types/packagePacking";
+import PrepackPlanView from "../components/PrepackPlanView";
+import ShiftComboCheckRows from "../components/ShiftComboCheckRows";
+import { usePackedComboCheck } from "../lib/hooks/usePackedComboCheck";
+import type { PackedComboChecklist, PackingLot } from "../types/packagePacking";
 import { compareHandlingUnitPickOrder } from "../../electron/handling-unit-pick-order.mjs";
 import sealedSackImage from "../assets/warehouse-sack-sealed.webp";
 import openedSackImage from "../assets/warehouse-sack-opened.webp";
@@ -873,7 +875,7 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
   const { user, isRolePreview } = useAuth();
   const isAdmin = user?.role === "admin";
   const canManageCatalog = !isRolePreview && (isAdmin || isDedicatedReceivingOperator(user?.username));
-  const [activeModuleTab, setActiveModuleTab] = useState<"units" | "prepack" | "targets" | "history">(initialTab);
+  const [activeModuleTab, setActiveModuleTab] = useState<"units" | "prepack" | "targets" | "combo" | "history">(initialTab);
   const moduleContentRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     moduleContentRef.current?.scrollTo({ top: 0, left: 0 });
@@ -882,10 +884,27 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
   const [prepackCreateRequest, setPrepackCreateRequest] = useState(0);
   const [prepackWorkOpen, setPrepackWorkOpen] = useState(false);
   const canCreatePrepack = canCreatePackagePacking(user?.role, isRolePreview);
+  // Daily combo count: badge on its tab and settings for "Cài đặt ca".
+  const [comboCheck, setComboCheck] = useState<PackedComboChecklist | null>(null);
+  const [comboClock, setComboClock] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = window.setInterval(() => setComboClock(Date.now()), 60000);
+    return () => window.clearInterval(timer);
+  }, []);
+  const comboCheckPending = comboCheck && comboClock >= Date.parse(comboCheck.opensAt)
+    ? (Array.isArray(comboCheck.rows) ? comboCheck.rows : []).filter(row => !row.checked).length : 0;
+  // create: only the "Tạo đóng gói sẵn" window; otherwise the "Phiếu đóng gói" list.
+  const [prepackWorkMode, setPrepackWorkMode] = useState<"create" | "list">("list");
   const openPrepackWork = (create = false) => {
     if (!canCreatePrepack) return;
+    setPrepackWorkMode(create ? "create" : "list");
     setPrepackWorkOpen(true);
     if (create) setPrepackCreateRequest(value => value + 1);
+  };
+  const closePrepackWork = () => {
+    setPrepackWorkOpen(false);
+    setPrepackCreateRequest(0);
+    void loadWorkspace(true);
   };
   const [workspace, setWorkspace] = useState(() =>
     handlingUnitsWorkspaceCache
@@ -900,6 +919,13 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
       ),
   );
   const [workspaceLoadError, setWorkspaceLoadError] = useState<string | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    void window.electronAPI?.packedComboCheck?.get().then(result => {
+      if (!cancelled && result?.success && result.data) setComboCheck(result.data);
+    }).catch(() => undefined);
+    return () => { cancelled = true; };
+  }, [workspace.packedInventory, activeModuleTab]);
   const [selectedSku, setSelectedSku] = useState(
     () => handlingUnitsWorkspaceCache?.catalog[0]?.sku || "",
   );
@@ -1201,6 +1227,7 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
   const [shiftCheckScope, setShiftCheckScope] = useState<"all" | "mandatory">("all");
   const [shiftCheckFocusCode, setShiftCheckFocusCode] = useState<string | null>(null);
   const [shiftCheckView, setShiftCheckView] = useState<"pending" | "history">("pending");
+  const [shiftCheckKind, setShiftCheckKind] = useState<"all" | "units" | "combo">("all");
   const [shiftCheckSnapshot, setShiftCheckSnapshot] = useState<ShiftCheckCandidate[]>([]);
   const [shiftCheckFamily, setShiftCheckFamily] = useState("all");
   const [shiftCheckDrafts, setShiftCheckDrafts] = useState<
@@ -2348,6 +2375,15 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
     return () => window.clearTimeout(timer);
   }, [shiftCheckOpensAt]);
   const isShiftCheckWindowOpen = isAdmin || !shiftCheckOpensAt || shiftCheckClock >= Date.parse(shiftCheckOpensAt);
+  // Packed combos are counted in the same end-of-shift checklist as the units.
+  const comboShift = usePackedComboCheck({
+    enabled: !isRolePreview && Boolean(user?.username),
+    // Managers and the day's end-of-shift checker count every packer's combos (same rule as the backend).
+    isManager: isAdmin || user?.role === "manager" || (user?.role === "staff" && user.username === workspace.shiftCheckPolicy?.assignedTo),
+    username: user?.username || "",
+    refreshToken: workspace.packedInventory,
+  });
+  const comboShiftCount = isRolePreview ? 0 : comboShift.rows.length;
   const shiftCheckClosedMessage = () => message.info(`Chưa đến giờ kiểm cuối ca. Mở kiểm lúc ${new Date(shiftCheckOpensAt || Date.now()).toLocaleTimeString("vi-VN", { hour: "2-digit", minute: "2-digit", timeZone: "Asia/Bangkok" })}.`);
 
   const shiftCheckEnteredCount = shiftCheckBatchCandidates.filter(({ unit }) => {
@@ -2363,7 +2399,22 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
   });
 
   const openShiftCheck = (scope: "all" | "mandatory" = "all") => {
-    if (scope === "all" && !isShiftCheckWindowOpen) { shiftCheckClosedMessage(); return; }
+    const withCombos = scope === "all" && comboShiftCount > 0;
+    // Only combos to count (no units, outside the unit window, or not the unit assignee).
+    const openCombosOnly = () => {
+      setShiftCheckScope("all");
+      setShiftCheckFocusCode(null);
+      setShiftCheckSnapshot([]);
+      setShiftCheckDrafts({});
+      setShiftCheckFamily("all");
+      setShiftCheckKind("all");
+      setShiftCheckView("pending");
+      setShowShiftCheckModal(true);
+    };
+    if (scope === "all" && !isShiftCheckWindowOpen) {
+      if (withCombos) openCombosOnly(); else shiftCheckClosedMessage();
+      return;
+    }
     // Nothing to count, or not the assignee: show today's completed counts instead.
     const openHistory = () => {
       setShiftCheckScope("all");
@@ -2374,7 +2425,8 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
       setShowShiftCheckModal(true);
     };
     if (!canPerformUnitCheck) {
-      if (scope === "all") openHistory();
+      if (withCombos) openCombosOnly();
+      else if (scope === "all") openHistory();
       else message.info('Chỉ người được phân công hôm nay hoặc quản lý được chốt kiểm kiện.');
       return;
     }
@@ -2383,6 +2435,7 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
       : shiftCheckCandidates;
     const identified = identifyShiftCandidates(candidates, workspace.register, workspace.catalog);
     if (scopeShiftCandidates(identified, "all").length === 0) {
+      if (withCombos) { openCombosOnly(); return; }
       if (scope === "all") { openHistory(); return; }
       message.info(
         scope === "mandatory"
@@ -2393,6 +2446,7 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
     }
     setShiftCheckScope(scope);
     setShiftCheckFocusCode(null);
+    setShiftCheckKind("all");
     setShiftCheckView("pending");
     // The end-of-shift modal is a cross-product review.  It must always open
     // on the complete list instead of inheriting the product family currently
@@ -2458,8 +2512,8 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
     }));
   };
 
-  const submitShiftCheck = async () => {
-    if (isSubmittingShiftCheck || !canPerformUnitCheck || shiftCheckBatchCandidates.length === 0) return;
+  const submitShiftCheck = async ({ keepOpen = false }: { keepOpen?: boolean } = {}) => {
+    if (isSubmittingShiftCheck || !canPerformUnitCheck || shiftCheckBatchCandidates.length === 0) return false;
     try {
       const items = shiftCheckBatchCandidates.map(({ unit }) => {
         const draft = shiftCheckDrafts[unit.id];
@@ -2527,13 +2581,40 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
           ? `Đã kiểm ${items.length} mục; chênh lệch đã cập nhật vào tồn phần mềm.`
           : `Đã kiểm khớp ${items.length} kiện cuối ca.`,
       );
-      setShowShiftCheckModal(false);
+      if (!keepOpen) setShowShiftCheckModal(false);
       setShiftCheckDrafts({});
       setShiftCheckFocusCode(null);
       setShiftCheckSnapshot([]);
       void loadWorkspace(true);
+      return true;
     } catch (error: any) {
       message.error(error?.message || "Không thể hoàn tất kiểm cuối ca.");
+      return false;
+    } finally {
+      setIsSubmittingShiftCheck(false);
+    }
+  };
+  const shiftCheckIncludesCombos = !shiftCheckFocusCode && shiftCheckScope === "all" && comboShiftCount > 0;
+  const shiftCheckTotal = shiftCheckBatchCandidates.length + (shiftCheckIncludesCombos ? comboShift.summary.total : 0);
+  const shiftCheckEnteredTotal = shiftCheckEnteredCount + (shiftCheckIncludesCombos ? comboShift.summary.entered : 0);
+  const canSubmitCombinedCheck = shiftCheckTotal > 0
+    && (shiftCheckBatchCandidates.length === 0 || canSubmitShiftCheck)
+    && (!shiftCheckIncludesCombos || comboShift.summary.canSubmit);
+  // One "Hoàn tất kiểm": units first (existing finalize), then each packer's combos.
+  const submitCombinedCheck = async () => {
+    if (!shiftCheckIncludesCombos) { await submitShiftCheck(); return; }
+    if (!canSubmitCombinedCheck || isSubmittingShiftCheck) return;
+    if (shiftCheckBatchCandidates.length > 0 && !(await submitShiftCheck({ keepOpen: true }))) return;
+    setIsSubmittingShiftCheck(true);
+    try {
+      const result = await comboShift.submitAll();
+      if (result.errors.length) {
+        message.error({ content: <div>{result.sent ? `Đã nộp ${result.sent} combo. ` : ""}Chưa nộp được:<br />{result.errors.map(line => <span key={line}>{line}<br /></span>)}</div>, duration: 8 });
+        return;
+      }
+      message.success(result.late ? `Đã nộp kiểm ${result.sent} combo (ghi nhận trễ hạn).` : `Đã nộp kiểm ${result.sent} combo đóng sẵn.`);
+      setShowShiftCheckModal(false);
+      void loadWorkspace(true);
     } finally {
       setIsSubmittingShiftCheck(false);
     }
@@ -3339,14 +3420,14 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
               </button>
             </Popover>
           )}
-          {!isRolePreview && workspace.shiftCheckPolicy && isShiftCheckWindowOpen && (
-            <Tooltip title={canPerformUnitCheck && allShiftCheckCandidates.length > 0
-              ? `${allShiftCheckCandidates.length} kiện đang khui hoặc chờ kiểm trên toàn bộ sản phẩm cần đối chiếu.`
+          {!isRolePreview && ((workspace.shiftCheckPolicy && isShiftCheckWindowOpen) || comboShiftCount > 0) && (
+            <Tooltip title={(canPerformUnitCheck ? allShiftCheckCandidates.length : 0) + comboShiftCount > 0
+              ? `${canPerformUnitCheck ? allShiftCheckCandidates.length : 0} kiện và ${comboShiftCount} combo đóng sẵn cần kiểm.`
               : "Xem các lần kiểm cuối ca hôm nay."}>
               <Button size="small" icon={<CheckCircleOutlined />} className="hu-shift-settings-btn hu-shift-top-check-btn"
                 onClick={() => openShiftCheck("all")}>
                 Kiểm cuối ca
-                {allShiftCheckCandidates.length > 0 && <span className="hu-shift-check-count">{allShiftCheckCandidates.length}</span>}
+                {allShiftCheckCandidates.length + comboShiftCount > 0 && <span className="hu-shift-check-count">{allShiftCheckCandidates.length + comboShiftCount}</span>}
               </Button>
             </Tooltip>
           )}
@@ -3580,26 +3661,24 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
           )}
         </aside>
         <section className={`hu-selected-panel hu-selected-panel--${activeModuleTab}`}>
-          <header className="hu-workspace-heading">
-            <div>
-              <Typography.Title level={2}>Quản lý kiện hàng</Typography.Title>
-            </div>
-          </header>
           <div className="hu-module-tabs" role="tablist" aria-label="Phân hệ quản lý kiện hàng">
             <button type="button" role="tab" id="hu-tab-units" aria-controls="hu-module-content" aria-selected={activeModuleTab === "units"} className={`hu-module-tab ${activeModuleTab === "units" ? "is-active" : ""}`} onClick={() => { setActiveModuleTab("units"); setHistoryScope("units"); }}>Kiện hàng</button>
             <button type="button" role="tab" id="hu-tab-prepack" aria-controls="hu-module-content" aria-selected={activeModuleTab === "prepack"} className={`hu-module-tab ${activeModuleTab === "prepack" ? "is-active" : ""}`} onClick={() => { setActiveModuleTab("prepack"); setHistoryScope("prepack"); }}>Đóng gói sẵn</button>
-            <button type="button" role="tab" id="hu-tab-targets" aria-controls="hu-module-content" aria-selected={activeModuleTab === "targets"} className={`hu-module-tab ${activeModuleTab === "targets" ? "is-active" : ""}`} onClick={() => setActiveModuleTab("targets")}>Mục tiêu đóng gói</button>
+            <button type="button" role="tab" id="hu-tab-targets" aria-controls="hu-module-content" aria-selected={activeModuleTab === "targets"} className={`hu-module-tab ${activeModuleTab === "targets" ? "is-active" : ""}`} onClick={() => setActiveModuleTab("targets")}>Gợi ý đóng gói</button>
             <button type="button" role="tab" id="hu-tab-history" aria-controls="hu-module-content" aria-selected={activeModuleTab === "history"} className={`hu-module-tab ${activeModuleTab === "history" ? "is-active" : ""}`} onClick={() => setActiveModuleTab("history")}>Lịch sử</button>
           </div>
           <div ref={moduleContentRef} className="hu-tab-content" id="hu-module-content" role="tabpanel" aria-labelledby={`hu-tab-${activeModuleTab}`}>
           {activeModuleTab === "history" && <div className="hu-history-scope"><Segmented value={historyScope} onChange={value => setHistoryScope(value as "units" | "prepack")} options={[{ value: "units", label: "Kiện hàng" }, { value: "prepack", label: "Đóng gói sẵn" }]} /></div>}
-          <Modal title="Phiếu đóng gói sẵn" open={prepackWorkOpen && canCreatePrepack} onCancel={() => { setPrepackWorkOpen(false); setPrepackCreateRequest(0); void loadWorkspace(true); }} footer={null} width={1200} destroyOnHidden>
-            {prepackWorkOpen && canCreatePrepack && <PrepackManagement embedded view="report" createRequest={prepackCreateRequest} onCreateHandled={() => setPrepackCreateRequest(0)} sourceUnits={workspace.register.map(unit => ({ id: unit.id, skuName: unit.skuName, unitName: unit.unitName, status: unit.status, currentPcs: unit.currentPcs, packageType: unit.packageType }))} productSkus={selected ? workspace.catalog.filter(item => item.productGroup === selected.productGroup).map(item => item.sku) : undefined} />}
+          {prepackWorkOpen && canCreatePrepack && prepackWorkMode === "create" && <div hidden>
+            <PrepackManagement embedded view="report" createRequest={prepackCreateRequest} onCreateHandled={() => setPrepackCreateRequest(0)} onCreateClosed={closePrepackWork} sourceUnits={workspace.register.map(unit => ({ id: unit.id, skuName: unit.skuName, unitName: unit.unitName, status: unit.status, currentPcs: unit.currentPcs, packageType: unit.packageType }))} />
+          </div>}
+          <Modal title="Phiếu đóng gói sẵn" open={prepackWorkOpen && canCreatePrepack && prepackWorkMode === "list"} onCancel={closePrepackWork} footer={null} width={1200} destroyOnHidden>
+            {prepackWorkOpen && canCreatePrepack && prepackWorkMode === "list" && <PrepackManagement embedded view="report" createRequest={0} sourceUnits={workspace.register.map(unit => ({ id: unit.id, skuName: unit.skuName, unitName: unit.unitName, status: unit.status, currentPcs: unit.currentPcs, packageType: unit.packageType }))} />}
           </Modal>
           {activeModuleTab === "targets" ? (
             <PrepackManagement view="report" sourceUnits={workspace.register.map(unit => ({ id: unit.id, skuName: unit.skuName, unitName: unit.unitName, status: unit.status, currentPcs: unit.currentPcs, packageType: unit.packageType }))} />
           ) : (activeModuleTab === "prepack" || (activeModuleTab === "history" && historyScope === "prepack")) ? (
-            activeModuleTab === "history" ? <PrepackManagement view="history" sourceUnits={workspace.register.map(unit => ({ id: unit.id, skuName: unit.skuName, unitName: unit.unitName, status: unit.status, currentPcs: unit.currentPcs, packageType: unit.packageType }))} productSkus={selected ? workspace.catalog.filter(item => item.productGroup === selected.productGroup).map(item => item.sku) : undefined} /> : <PrepackInventoryView lots={workspace.packedInventory} catalog={workspace.catalog} canCreate={canCreatePrepack} onCreate={() => openPrepackWork(true)} />
+            activeModuleTab === "history" ? <PrepackManagement view="history" sourceUnits={workspace.register.map(unit => ({ id: unit.id, skuName: unit.skuName, unitName: unit.unitName, status: unit.status, currentPcs: unit.currentPcs, packageType: unit.packageType }))} productSkus={selected ? workspace.catalog.filter(item => item.productGroup === selected.productGroup).map(item => item.sku) : undefined} /> : <PrepackPlanView lots={workspace.packedInventory} catalog={workspace.catalog} canEditPlan={isAdmin && !isRolePreview} canCreate={canCreatePrepack && (isAdmin || user?.role === "manager")} onCreate={() => openPrepackWork(true)} refreshToken={workspace.packedInventory} />
           ) : selected ? (
             <>
               <header className="hu-selected-header">
@@ -4767,7 +4846,7 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
                 disabled={isSubmittingShiftCheck}
                 onChange={(value) => setShiftCheckView(value as "pending" | "history")}
                 options={[
-                  { value: "pending", label: `Cần kiểm (${shiftCheckBatchCandidates.length})`, disabled: shiftCheckBatchCandidates.length === 0 },
+                  { value: "pending", label: `Cần kiểm (${shiftCheckTotal})`, disabled: shiftCheckTotal === 0 },
                   { value: "history", label: `Đã kiểm hôm nay (${todayShiftChecks.length})` },
                 ]}
               />
@@ -4788,9 +4867,11 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
           setShiftCheckFocusCode(null);
           setShiftCheckSnapshot([]);
         }}
-        onOk={submitShiftCheck}
-        okText={`${shiftCheckScope === "mandatory" ? "Chốt" : "Hoàn tất kiểm"} ${shiftCheckEnteredCount}/${shiftCheckBatchCandidates.length} kiện`}
-        okButtonProps={{ disabled: !canSubmitShiftCheck }}
+        onOk={() => void submitCombinedCheck()}
+        okText={shiftCheckIncludesCombos
+          ? `Hoàn tất kiểm ${shiftCheckEnteredTotal}/${shiftCheckTotal}`
+          : `${shiftCheckScope === "mandatory" ? "Chốt" : "Hoàn tất kiểm"} ${shiftCheckEnteredCount}/${shiftCheckBatchCandidates.length} kiện`}
+        okButtonProps={{ disabled: !canSubmitCombinedCheck }}
         footer={shiftCheckView === "history" ? (_, { CancelBtn }) => <CancelBtn /> : undefined}
         cancelText={shiftCheckView === "history" ? "Đóng" : "Để kiểm sau"}
         confirmLoading={isSubmittingShiftCheck}
@@ -4805,7 +4886,17 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
       >
         {shiftCheckView === "history" ? (
           <HandlingUnitShiftHistory entries={todayShiftChecks} describe={describeShiftHistoryUnit} />
-        ) : <HandlingUnitShiftChecklist
+        ) : <div className={shiftCheckIncludesCombos ? "hu-shift-merged" : "hu-shift-merged is-units-only"}>
+        {shiftCheckIncludesCombos && <div className="hu-shift-kind-bar">
+          <Segmented value={shiftCheckKind} disabled={isSubmittingShiftCheck} onChange={value => setShiftCheckKind(value as "all" | "units" | "combo")}
+            options={[
+              { value: "all", label: `Tất cả (${shiftCheckTotal})` },
+              { value: "units", label: `Kiện hàng (${shiftCheckBatchCandidates.length})` },
+              { value: "combo", label: `Combo đóng sẵn (${comboShift.summary.total})` },
+            ]} />
+          <span>Kiện và combo nộp cùng một lần{comboShift.deadline ? ` · combo hạn ${new Date(comboShift.deadline).toLocaleTimeString("vi-VN", { hour: "2-digit", minute: "2-digit", timeZone: "Asia/Bangkok" })}` : ""}.</span>
+        </div>}
+        {(!shiftCheckIncludesCombos || (shiftCheckKind !== "combo" && shiftCheckBatchCandidates.length > 0)) && <HandlingUnitShiftChecklist
           items={visibleShiftCheckCandidates}
           drafts={shiftCheckDrafts}
           family={shiftCheckFamily}
@@ -4820,6 +4911,16 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
           onFamily={setShiftCheckFamily}
           onDraft={updateShiftCheckDraft}
         />}
+        {shiftCheckIncludesCombos && shiftCheckKind !== "units" && <ShiftComboCheckRows
+          rows={comboShift.rows}
+          entries={comboShift.entries}
+          rowState={comboShift.rowState}
+          onChange={comboShift.setEntry}
+          reasons={SHIFT_CHECK_REASONS}
+          catalog={workspace.catalog}
+          disabled={isSubmittingShiftCheck}
+        />}
+        </div>}
       </Modal>
 
       {!isRolePreview && (
@@ -4835,6 +4936,7 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
           fineAmount={workspace.shiftCheckPolicy?.fineAmount}
           updatedBy={workspace.shiftCheckPolicy?.checkScopeUpdatedBy}
           updatedAt={workspace.shiftCheckPolicy?.checkScopeUpdatedAt}
+          comboCheckSettings={comboCheck?.settings}
           onClose={() => setShowShiftScopeModal(false)}
           onSaved={() => void loadWorkspace(true)}
         />

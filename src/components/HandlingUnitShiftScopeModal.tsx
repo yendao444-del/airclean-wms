@@ -1,5 +1,6 @@
 import { Alert, Button, Checkbox, Empty, Input, InputNumber, Modal, Radio, Space, Tag, Tooltip, message } from "antd";
 import { useEffect, useMemo, useRef, useState } from "react";
+import type { PackedComboCheckSettings } from "../types/packagePacking";
 
 export type ShiftScopeProduct = { productId: number; name: string; openedCount: number; packageSize?: number };
 export type ShiftCheckThreshold = { percent: number; updatedBy?: string; effectiveAt?: string };
@@ -16,6 +17,8 @@ type Props = {
   fineAmount?: number;
   updatedBy?: string;
   updatedAt?: string;
+  /** Daily pre-packed combo count: opening time, deadline and fine (0 = no fine yet). */
+  comboCheckSettings?: PackedComboCheckSettings & { updatedBy?: string; effectiveAt?: string };
   onClose: () => void;
   onSaved: () => void;
 };
@@ -71,6 +74,9 @@ export default function HandlingUnitShiftScopeModal(props: Props) {
   const [shiftMode, setShiftMode] = useState<ShiftCheckMode>("both");
   const [fineAmount, setFineAmount] = useState<number | null>(null);
   const [minThreshold, setMinThreshold] = useState<number | null>(null);
+  const [comboOpensAt, setComboOpensAt] = useState("17:00");
+  const [comboDeadline, setComboDeadline] = useState("20:00");
+  const [comboFine, setComboFine] = useState<number | null>(0);
   // Compare by content: applying a level reloads the workspace and must not
   // throw away ticks the admin has not saved yet.
   const selectedKey = JSON.stringify(props.selectedIds);
@@ -83,9 +89,12 @@ export default function HandlingUnitShiftScopeModal(props: Props) {
     setShiftMode(props.shiftMode || "both");
     setFineAmount(props.fineAmount ?? null);
     setMinThreshold(props.minThreshold ?? 10);
+    setComboOpensAt(props.comboCheckSettings?.opensAt || "17:00");
+    setComboDeadline(props.comboCheckSettings?.deadline || "20:00");
+    setComboFine(props.comboCheckSettings?.fineAmount ?? 0);
     setChecked(props.selectedIds ? [...props.selectedIds] : []);
     setSearch("");
-  }, [props.open, selectedKey, props.shiftMode, props.fineAmount, props.minThreshold]);
+  }, [props.open, selectedKey, props.shiftMode, props.fineAmount, props.minThreshold, props.comboCheckSettings?.opensAt, props.comboCheckSettings?.deadline, props.comboCheckSettings?.fineAmount]);
   const visible = useMemo(() => {
     const term = searchText(search).trim();
     // Staff set levels only for products that are actually being counted.
@@ -102,8 +111,15 @@ export default function HandlingUnitShiftScopeModal(props: Props) {
     if (mode === "selected" && listedCheckedCount === 0) { message.warning("Hãy tick ít nhất một sản phẩm cần kiểm."); return; }
     if (props.canEditAdminSettings && fineAmount === null) { message.warning("Hãy nhập mức phạt mỗi ca."); return; }
     if (props.canEditAdminSettings && minThreshold === null) { message.warning("Hãy nhập mức tối thiểu."); return; }
+    const comboChanged = props.canEditAdminSettings && (comboOpensAt !== (props.comboCheckSettings?.opensAt || "17:00")
+      || comboDeadline !== (props.comboCheckSettings?.deadline || "20:00") || (comboFine ?? 0) !== (props.comboCheckSettings?.fineAmount ?? 0));
+    if (comboChanged && (!comboOpensAt || !comboDeadline || comboDeadline <= comboOpensAt)) { message.warning("Hạn nộp kiểm combo phải sau giờ mở."); return; }
     setSaving(true);
     try {
+      if (comboChanged) {
+        const comboResponse = await window.electronAPI?.packedComboCheck?.saveConfig({ opensAt: comboOpensAt, deadline: comboDeadline, fineAmount: comboFine ?? 0 });
+        if (!comboResponse?.success) throw new Error(comboResponse?.error || "Không lưu được cài đặt kiểm combo.");
+      }
       const response = await window.electronAPI?.handlingUnits?.setShiftCheckScope({ productIds: mode === "all" ? null : checked, shiftMode, ...(props.canEditAdminSettings ? { fineAmount: fineAmount ?? undefined, minThresholdPercent: minThreshold ?? undefined } : {}) });
       if (!response?.success) throw new Error(response?.error || "Không lưu được danh sách sản phẩm cần kiểm.");
       message.success(`Đã lưu: ${shiftMode === "morning" ? "kiểm buổi sáng" : shiftMode === "afternoon" ? "kiểm buổi chiều" : "kiểm cả buổi sáng và buổi chiều"}.`);
@@ -145,6 +161,19 @@ export default function HandlingUnitShiftScopeModal(props: Props) {
         <div style={{ marginBottom: 6, fontWeight: 600 }}>Mức thấp nhất nhân viên được đặt</div>
         <InputNumber<number> aria-label="Mức thấp nhất nhân viên được đặt" style={{ width: 200 }} value={minThreshold} disabled={saving}
           min={1} max={100} precision={0} suffix="%" onChange={value => setMinThreshold(value)} />
+      </div>
+      <div className="hu-combo-check-settings">
+        <div style={{ marginBottom: 6, fontWeight: 600 }}>Kiểm combo đóng gói sẵn</div>
+        <Space size={12} wrap>
+          <label>Giờ mở <Input aria-label="Giờ mở kiểm combo" type="time" style={{ width: 120 }} value={comboOpensAt} disabled={saving} onChange={event => setComboOpensAt(event.target.value)} /></label>
+          <label>Hạn nộp <Input aria-label="Hạn nộp kiểm combo" type="time" style={{ width: 120 }} value={comboDeadline} disabled={saving} onChange={event => setComboDeadline(event.target.value)} /></label>
+          <label>Phạt trễ hạn <InputNumber<number> aria-label="Mức phạt trễ kiểm combo" style={{ width: 160 }} value={comboFine} disabled={saving}
+            min={0} max={10000000} step={10000} precision={0} suffix="đ"
+            formatter={value => value === undefined || value === null ? "" : Number(value).toLocaleString("vi-VN")}
+            parser={value => Number((value || "").replace(/\D/g, ""))}
+            onChange={value => setComboFine(value)} /></label>
+        </Space>
+        <small style={{ display: "block", marginTop: 4, color: "#8c8c8c" }}>0đ = chưa phạt, chỉ ghi nhận trễ hạn. Mức mới áp dụng từ lúc lưu.</small>
       </div>
       </>}
       <Radio.Group value={mode} onChange={event => setMode(event.target.value)} disabled={saving}>

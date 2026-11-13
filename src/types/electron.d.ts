@@ -328,6 +328,18 @@ export interface ElectronAPI {
     list: (payload: { workDate: string }) => Promise<{ success: boolean; data?: import('./packagePacking').PackingAssignment[]; error?: string }>;
     create: (payload: { workDate: string; requestKey: string; code: string; packerId?: number; packerIds?: number[]; requestedQty: number; components: Array<{ sku: string; quantity: number }> }) => Promise<{ success: boolean; data?: import('./packagePacking').PackingAssignment | import('./packagePacking').PackingAssignment[]; error?: string }>;
     update: (payload: { workDate: string; id: string; revision: number; action: 'draft' | 'submit' | 'accept' | 'return' | 'delete' | 'edit'; quantity?: number | null; requestedQty?: number; code?: string; components?: Array<{ sku: string; name?: string; unit?: string; quantity: number }>; packerId?: number }) => Promise<{ success: boolean; data?: import('./packagePacking').PackingAssignment; error?: string }>;
+    suggestions: (payload: { days: number }) => Promise<{ success: boolean; data?: import('./packagePacking').PackingSuggestionResult; error?: string }>;
+  };
+  packingPlan: {
+    get: () => Promise<{ success: boolean; data?: import('./packagePacking').PackingPlan; error?: string }>;
+    update: (payload: { key: string; components: Array<{ sku: string; quantity: number }>; label?: string; target?: number | null; owner?: string | null }) => Promise<{ success: boolean; data?: import('./packagePacking').PackingPlanEntry; error?: string }>;
+    assign: (payload: { assignments: Array<{ key: string; components: Array<{ sku: string; quantity: number }>; label?: string; owner: string | null; target?: number | null }> }) => Promise<{ success: boolean; data?: { assigned: number }; error?: string }>;
+  };
+  packedComboCheck: {
+    get: () => Promise<{ success: boolean; data?: import('./packagePacking').PackedComboChecklist; error?: string }>;
+    saveDraft: (payload: { items: import('./packagePacking').PackedComboCountInput[] }) => Promise<{ success: boolean; data?: { saved: number }; error?: string }>;
+    submit: (payload: { packerUsername: string; idempotencyKey: string; items: import('./packagePacking').PackedComboCountInput[] }) => Promise<{ success: boolean; data?: { items: unknown[]; late?: boolean; onBehalf?: boolean; duplicate?: boolean }; error?: string }>;
+    saveConfig: (payload: import('./packagePacking').PackedComboCheckSettings) => Promise<{ success: boolean; data?: unknown; error?: string }>;
   };
   prepack: {
     list: (filters?: { status?: string; evidenceStartDate?: string; evidenceEndDate?: string; workDateKey?: string }) => Promise<{ success: boolean; data?: any[]; error?: string }>;

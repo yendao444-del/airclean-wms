@@ -13380,6 +13380,82 @@ for (const channel of ["handlingUnits:getTelegramStatus", "handlingUnits:sendTel
   }));
 }
 
+// Daily pre-packed combo count (opens at the configured time, 17:00 default).
+const packedComboCheck = require("./packed-combo-check.cjs");
+// Staff assigned to today's end-of-shift check count every combo.
+async function comboCheckActor() {
+  const actor = { ...currentSession };
+  if (actor.role === "staff" && prisma) {
+    try { actor.shiftChecker = actor.username === (await readShiftPolicy(prisma)).assignedTo; } catch { actor.shiftChecker = false; }
+  }
+  return actor;
+}
+ipcMain.handle("packedComboCheck:get", async () => {
+  try {
+    requireRole("admin", "manager", "staff");
+    if (!prisma) throw new Error("Không kết nối được cơ sở dữ liệu kiện hàng.");
+    return { success: true, data: await packedComboCheck.readChecklist(prisma, await comboCheckActor()) };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+ipcMain.handle("packedComboCheck:saveDraft", async (_event, payload = {}) => {
+  try {
+    requireRole("admin", "manager", "staff");
+    if (!prisma) throw new Error("Không kết nối được cơ sở dữ liệu kiện hàng.");
+    const actor = await comboCheckActor();
+    const data = await prisma.$transaction((tx) => packedComboCheck.saveDraft(tx, actor, payload), { timeout: 15000, maxWait: 5000 });
+    return { success: true, data };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+ipcMain.handle("packedComboCheck:submit", async (_event, payload = {}) => {
+  try {
+    requireRole("admin", "manager", "staff");
+    if (!prisma) throw new Error("Không kết nối được cơ sở dữ liệu kiện hàng.");
+    const actor = await comboCheckActor();
+    const operationKey = buildRendererHandlingOperationKey(payload.idempotencyKey, "packed-combo-check", "BATCH");
+    if (!operationKey) throw new Error("Mã chống nộp trùng không hợp lệ.");
+    const result = await prisma.$transaction(async (tx) => {
+      await lockGlobalInventoryMutation(tx);
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${packagePackingModule.INVENTORY_KEY}))`;
+      const completed = await tx.appConfig.findUnique({ where: { key: operationKey } });
+      if (completed) return { items: JSON.parse(completed.value || "[]"), stockChanges: [], duplicate: true };
+      const checked = await packedComboCheck.submit(tx, actor, payload, {
+        finalizeCountsInTx, updateStock: updateProductStockInTx,
+        appendHistory: appendHandlingUnitsTransactions, reference: operationKey,
+        // Extra bags counted = newly packed: their goods leave the packages.
+        recordTransfers: async (transaction, entries) => {
+          await appendHandlingUnitsTransactions(transaction, entries);
+          for (const entry of entries.filter((item) => item.quantity < 0)) await markHandlingUnitWithdrawal(transaction, entry.unitId);
+        },
+      });
+      await tx.appConfig.create({ data: { key: operationKey, value: JSON.stringify(checked.items) } });
+      return { ...checked, duplicate: false };
+    }, { timeout: 30000, maxWait: 10000 });
+    if (!result.duplicate) {
+      emitStockChangedForSkus(result.stockChanges.map((item) => item.sku), { referenceType: "KIEM_KIEN", reference: operationKey });
+      broadcastHandlingUnitsChanged("PACKED_COMBO_CHECK", { checkedCount: result.items.length, actor: actor.username });
+    }
+    return { success: true, data: result };
+  } catch (error) {
+    console.error("Packed combo check error:", error);
+    return { success: false, error: error.message };
+  }
+});
+ipcMain.handle("packedComboCheck:saveConfig", async (_event, payload = {}) => {
+  try {
+    requireRole("admin");
+    if (!prisma) throw new Error("Không kết nối được cơ sở dữ liệu kiện hàng.");
+    const entry = await prisma.$transaction((tx) => packedComboCheck.saveConfig(tx, payload, currentSession?.username));
+    broadcastHandlingUnitsChanged("PACKED_COMBO_CHECK_CONFIG", entry);
+    return { success: true, data: entry };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
 // Header alerts only need VAT state and date. Never send purchase line items
 // to every open desktop just to calculate a notification badge.
 ipcMain.handle("purchases:getVatAlertSummary", async () => {
@@ -28352,6 +28428,82 @@ for (const method of ['list', 'create', 'update', 'inventory']) {
     catch (error) { return { success: false, error: error.message }; }
   });
 }
+
+// Read-only: best-selling order baskets for the packing target modal.
+const packingSuggestions = require('./packing-suggestions.cjs');
+ipcMain.handle('packagePacking:suggestions', async (_event, payload = {}) => {
+  try {
+    requireRole('admin', 'manager', 'staff');
+    const days = packingSuggestions.normalizeDays(payload?.days);
+    // The table is a daily snapshot: recomputed from the last 30 days only when
+    // the stored one is older than 24h, so numbers stay stable through the day.
+    const snapshotKey = `packingSuggestionsSnapshot:v2:${days}`;
+    const stored = await prisma.appConfig.findUnique({ where: { key: snapshotKey }, select: { value: true } });
+    try {
+      const snapshot = stored ? JSON.parse(stored.value) : null;
+      const age = Date.now() - Date.parse(snapshot?.computedAt);
+      if (snapshot?.data && Number.isFinite(age) && age >= 0 && age < 24 * 60 * 60 * 1000 && !payload?.refresh) {
+        return { success: true, data: { ...snapshot.data, computedAt: snapshot.computedAt } };
+      }
+    } catch { /* recompute a damaged snapshot */ }
+    const [orders, comboRows, products] = await Promise.all([
+      prisma.order.findMany({
+        where: { createdAt: { gte: packingSuggestions.suggestionWindowStart(days) }, status: { not: 'cancelled' } },
+        select: { items: { select: { sku: true, quantity: true } } },
+      }),
+      prisma.comboProduct.findMany({ select: { sku: true, items: true } }),
+      prisma.product.findMany({ select: { sku: true, name: true, unit: true, variants: true } }),
+    ]);
+    // Real product and color names, so labels never depend on guessing SKU
+    // suffixes (e.g. 1-9ATHINHPHAT-BE200 is "9A Thịnh Phát" color "Be").
+    const variants = {};
+    for (const product of products) {
+      for (const variant of parseJsonArray(product.variants)) {
+        const sku = String(variant?.sku || '').trim().toUpperCase();
+        if (sku) variants[sku] = { productSku: String(product.sku || '').trim(), productName: product.name, color: String(variant?.color || '').trim(), unit: String(product.unit || '').trim() };
+      }
+    }
+    const data = { ...packingSuggestions.buildPackingSuggestions({ orders, comboRows, days, limit: null }), variants };
+    const computedAt = new Date().toISOString();
+    const value = JSON.stringify({ computedAt, data });
+    await prisma.appConfig.upsert({ where: { key: snapshotKey }, create: { key: snapshotKey, value }, update: { value } });
+    return { success: true, data: { ...data, computedAt } };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+// Pre-packing plan: one owner per order pattern + optional admin target.
+const packingPlan = require('./packing-plan.cjs');
+ipcMain.handle('packingPlan:get', async () => {
+  try {
+    requireRole('admin', 'manager', 'staff');
+    return { success: true, data: await packingPlan.readPlan(prisma) };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+ipcMain.handle('packingPlan:update', async (_event, payload = {}) => {
+  try {
+    requireRole('admin');
+    const data = await prisma.$transaction((tx) => packingPlan.updatePattern(tx, payload, currentSession?.username));
+    broadcastHandlingUnitsChanged('PACKING_PLAN', { key: payload?.key });
+    return { success: true, data };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+ipcMain.handle('packingPlan:assign', async (_event, payload = {}) => {
+  try {
+    // Creating packing work assigns the pattern to that packer (admin/manager).
+    requireRole('admin', 'manager');
+    const data = await prisma.$transaction((tx) => packingPlan.assignOwners(tx, payload?.assignments, currentSession?.username), { timeout: 20000, maxWait: 5000 });
+    broadcastHandlingUnitsChanged('PACKING_PLAN', { count: data.assigned });
+    return { success: true, data };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
 
 ipcMain.handle('handlingUnits:getReconciliation', async (_event, rawSku = '') => {
   try {

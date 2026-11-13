@@ -22,7 +22,7 @@ function stockSources(log, record, lots = [], siblings = []) {
       const sourceAt = Date.parse(item.at);
       if (!Number.isFinite(sourceAt) || Math.abs(at - sourceAt) > 120_000) continue;
       for (const entry of item.units || []) if (entry.sku === log.sku) {
-        add(entry.untracked ? `UNALLOCATED:${log.sku}` : entry.code, entry.quantity);
+        add(entry.packedCode || (entry.untracked ? `UNALLOCATED:${log.sku}` : entry.code), entry.quantity);
       }
       for (const entry of item.packed || []) {
         if (!entry.assignmentId) return [];

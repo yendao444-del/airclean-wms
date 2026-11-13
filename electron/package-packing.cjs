@@ -190,7 +190,10 @@ function createPackagePackingService({ getDb, getSession, recordTransfers }) {
   async function mutate(payload, operation) {
     const { db, actor } = context();
     const day = dateKey(payload.workDate);
-    if (day !== workDay()) throw new Error('Chỉ thao tác công việc của hôm nay.');
+    // A manager may still accept work submitted on an earlier day; otherwise it
+    // stays "Chờ xác nhận" forever. Every other action is limited to today.
+    const lateAccept = payload.action === 'accept' && day < workDay();
+    if (day !== workDay() && !lateAccept) throw new Error('Chỉ thao tác công việc của hôm nay.');
     return db.$transaction(async tx => {
       const key = PREFIX + day;
       // Same lock order as TMDT/stock-check: stock authority before packing ledger.
@@ -265,14 +268,12 @@ function createPackagePackingService({ getDb, getSession, recordTransfers }) {
           const sku = entry.sku;
           const perCombo = quantity(item.quantity, 1);
           const requestedQty = quantity(payload.requestedQty, 1);
+          if (!Number.isSafeInteger(requestedQty * perCombo * employees.length)) throw new Error('Số lượng thành phần vượt giới hạn.');
+          // A packing target is only an assignment. Whether the units hold enough
+          // stock is checked when the packed count is submitted (transferToPacked).
           const candidates = await packingSources(tx, sku);
-          if (candidates.some(unit => unit.baseUnit !== candidates[0].baseUnit)) throw new Error(`SKU ${sku} có các kiện khác đơn vị, cần kiểm tra lại trước khi giao việc.`);
-          const available = candidates.reduce((sum, unit) => sum + Number(unit.remainingQuantity || 0), 0);
-          const required = requestedQty * perCombo * employees.length;
-          if (!Number.isSafeInteger(required)) throw new Error('Số lượng thành phần vượt giới hạn.');
-          if (!available || required > available) throw new Error(`SKU ${sku} cần ${required} ${candidates[0]?.baseUnit || 'gói'} cho ${employees.length} nhân viên; các kiện đang dở và nguyên niêm phong còn ${available}. Không đủ hàng.`);
-          const unit = candidates[0];
-          const normalizedComponent = { sku, name: sku, unit: unit?.baseUnit || 'gói', quantity: perCombo };
+          const lastUnit = candidates[0] ? null : await tx.handlingUnit.findFirst?.({ where: { sku }, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], select: { baseUnit: true } });
+          const normalizedComponent = { sku, name: sku, unit: candidates[0]?.baseUnit || lastUnit?.baseUnit || 'gói', quantity: perCombo };
           if (item.sourceCode) normalizedComponent.sourceCode = String(item.sourceCode).trim();
           normalized.push(normalizedComponent);
         }
@@ -380,4 +381,4 @@ function checkPackedCount(inventory, item, actor) {
   };
 }
 
-module.exports = { createPackagePackingService, dateKey, quantity, decode, decodeInventory, transferToPacked, consumePackedInventoryInTx, checkPackedCount, PREFIX, INVENTORY_KEY };
+module.exports = { createPackagePackingService, dateKey, quantity, decode, decodeInventory, transferToPacked, consumePackedInventoryInTx, checkPackedCount, packingSources, PREFIX, INVENTORY_KEY };

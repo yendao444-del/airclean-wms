@@ -123,6 +123,18 @@ contextBridge.exposeInMainWorld('electronAPI', {
         list: (payload) => ipcRenderer.invoke('packagePacking:list', payload),
         create: (payload) => ipcRenderer.invoke('packagePacking:create', payload),
         update: (payload) => ipcRenderer.invoke('packagePacking:update', payload),
+        suggestions: (payload) => ipcRenderer.invoke('packagePacking:suggestions', payload),
+    },
+    packingPlan: {
+        get: () => ipcRenderer.invoke('packingPlan:get'),
+        update: (payload) => ipcRenderer.invoke('packingPlan:update', payload),
+        assign: (payload) => ipcRenderer.invoke('packingPlan:assign', payload),
+    },
+    packedComboCheck: {
+        get: () => ipcRenderer.invoke('packedComboCheck:get'),
+        saveDraft: (payload) => ipcRenderer.invoke('packedComboCheck:saveDraft', payload),
+        submit: (payload) => ipcRenderer.invoke('packedComboCheck:submit', payload),
+        saveConfig: (payload) => ipcRenderer.invoke('packedComboCheck:saveConfig', payload),
     },
     prepack: {
         list: (filters) => ipcRenderer.invoke('prepack:list', filters),

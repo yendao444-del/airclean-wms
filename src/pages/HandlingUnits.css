@@ -60,8 +60,17 @@
   border-bottom-color: #00b982;
   color: #008f65;
 }
-.hu-workspace-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-height: 74px; box-sizing: border-box; padding: 18px 24px; flex-shrink: 0; background: #f6f8fb; }
-.hu-workspace-heading h2.ant-typography { margin: 0; font-size: 27px; color: #10244a; }
+.hu-module-tab-badge {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 8px;
+  border-radius: 6px;
+  background: #e5484d;
+  color: #fff;
+  font-size: 12px;
+  font-weight: 600;
+  vertical-align: 1px;
+}
 .hu-packing-assign { height: 36px; padding: 0 16px; font-size: 14px; font-weight: 600; background: #00ab70; border-color: #00ab70; border-radius: 8px; box-shadow: none; }
 .hu-history-scope { padding: 14px 24px 0; flex-shrink: 0; }
 .hu-selected-panel--units .hu-global-history { display: none; }
@@ -3770,3 +3779,13 @@
 .hu-shift-history-unit small { color: #64748b; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .hu-shift-history-empty { flex: 1 1 auto; padding: 40px 0; }
 @media (max-width: 760px) { .hu-shift-history-row { grid-template-columns: 56px minmax(0, 1fr) 110px; } .hu-shift-history-row > :nth-child(n+4) { display: none; } }
+
+
+/* Unit/combo filter at the top of the merged end-of-shift checklist. */
+.hu-shift-kind-bar { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; color: #64748b; font-size: 13px; }
+.combo-check.combo-check-embedded { min-height: 0; padding: 12px 0 0; }
+.combo-check-embedded .combo-check-table-card h3 { display: flex; align-items: center; gap: 6px; }
+.combo-check-embedded td small { display: block; color: #7288aa; font-size: 12px; }
+.hu-shift-merged { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; overflow-y: auto; padding-top: 12px; }
+.hu-shift-merged.is-units-only { overflow: hidden; padding-top: 0; }
+.hu-shift-merged > .hu-shift-workspace { flex: 1 0 auto; }
