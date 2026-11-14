@@ -30,6 +30,7 @@ type BasketItem = { key: string; code: string; title: string; components: Array<
 export default function PrepackManagement({ embedded = false, view = 'report', createRequest = 0, onCreateHandled = () => {}, onCreateClosed, sourceUnits = [], productSkus }: Props) {
     const { user, actualUser, isRolePreview } = useAuth();
     const isAdmin = (actualUser || user)?.role === 'admin';
+    const canEditTargets = user?.role === 'admin' && !isRolePreview;
     const isManager = ['admin', 'manager'].includes((actualUser || user)?.role || '');
     const canCreate = canCreatePackagePacking(user?.role, isRolePreview);
     const [date, setDate] = useState(today);
@@ -111,6 +112,7 @@ export default function PrepackManagement({ embedded = false, view = 'report', c
     const removeFromBasket = (key: string) => setBasket(current => current.filter(entry => entry.key !== key));
     // Rounded rows count as edited, so changing the packer does not reset them.
     const roundBasket = () => setBasket(current => current.map(entry => {
+        if (!canEditTargets) return entry;
         const qty = roundUpTarget(entry.qty);
         return qty === entry.qty ? entry : { ...entry, qty, edited: true, beforeRound: entry.beforeRound ?? { qty: entry.qty, edited: entry.edited } };
     }));
@@ -161,7 +163,7 @@ export default function PrepackManagement({ embedded = false, view = 'report', c
     const submitBasket = async () => {
         if (mutationInFlight.current || !canWrite || !basket.length) return;
         if (isManager && basketPackers.length !== 1) return void message.warning('Chọn nhân viên thực hiện.');
-        if (basket.some(entry => !Number.isSafeInteger(entry.qty) || entry.qty < 1)) return void message.warning('Nhập chỉ tiêu cho từng mẫu.');
+        if (canEditTargets && basket.some(entry => !Number.isSafeInteger(entry.qty) || entry.qty < 1)) return void message.warning('Nhập chỉ tiêu cho từng mẫu.');
         const owner = employees.find(employee => employee.id === basketPackers[0])?.username;
         if (!owner) return void message.warning('Chọn nhân viên thực hiện.');
         mutationInFlight.current = true;
@@ -169,7 +171,8 @@ export default function PrepackManagement({ embedded = false, view = 'report', c
         try {
             // "Tạo đóng gói sẵn" only assigns patterns and their daily target. Packed
             // bags enter the book at the end-of-shift count (more than the book = packed).
-            const assignments = basket.map(entry => ({ key: patternKey(entry.components), components: entry.components, label: entry.code, owner, target: entry.qty === defaultTarget(entry.perDay) ? null : entry.qty }));
+            const assignments = basket.map(entry => ({ key: patternKey(entry.components), components: entry.components, label: entry.code, owner,
+                ...(canEditTargets ? { target: entry.qty === defaultTarget(entry.perDay) ? null : entry.qty } : {}) }));
             const assigned = await window.electronAPI.packingPlan.assign({ assignments });
             if (!assigned.success) throw new Error(assigned.error || 'Không phân công được.');
             setBasket([]);
@@ -260,7 +263,8 @@ export default function PrepackManagement({ embedded = false, view = 'report', c
             const owner = employees.find(employee => employee.id === ids[0])?.username;
             if (!owner) throw new Error('Không tìm thấy nhân viên thực hiện.');
             const components = (values.components || []).map((item: any) => ({ sku: String(item.sku || '').trim().toUpperCase(), quantity: Number(item.quantity) }));
-            const result = await window.electronAPI.packingPlan.assign({ assignments: [{ key: patternKey(components), components, label: String(values.code || '').trim(), owner, target: Number(values.requestedQty) }] });
+            const result = await window.electronAPI.packingPlan.assign({ assignments: [{ key: patternKey(components), components, label: String(values.code || '').trim(), owner,
+                ...(canEditTargets ? { target: Number(values.requestedQty) } : {}) }] });
             if (!result.success) throw new Error(result.error || 'Không phân công được.');
             setCreateOpen(false); form.resetFields(); message.success(`Đã phân công mẫu ${values.code} cho ${employees.find(employee => employee.username === owner)?.fullName || owner}.`);
         } catch (err: any) { message.error(err.message); }
@@ -292,7 +296,7 @@ export default function PrepackManagement({ embedded = false, view = 'report', c
                 </div>
               </section>
               <section className="packing-basket">
-                <header><h3>Danh sách phân công ({basket.length})</h3><Button size="small" className="packing-basket-round" icon={<ArrowUpOutlined />} disabled={!basket.length || basket.every(entry => entry.qty === roundUpTarget(entry.qty))} title="Làm tròn chỉ tiêu mọi dòng lên bội số 10" onClick={roundBasket}>Làm tròn lên 10</Button></header>
+                <header><h3>Danh sách phân công ({basket.length})</h3>{canEditTargets && <Button size="small" className="packing-basket-round" icon={<ArrowUpOutlined />} disabled={!basket.length || basket.every(entry => entry.qty === roundUpTarget(entry.qty))} title="Làm tròn chỉ tiêu mọi dòng lên bội số 10" onClick={roundBasket}>Làm tròn lên 10</Button>}</header>
                 <label className="packing-basket-packers"><span>Nhân viên thực hiện <b className="packing-required">*</b></span>{isManager
                   ? <Select showSearch optionFilterProp="label" status={basketPackers.length ? undefined : 'warning'} placeholder="Chọn nhân viên trước khi thêm sản phẩm" value={basketPackers[0]} onChange={(id: number) => changePackers(id ? [id] : [])} options={employees.map(e => ({ value: e.id, label: e.fullName }))} />
                   : <Input value={user?.fullName || user?.username || ''} disabled />}</label>
@@ -300,11 +304,13 @@ export default function PrepackManagement({ embedded = false, view = 'report', c
                   {!basket.length ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={needPacker ? 'Chọn nhân viên thực hiện trước, sau đó bấm + để thêm sản phẩm.' : 'Bấm + ở danh sách gợi ý để thêm sản phẩm.'} />
                     : basket.map(entry => <div key={entry.key} className={`packing-basket-row${entry.beforeRound ? ' is-rounded' : ''}`}>
                         <div><strong>{entry.title}</strong><small>Gợi ý {suggestedPer(entry)}{entry.ready > 0 ? ` · Đã đóng sẵn ${entry.ready}` : ''}{!entry.autoIssue && <Tooltip title="Đơn gồm nhiều dòng hoặc số lượng lớn hơn 1: khi xuất đơn, hệ thống chưa tự trừ gói đóng sẵn này."><span className="packing-basket-warn"> · Không tự trừ khi xuất</span></Tooltip>}</small></div>
-                        <InputNumber aria-label={`Số combo ${entry.code}`} min={1} max={100000} precision={0} value={entry.qty} onChange={value => setBasket(current => current.map(item => item.key === entry.key ? { ...item, qty: Number(value) || 0, edited: true, beforeRound: undefined } : item))} />
+                        <InputNumber aria-label={`Số combo ${entry.code}`} min={0} max={100000} precision={0} disabled={!canEditTargets}
+                            value={canEditTargets ? entry.qty : plan.patterns[patternKey(entry.components)]?.target ?? defaultTarget(entry.perDay)}
+                            onChange={value => { if (canEditTargets) setBasket(current => current.map(item => item.key === entry.key ? { ...item, qty: Number(value) || 0, edited: true, beforeRound: undefined } : item)); }} />
                         <Button type="text" danger aria-label={`Bỏ ${entry.code}`} icon={<MinusCircleOutlined />} onClick={() => removeFromBasket(entry.key)} />
                       </div>)}
                 </div>
-                {roundedCount > 0 && <p className="packing-basket-rounded" role="status"><CheckCircleFilled /> Đã làm tròn {roundedCount} mẫu lên bội số 10 · <Button type="link" size="small" onClick={undoRound}>Hoàn tác</Button></p>}
+                {canEditTargets && roundedCount > 0 && <p className="packing-basket-rounded" role="status"><CheckCircleFilled /> Đã làm tròn {roundedCount} mẫu lên bội số 10 · <Button type="link" size="small" onClick={undoRound}>Hoàn tác</Button></p>}
                 <p className="packing-basket-note">Số bên cạnh là chỉ tiêu túi luôn có sẵn (mặc định = số đơn/ngày). Nhân viên cứ đóng; cuối ca đếm thực tế, phần nhiều hơn sổ được tính là túi mới đóng.</p>
                 {inline && <div className="packing-basket-actions"><Button disabled={busy || !basket.length} onClick={() => setBasket([])}>Hủy</Button><Button type="primary" loading={busy} disabled={!canWrite || !basket.length} onClick={() => void submitBasket()}>{`Phân công ${basket.length} mẫu`}</Button></div>}
               </section>
@@ -351,7 +357,8 @@ export default function PrepackManagement({ embedded = false, view = 'report', c
           {createMode === 'suggest' ? renderSuggestPanel(false) : <Form form={form} layout="vertical" onFinish={create} initialValues={{ requestedQty: 20, components: [{ quantity: 5 }] }}>
             <Form.Item name="code" label="Tên / mã combo" rules={[{ required: true, whitespace: true }]}><Input placeholder="COMBO-MIX-10" maxLength={80} /></Form.Item>
             {isManager ? <Form.Item name="packerIds" label="Nhân viên thực hiện" rules={[{ required: true, message: 'Chọn nhân viên thực hiện.' }]}><Select showSearch optionFilterProp="label" placeholder="Chọn nhân viên" options={employees.map(e => ({ value: e.id, label: e.fullName }))} /></Form.Item> : <Form.Item label="Nhân viên thực hiện"><Input value={user?.fullName || user?.username || ''} disabled /></Form.Item>}
-            <Form.Item name="requestedQty" label="Chỉ tiêu (túi luôn có sẵn)" rules={[{ required: true }]}><InputNumber min={1} max={100000} precision={0} /></Form.Item>
+            {canEditTargets ? <Form.Item name="requestedQty" label="Chỉ tiêu (túi luôn có sẵn)" rules={[{ required: true }]}><InputNumber min={1} max={100000} precision={0} /></Form.Item>
+                : <p className="packing-basket-note">Chỉ tiêu giữ mức Admin đã đặt; nếu chưa có, dùng lượng đơn trung bình hàng ngày. Chỉ Admin được sửa chỉ tiêu.</p>}
             <Form.List name="components">{(fields, { add, remove }) => <>{fields.map(field => <div className="packing-component-form" key={field.key}><Form.Item name={[field.name, 'sku']} label="SKU / màu" rules={[{ required: true, message: 'Chọn SKU hoặc màu.' }]}><Select showSearch optionFilterProp="label" options={skuOptions.map(s => ({ value: s.skuName, label: `${s.skuName} · Lấy kiện dở trước, tiếp đến kiện nguyên` }))} /></Form.Item><Form.Item name={[field.name, 'quantity']} label="Số gói / combo" rules={[{ required: true }]}><InputNumber min={1} max={100000} precision={0} /></Form.Item><Button type="text" aria-label="Bỏ thành phần" icon={<MinusCircleOutlined />} onClick={() => remove(field.name)} /></div>)}<Button icon={<PlusOutlined />} onClick={() => add({ quantity: 5 })}>Thêm thành phần</Button></>}</Form.List>
         </Form>}</Modal>
         <Modal title={detail?.code || 'Chi tiết đóng gói'} open={!!detail} onCancel={() => setDetailId(null)} footer={<Button onClick={() => setDetailId(null)}>Đóng</Button>}>{detail && <><p>{composition(detail)}</p><p>Nguồn kiện: Hệ thống tự phân bổ FIFO khi xác nhận số đã đóng.</p><p>Nhân viên: {detail.packerName}</p><p>Được giao: {detail.requestedQty} combo · Đã đóng: {amount(detail) ?? 0} combo</p>{detail.status === 'draft' && <><Button disabled={!canWrite || busy} onClick={() => void update(detail, 'draft')}>Lưu số đã đóng</Button>{isAdmin && <Button icon={<EditOutlined />} disabled={!canWrite || busy} onClick={() => openEditTarget(detail)}>Sửa mục tiêu</Button>}</>}{detail.status === 'submitted' && isManager && <div className="packing-review"><Tooltip title={!canWrite && canLateAccept ? 'Chỉ trả lại được trong ngày nhân viên gửi.' : undefined}><Button disabled={!canWrite || busy} onClick={() => void update(detail, 'return')}>Trả lại</Button></Tooltip><Button type="primary" disabled={!(canWrite || canLateAccept) || busy} onClick={() => void update(detail, 'accept')}>Xác nhận sẵn sàng</Button></div>}</>}</Modal>

@@ -28497,7 +28497,14 @@ ipcMain.handle('packingPlan:assign', async (_event, payload = {}) => {
   try {
     // Creating packing work assigns the pattern to that packer (admin/manager).
     requireRole('admin', 'manager');
-    const data = await prisma.$transaction((tx) => packingPlan.assignOwners(tx, payload?.assignments, currentSession?.username), { timeout: 20000, maxWait: 5000 });
+    const allowTarget = currentSession?.role === 'admin';
+    const assignments = Array.isArray(payload?.assignments) ? payload.assignments : [];
+    if (!allowTarget && assignments.some(item => Object.prototype.hasOwnProperty.call(item || {}, 'target'))) {
+      throw new Error('Chỉ Admin được phép sửa chỉ tiêu đóng gói.');
+    }
+    const data = await prisma.$transaction((tx) => packingPlan.assignOwners(
+      tx, assignments, currentSession?.username, new Date(), { allowTarget },
+    ), { timeout: 20000, maxWait: 5000 });
     broadcastHandlingUnitsChanged('PACKING_PLAN', { count: data.assigned });
     return { success: true, data };
   } catch (error) {

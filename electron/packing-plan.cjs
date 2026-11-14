@@ -85,9 +85,14 @@ async function updatePattern(tx, payload = {}, actor, now = new Date()) {
   return next;
 }
 
-// assignments: [{ key, components, label?, owner: string|null }]
-async function assignOwners(tx, assignments = [], actor, now = new Date()) {
+// assignments: [{ key, components, label?, owner: string|null, target?: number|null }]
+// Managers may assign owners, but only admins may create or change targets.
+async function assignOwners(tx, assignments = [], actor, now = new Date(), options = {}) {
   if (!Array.isArray(assignments) || !assignments.length || assignments.length > 2000) throw new Error('Danh sách chia mẫu không hợp lệ.');
+  const allowTarget = options?.allowTarget === true;
+  if (!allowTarget && assignments.some(item => Object.prototype.hasOwnProperty.call(item || {}, 'target'))) {
+    throw new Error('Chỉ Admin được phép sửa chỉ tiêu đóng gói.');
+  }
   const prepared = assignments.map(item => {
     const target = item?.target;
     if (target !== undefined && target !== null && (!Number.isSafeInteger(target) || target < 0 || target > MAX_TARGET)) {

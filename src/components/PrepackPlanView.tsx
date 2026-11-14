@@ -23,6 +23,7 @@ type Row = {
     label: string;
     sku: string;
     orderCount: number;
+    perDay: number;
     packed: number;
     defaultTarget: number;
     target: number;
@@ -35,6 +36,7 @@ type Row = {
 };
 const UNASSIGNED = '';
 const number = (value: number) => value.toLocaleString('vi-VN');
+const dailyOrders = (value: number) => Math.round(value).toLocaleString('vi-VN');
 const stateLabel = (row: Row) => row.state === 'missing' ? `Thiếu ${number(row.diff)}` : row.state === 'extra' ? `Thừa ${number(row.diff)}` : 'Đủ';
 const COUNTED: PackingLot['status'][] = ['ready', 'submitted'];
 
@@ -130,7 +132,7 @@ export default function PrepackPlanView({ lots, catalog = [], canEditPlan, canCr
                 const packed = packedByKey.get(key) || 0;
                 return {
                     key, components: value.components, label: patternLabel(value.components, variants, unitNames), sku: value.sku,
-                    orderCount: value.orderCount, packed, defaultTarget: base, target, overridden: entry?.target != null,
+                    orderCount: value.orderCount, perDay: value.orderCount / days, packed, defaultTarget: base, target, overridden: entry?.target != null,
                     owner: entry?.owner || UNASSIGNED, ownerName: entry?.ownerName || '', ...planState(packed, target), rank: 0,
                 };
             })
@@ -166,6 +168,7 @@ export default function PrepackPlanView({ lots, catalog = [], canEditPlan, canCr
         setInlineValue(row.target);
     };
     const saveInline = async (row: Row) => {
+        if (!canEditPlan) return;
         const value = inlineValue;
         setInlineKey(null);
         if (value === null || value === row.target) return;
@@ -183,7 +186,7 @@ export default function PrepackPlanView({ lots, catalog = [], canEditPlan, canCr
         setEditOwner(row.owner);
     };
     const saveEdit = async () => {
-        if (!editing) return;
+        if (!canEditPlan || !editing) return;
         setSaving(true);
         try {
             const result = await window.electronAPI.packingPlan.update({ key: editing.key, components: editing.components, label: editing.sku, target: editTarget, owner: editOwner || null });
@@ -234,7 +237,7 @@ export default function PrepackPlanView({ lots, catalog = [], canEditPlan, canCr
                 : !visible.length ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="Không có mẫu phù hợp" />
                 : <div className="prepack-plan-groups">
                     <div className="prepack-plan-row prepack-plan-columns" role="row">
-                        <span>#</span><span>Mẫu đóng gói</span><span>Đã đóng / Chỉ tiêu</span><span>Trạng thái</span>
+                        <span>#</span><span>Mẫu đóng gói</span><span>Lượng đơn trung bình hàng ngày</span><span>Đã đóng</span><span>Chỉ tiêu</span><span>Trạng thái</span>
                     </div>
                     {groups.map(([owner, group]) => <div key={owner} className="prepack-plan-group">
                     <div className="prepack-plan-group-title"><strong>{group.name}</strong> · {ownerSummary(owner)}</div>
@@ -245,11 +248,13 @@ export default function PrepackPlanView({ lots, catalog = [], canEditPlan, canCr
                             <strong>{row.label}</strong>
                             <small>SKU: {row.sku}{row.overridden && <Tag className="prepack-plan-tag">chỉ tiêu đã chỉnh</Tag>}</small>
                         </div>
-                        {inlineKey === row.key
+                        <span className="prepack-plan-daily" title={`${dailyOrders(row.perDay)} đơn/ngày trong ${suggestions?.days || 30} ngày`}>{dailyOrders(row.perDay)} đơn</span>
+                        <span className="prepack-plan-packed">{number(row.packed)}</span>
+                        {canEditPlan && inlineKey === row.key
                             // Same box as the read-only cell, so the row height never changes while editing.
                             ? <div className="prepack-plan-stat is-clickable is-editing" title={`Enter để lưu · Esc để hủy · mặc định ${number(row.defaultTarget)}`}
                                 onClick={event => event.stopPropagation()} onDoubleClick={event => event.stopPropagation()}>
-                                <span className="prepack-plan-inline">{number(row.packed)} /
+                                <span className="prepack-plan-inline">
                                     <InputNumber<number> aria-label={`Chỉ tiêu ${row.label}`} size="small" autoFocus min={0} max={100000} precision={0} controls={false}
                                         placeholder={String(row.defaultTarget)} value={inlineValue} onChange={value => setInlineValue(value)} onPressEnter={() => void saveInline(row)}
                                         onBlur={() => void saveInline(row)} onKeyDown={event => { if (event.key === 'Escape') setInlineKey(null); }} />
@@ -260,7 +265,7 @@ export default function PrepackPlanView({ lots, catalog = [], canEditPlan, canCr
                                 <div className={`prepack-plan-stat${canEditPlan ? ' is-clickable' : ''}`} role={canEditPlan ? 'button' : undefined}
                                     onClick={event => { if (!canEditPlan) return; event.stopPropagation(); startInline(row); }}
                                     onDoubleClick={event => event.stopPropagation()}>
-                                    <span>{number(row.packed)} / <b className="prepack-plan-target-value">{number(row.target)}</b></span>
+                                    <span><b className="prepack-plan-target-value">{number(row.target)}</b></span>
                                     <i><b style={{ width: `${percent(row)}%` }} /></i>
                                 </div>
                             </Tooltip>}

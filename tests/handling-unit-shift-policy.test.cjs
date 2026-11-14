@@ -111,7 +111,8 @@ test("two missed shifts cost 100000 total regardless of the package count", () =
   const fines = buildFines(ledger, { employees }, "2026-10-14T19:01:00+07:00");
   assert.equal(fines.length, 2);
   assert.equal(fines.reduce((sum, fine) => sum + fine.amount, 0), 100000);
-  assert.ok(fines.every(fine => fine.empId === 2 && fine.missingUnits.length === 3));
+  // Packed combos are excluded by buildFines; only physical packages are due.
+  assert.ok(fines.every(fine => fine.empId === 2 && fine.missingUnits.length === 2 && !fine.missingUnits.includes('PACKED:1')));
 });
 
 test("late count before any maintenance still latches noon lateness", () => {
