@@ -54,6 +54,7 @@ import { useAuth } from './contexts/AuthContext';
 import type { AuthUser } from './contexts/AuthContext';
 import { PageHeaderProvider, usePageHeader } from './contexts/PageHeaderContext';
 import { AppDataProvider } from './contexts/AppDataContext';
+import { CrashIssueReportButton, HeaderIssueReportButton } from './components/IssueReportButton';
 
 // ⚡ LAZY LOADING - Tất cả pages còn lại (load on demand)
 const FeeCalculatorPage = lazy(() => import('./pages/FeeCalculator'));
@@ -107,9 +108,15 @@ class ErrorBoundary extends Component<{ children: ReactNode }, ErrorBoundaryStat
                 <div style={{ padding: 48, textAlign: 'center' }}>
                     <Title level={3} type="danger">Ứng dụng gặp lỗi</Title>
                     <p style={{ color: '#666' }}>{this.state.error?.message}</p>
-                    <Button type="primary" onClick={() => window.location.reload()}>
-                        Thử lại
-                    </Button>
+                    <Space>
+                        <Button type="primary" onClick={() => window.location.reload()}>Thử lại</Button>
+                        <CrashIssueReportButton
+                            moduleName="Ứng dụng"
+                            route={window.location.pathname}
+                            errorMessage={this.state.error?.message}
+                            initialDescription="Ứng dụng hiển thị màn hình lỗi."
+                        />
+                    </Space>
                 </div>
             );
         }
@@ -280,9 +287,9 @@ function AppContent() {
     const staffPreviewAccounts = previewAccounts.filter(account => account.role === 'staff' || account.role === 'viewer');
     const managerTargets = managerPreviewAccounts.length > 0 ? managerPreviewAccounts : [genericManagerPreview];
     const staffTargets = staffPreviewAccounts.length > 0 ? staffPreviewAccounts : [genericStaffPreview];
-    const activateRolePreview = (account: AuthUser) => {
-        startRolePreview(account);
-        setPreviewMenuOpen(false);
+    const activateRolePreview = async (account: AuthUser) => {
+        const started = await startRolePreview(account);
+        if (started) setPreviewMenuOpen(false);
     };
     useEffect(() => {
         if (!previewMenuOpen && !profileMenuOpen) return;
@@ -333,9 +340,9 @@ function AppContent() {
         window.addEventListener('app:navigate', handleAppNavigate);
         return () => window.removeEventListener('app:navigate', handleAppNavigate);
     }, [accessibleKeys]);
-    const openProfile = () => {
+    const openProfile = async () => {
         setProfileMenuOpen(false);
-        if (isRolePreview) stopRolePreview();
+        if (isRolePreview) await stopRolePreview();
         navigateTo('my-profile');
     };
     const logoutFromProfileMenu = () => {
@@ -738,6 +745,11 @@ function AppContent() {
                     <span className="app-titlebar-name" style={{ fontSize: 13, fontWeight: 400, color: '#595959', pointerEvents: 'none' }}>DBY Software POS</span>
                     <div style={{ flex: 1 }} />
                     <div className="app-titlebar-actions" style={{ WebkitAppRegion: 'no-drag', display: 'flex', alignItems: 'center', gap: 6 } as React.CSSProperties}>
+                        <HeaderIssueReportButton
+                            moduleName={getMenuLabel(selectedKey)}
+                            route={window.location.pathname}
+                            employeeName={actualUser?.fullName || actualUser?.username}
+                        />
                         {([
                             { key: 'order-picking', icon: <ScanOutlined style={{ fontSize: 16 }} />, label: 'Nhặt hàng' },
                             { key: 'stock-check', icon: <AuditOutlined style={{ fontSize: 16 }} />, label: 'Kiểm hàng' },
@@ -873,7 +885,7 @@ function AppContent() {
                             <strong>{previewRoleLabel} — {previewUser.fullName || previewUser.username}</strong>
                             <span className="role-preview-banner__username">@{previewUser.username}</span>
                         </div>
-                        <div className="role-preview-banner__notice">Chỉ dùng để kiểm tra hiển thị; tránh thao tác ghi dữ liệu.</div>
+                        <div className="role-preview-banner__notice">Đang chạy đúng quyền nhân viên; thao tác nhập liệu sẽ ghi thật theo tài khoản này.</div>
                         <Button size="small" icon={<CloseOutlined />} onClick={stopRolePreview}>
                             Thoát chế độ xem
                         </Button>

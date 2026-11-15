@@ -27,6 +27,7 @@ const SHIFT_MODES = {
   both: SHIFT_KEYS,
 };
 const packing = require("./package-packing.cjs");
+const packedComboCheck = require("./packed-combo-check.cjs");
 
 function canEditShiftScope(session) {
   return session?.role === "admin" || SHIFT_SCOPE_EDITORS.includes(String(session?.username || "").trim().toLowerCase());
@@ -633,7 +634,10 @@ function employeeFor(data, username) {
   if (matches.length !== 1 || !Number.isSafeInteger(Number(matches[0].id)) || Number(matches[0].id) <= 0) return null;
   return Number(matches[0].id);
 }
-function buildFines(ledger, data = {}, now = new Date(), inScope = () => true, scope = { history: [] }) {
+// comboSpots: the daily random combo counts ({ date: { keys, doneAt } }, see
+// packed-combo-check.cjs). They are due with the evening shift; a missing one
+// is part of the same one-per-shift fine as missing packages.
+function buildFines(ledger, data = {}, now = new Date(), inScope = () => true, scope = { history: [] }, comboSpots = {}) {
   const today = dayKey(now);
   if (!today || today < EFFECTIVE_DATE) return [];
   freezeDeadlines(ledger, now);
@@ -649,15 +653,22 @@ function buildFines(ledger, data = {}, now = new Date(), inScope = () => true, s
       const missingUnits = Object.entries(day.units)
         .filter(([code, raw]) => !isPackedCode(code) && normalizeUnit(raw, date).missedShifts[shift] && inScope(code, deadlineFor(date, shift)))
         .map(([code]) => code).sort();
-      if (!missingUnits.length) continue;
+      const spot = shift === "evening" ? comboSpots[date] : null;
+      // Only a list fixed before the deadline is due (no fine on the day the feature arrives late).
+      const missingCombos = spot && Array.isArray(spot.keys) && spot.keys.length
+        && Date.parse(spot.at) <= deadlineFor(date, shift).getTime()
+        && !(Date.parse(spot.doneAt) <= deadlineFor(date, shift).getTime()) ? spot.keys.length : 0;
+      if (!missingUnits.length && !missingCombos) continue;
       const amount = fineAmountAt(scope, deadlineFor(date, shift));
+      const missingText = [missingUnits.length ? `${missingUnits.length} kiện` : "", missingCombos ? `${missingCombos} combo đóng sẵn ngẫu nhiên` : ""].filter(Boolean).join(" và ");
       fines.push({
         id: `fine-hu-shift-${date}-${shift}-${assignedTo}`, empId,
         type: `Chưa kiểm kiện ${SHIFTS[shift].label}`,
-        detail: `Chưa nhập số đếm thực tế ${missingUnits.length} kiện trước hạn ${deadlineLabel(date, shift)}; phạt ${amount.toLocaleString("vi-VN")}đ/ca.`,
+        detail: `Chưa nhập số đếm thực tế ${missingText} trước hạn ${deadlineLabel(date, shift)}; phạt ${amount.toLocaleString("vi-VN")}đ/ca.`,
         amount, date: deadlineFor(date, shift).toISOString(),
         source: "handling-unit-shift-check", attendanceDate: date,
         scheduledSession: shift === "midday" ? "morning" : "afternoon", shift, assignedTo, missingUnits,
+        ...(missingCombos ? { missingCombos: spot.keys.slice() } : {}),
       });
     }
   }
@@ -719,11 +730,12 @@ async function reconcileShiftFines(prisma, { now = new Date() } = {}) {
         if (!Array.isArray(events)) throw new Error("Lịch sử biến động kiện không hợp lệ.");
         aboveLevelFilter = thresholdFilter(thresholds, await unitInfoByCode(tx, missedCodes), events, mandatoryCodes(ledger));
       }
-      const allFines = buildFines(ledger, data, now, (code, at) => inScope(code, at) && aboveLevelFilter(code, at), scope);
+      const comboSpots = packedComboCheck.spotLedger(await tx.appConfig.findUnique({ where: { key: packedComboCheck.LEDGER_KEY } }));
+      const allFines = buildFines(ledger, data, now, (code, at) => inScope(code, at) && aboveLevelFilter(code, at), scope, comboSpots);
       const created = allFines.filter(fine => !ids.has(fine.id) && !deletedIds.has(fine.id));
       const audit = [...(data.fineAuditLog || []), ...created.map(fine => ({
         id: `create-${fine.id}`, action: "create", timestamp: new Date(now).toLocaleString("vi-VN", { timeZone: "Asia/Bangkok" }),
-        changedBy: "system", changedByName: "Hệ thống", after: fine, note: "Chưa hoàn thành kiểm kiện trước hạn ca.",
+        changedBy: "system", changedByName: "Hệ thống", after: fine, note: fine.missingCombos ? "Chưa hoàn thành kiểm cuối ca (kiện / combo ngẫu nhiên) trước hạn ca." : "Chưa hoàn thành kiểm kiện trước hạn ca.",
       }))];
       if (created.length) await tx.$executeRaw`
         UPDATE "AppConfig" SET "value" = (

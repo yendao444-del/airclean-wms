@@ -247,6 +247,37 @@ export interface StockMutationResult {
 }
 
 export interface ElectronAPI {
+  support: {
+    captureScreenshot: () => Promise<{
+      success: boolean;
+      data?: { dataUrl: string };
+      error?: string;
+    }>;
+    getDesktopSource: () => Promise<{
+      success: boolean;
+      data?: { sourceId: string };
+      error?: string;
+    }>;
+    reportIssue: (data: {
+      description?: string;
+      module?: string;
+      route?: string;
+      errorMessage?: string;
+      employeeName?: string;
+      screenshotBase64?: string;
+      videoBase64?: string;
+    }) => Promise<{
+      success: boolean;
+      data?: { reportId: string; queued: boolean; queueId?: string };
+      warning?: string;
+      error?: string;
+    }>;
+    syncQueue: () => Promise<{
+      success: boolean;
+      data?: { sent: number; pending: number };
+      error?: string;
+    }>;
+  };
   mobileScanTest: {
     start: () => Promise<{ success: boolean; url: string; token: string; address: string; secure: boolean }>;
     stop: () => Promise<{ success: boolean }>;
@@ -336,9 +367,11 @@ export interface ElectronAPI {
     assign: (payload: { assignments: Array<{ key: string; components: Array<{ sku: string; quantity: number }>; label?: string; owner: string | null; target?: number | null }> }) => Promise<{ success: boolean; data?: { assigned: number }; error?: string }>;
   };
   packedComboCheck: {
+    history: (filters?: { startDate?: string; endDate?: string; packerUsername?: string; pattern?: string }) => Promise<{ success: boolean; data?: import('./packagePacking').PackedComboHistoryEntry[]; error?: string }>;
     get: () => Promise<{ success: boolean; data?: import('./packagePacking').PackedComboChecklist; error?: string }>;
     saveDraft: (payload: { items: import('./packagePacking').PackedComboCountInput[] }) => Promise<{ success: boolean; data?: { saved: number }; error?: string }>;
-    submit: (payload: { packerUsername: string; idempotencyKey: string; items: import('./packagePacking').PackedComboCountInput[] }) => Promise<{ success: boolean; data?: { items: unknown[]; late?: boolean; onBehalf?: boolean; duplicate?: boolean }; error?: string }>;
+    /** mode "row": one pattern from the table, any time; default "full": every pattern of packerUsername. */
+    submit: (payload: { mode?: 'row' | 'full' | 'spot'; packerUsername?: string; idempotencyKey: string; items: import('./packagePacking').PackedComboCountInput[] }) => Promise<{ success: boolean; data?: { items: unknown[]; addedLots?: string[]; late?: boolean; onBehalf?: boolean; duplicate?: boolean }; error?: string }>;
     saveConfig: (payload: import('./packagePacking').PackedComboCheckSettings) => Promise<{ success: boolean; data?: unknown; error?: string }>;
   };
   prepack: {
@@ -1876,6 +1909,8 @@ export interface ElectronAPI {
       rememberToken?: string,
     ) => Promise<{ success: boolean; data?: any }>;
     getCurrentSession: () => Promise<{ success: boolean; data?: any }>;
+    startRolePreview: (userId: number) => Promise<{ success: boolean; data?: any; error?: string }>;
+    stopRolePreview: () => Promise<{ success: boolean; data?: any; error?: string }>;
     ensureAdmin: () => Promise<{ success: boolean; error?: string }>;
     heartbeat: () => Promise<{ success: boolean }>;
   };

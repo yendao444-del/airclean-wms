@@ -121,7 +121,15 @@ export default function PackedComboCheck({ canEdit, isManager, username, reasons
     const opens = data.settings.opensAt;
     const deadline = data.settings.deadline;
     const allDone = rows.length > 0 && summary.pending === 0;
-    const banner = !isOpen
+    // Full counts are due every few days for the whole warehouse (no time window, no fine).
+    const due = data.schedule?.packers.find(item => item.packerUsername === packer);
+    const cycle = data.schedule ? `${data.schedule.cycleDays} ngày/lần` : '';
+    const nextDue = data.schedule ? shortDate(data.schedule.nextDue).slice(0, 5) : '';
+    const banner = data.schedule
+        ? allDone || due?.done
+            ? { tone: 'done', text: `Đã kiểm combo kỳ này (${cycle})${due?.lastFullCheck ? ` · lần gần nhất ${shortDate(due.lastFullCheck).slice(0, 5)}` : ''} · kỳ sau ${nextDue}. Có thể kiểm lại bất kỳ lúc nào.`, pill: '' }
+            : { tone: due?.daysLate ? 'late' : 'open', text: `Kiểm combo bắt buộc ${cycle}: nhập số túi thực tế của tất cả mẫu rồi nộp${due?.lastFullCheck ? ` · lần gần nhất ${shortDate(due.lastFullCheck).slice(0, 5)}` : ''}`, pill: due?.daysLate ? `Quá hạn ${due.daysLate} ngày` : 'Đến hạn hôm nay' }
+        : !isOpen
         ? { tone: 'idle', text: `Kiểm combo mở lúc ${opens} · Hạn nộp ${deadline} hôm nay`, pill: `Mở sau ${formatCountdown(Date.parse(data.opensAt) - now)}` }
         : allDone
             ? { tone: 'done', text: 'Đã kiểm xong combo của nhân viên này hôm nay', pill: '' }
@@ -151,7 +159,7 @@ export default function PackedComboCheck({ canEdit, isManager, username, reasons
         <div className="combo-check-progress" aria-label={`Đã nhập ${summary.percent}%`}><div><i style={{ width: `${summary.percent}%` }} /></div><span>{summary.percent}%</span></div>
         <div className="combo-check-table-card">
             <header>
-                <h3>Danh sách combo cần kiểm hôm nay</h3>
+                <h3>Danh sách combo cần kiểm</h3>
                 {packers.length > 0 && <label><span>Nhân viên</span>
                     <Select aria-label="Nhân viên" value={packer || undefined} disabled={!isManager && packers.length < 2} onChange={setPacker}
                         options={packers.map(([value, item]) => ({ value, label: `${item.name}${item.pending ? ` · còn ${item.pending}` : ' · xong'}` }))} />

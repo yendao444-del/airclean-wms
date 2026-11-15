@@ -1,4 +1,4 @@
-const { ipcMain, dialog, shell, app, nativeImage, safeStorage } = require("electron");
+const { ipcMain, dialog, shell, app, nativeImage, safeStorage, BrowserWindow } = require("electron");
 const path = require("path");
 const { selectDailyStockCheck, POLICY_VERSION: STOCK_CHECK_SELECTION_VERSION } = require("./stock-check-selection.cjs");
 if (!app.isPackaged) require("dotenv").config({ path: path.join(__dirname, "..", ".env") });
@@ -33,6 +33,12 @@ const DATA_SAFETY_MODE = true;
 // The daily rollover is transactional, idempotent, and preserves a snapshot
 // before changing task state, so it remains available in safety mode.
 const DATA_SAFETY_ALLOWED_CHANNELS = new Set([
+  // Support reports only send a user-requested screenshot and diagnostic
+  // context to the configured admin Telegram channel; they do not mutate data.
+  "support:captureScreenshot",
+  "support:getDesktopSource",
+  "support:reportIssue",
+  "support:syncQueue",
   // Notification state is scoped to the authenticated user and written with
   // an idempotent compound upsert, so retries cannot affect another account.
   "notifications:markRead",
@@ -244,6 +250,10 @@ const runtimeConfigKeys = [
   "GDRIVE_FOLDER_ID",
   "TELEGRAM_BOT_TOKEN",
   "TELEGRAM_CHAT_ID",
+  // Dedicated credentials for the BAOCAOLOI support-report bot. These are
+  // intentionally separate from the user-configurable Telegram settings.
+  "DBY_TELEGRAM_BOT_TOKEN",
+  "DBY_TELEGRAM_CHAT_ID",
   "TELEGRAM_WMS_BOT_TOKEN",
   "TELEGRAM_WMS_NODE_PRIORITY",
   "OAUTH_CLIENT_ID",
@@ -342,6 +352,13 @@ const os = require("os");
 const crypto = require("crypto");
 const zlib = require("zlib");
 const { spawn } = require("child_process");
+const supportReportQueue = require("./support-report-queue.cjs");
+
+try {
+  supportReportQueue.init(app.getPath("userData"));
+} catch (error) {
+  console.warn("[SupportReport] Queue init failed:", error?.message || error);
+}
 
 function getEvidenceStorageConfigPath() {
   return path.join(app.getPath("userData"), "supabase-storage.json");
@@ -1201,6 +1218,290 @@ Content-Type: application/octet-stream
   });
 }
 
+async function getSupportTelegramConfig() {
+  // Support reports always use the dedicated BAOCAOLOI bot. Do not read the
+  // admin-editable Telegram settings here: those belong to other workflows
+  // and must never redirect screenshots/videos to another chat.
+  const token = String(config.DBY_TELEGRAM_BOT_TOKEN || "").trim();
+  const chatId = String(config.DBY_TELEGRAM_CHAT_ID || "").trim();
+  return { token, chatId };
+}
+
+function sendTelegramPhoto(buffer, fileName, caption, telegramConfig) {
+  return new Promise((resolve) => {
+    const { token, chatId } = telegramConfig || {};
+    if (!token || !chatId) {
+      resolve({ success: false, error: "Telegram chưa được admin cấu hình" });
+      return;
+    }
+    try {
+      const boundary = `----DBYSupport${crypto.randomBytes(12).toString("hex")}`;
+      const fileBuffer = Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer);
+      const textPart = (name, value) => Buffer.from(
+        `--${boundary}\r\nContent-Disposition: form-data; name="${name}"\r\n\r\n${String(value || "")}\r\n`,
+        "utf8",
+      );
+      const fileHeader = Buffer.from(
+        `--${boundary}\r\nContent-Disposition: form-data; name="photo"; filename="${fileName}"\r\nContent-Type: image/png\r\n\r\n`,
+        "utf8",
+      );
+      const footer = Buffer.from(`\r\n--${boundary}--\r\n`, "utf8");
+      const body = Buffer.concat([textPart("chat_id", chatId), textPart("caption", caption), fileHeader, fileBuffer, footer]);
+      const request = https.request({
+        hostname: "api.telegram.org",
+        path: `/bot${token}/sendPhoto`,
+        method: "POST",
+        headers: {
+          "Content-Type": `multipart/form-data; boundary=${boundary}`,
+          "Content-Length": body.length,
+        },
+        timeout: 15000,
+      }, (response) => {
+        let data = "";
+        response.on("data", (chunk) => { data += chunk; });
+        response.on("end", () => {
+          if (response.statusCode === 200) {
+            resolve({ success: true });
+            return;
+          }
+          let detail = `HTTP ${response.statusCode}`;
+          try { detail = JSON.parse(data)?.description || detail; } catch {}
+          resolve({ success: false, error: detail });
+        });
+      });
+      request.on("error", (error) => resolve({ success: false, error: error.message }));
+      request.on("timeout", () => { request.destroy(); resolve({ success: false, error: "Timeout" }); });
+      request.write(body);
+      request.end();
+    } catch (error) {
+      resolve({ success: false, error: error?.message || "Không thể gửi ảnh Telegram" });
+    }
+  });
+}
+
+function sendTelegramVideo(buffer, fileName, caption, telegramConfig) {
+  return new Promise((resolve) => {
+    const { token, chatId } = telegramConfig || {};
+    if (!token || !chatId) {
+      resolve({ success: false, error: "Telegram chưa được admin cấu hình" });
+      return;
+    }
+    try {
+      const boundary = `----DBYSupport${crypto.randomBytes(12).toString("hex")}`;
+      const fileBuffer = Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer);
+      const textPart = (name, value) => Buffer.from(
+        `--${boundary}\r\nContent-Disposition: form-data; name="${name}"\r\n\r\n${String(value || "")}\r\n`,
+        "utf8",
+      );
+      const fileHeader = Buffer.from(
+        `--${boundary}\r\nContent-Disposition: form-data; name="video"; filename="${fileName}"\r\nContent-Type: video/webm\r\n\r\n`,
+        "utf8",
+      );
+      const footer = Buffer.from(`\r\n--${boundary}--\r\n`, "utf8");
+      const body = Buffer.concat([textPart("chat_id", chatId), textPart("caption", caption), fileHeader, fileBuffer, footer]);
+      const request = https.request({
+        hostname: "api.telegram.org",
+        path: `/bot${token}/sendVideo`,
+        method: "POST",
+        headers: {
+          "Content-Type": `multipart/form-data; boundary=${boundary}`,
+          "Content-Length": body.length,
+        },
+        timeout: 20000,
+      }, (response) => {
+        let data = "";
+        response.on("data", (chunk) => { data += chunk; });
+        response.on("end", () => {
+          if (response.statusCode === 200) {
+            resolve({ success: true });
+            return;
+          }
+          let detail = `HTTP ${response.statusCode}`;
+          try { detail = JSON.parse(data)?.description || detail; } catch {}
+          resolve({ success: false, error: detail });
+        });
+      });
+      request.on("error", (error) => resolve({ success: false, error: error.message }));
+      request.on("timeout", () => { request.destroy(); resolve({ success: false, error: "Timeout" }); });
+      request.write(body);
+      request.end();
+    } catch (error) {
+      resolve({ success: false, error: error?.message || "Không thể gửi video Telegram" });
+    }
+  });
+}
+
+function sendTelegramSupportDocument(buffer, fileName, caption, telegramConfig) {
+  return new Promise((resolve) => {
+    const { token, chatId } = telegramConfig || {};
+    if (!token || !chatId) {
+      resolve({ success: false, error: "Telegram chưa được admin cấu hình" });
+      return;
+    }
+    try {
+      const boundary = `----DBYSupport${crypto.randomBytes(12).toString("hex")}`;
+      const fileBuffer = Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer);
+      const textPart = (name, value) => Buffer.from(
+        `--${boundary}\r\nContent-Disposition: form-data; name="${name}"\r\n\r\n${String(value || "")}\r\n`,
+        "utf8",
+      );
+      const fileHeader = Buffer.from(
+        `--${boundary}\r\nContent-Disposition: form-data; name="document"; filename="${fileName}"\r\nContent-Type: video/webm\r\n\r\n`,
+        "utf8",
+      );
+      const footer = Buffer.from(`\r\n--${boundary}--\r\n`, "utf8");
+      const body = Buffer.concat([textPart("chat_id", chatId), textPart("caption", caption), fileHeader, fileBuffer, footer]);
+      const request = https.request({
+        hostname: "api.telegram.org",
+        path: `/bot${token}/sendDocument`,
+        method: "POST",
+        headers: {
+          "Content-Type": `multipart/form-data; boundary=${boundary}`,
+          "Content-Length": body.length,
+        },
+        timeout: 20000,
+      }, (response) => {
+        let data = "";
+        response.on("data", (chunk) => { data += chunk; });
+        response.on("end", () => {
+          if (response.statusCode === 200) {
+            resolve({ success: true });
+            return;
+          }
+          let detail = `HTTP ${response.statusCode}`;
+          try { detail = JSON.parse(data)?.description || detail; } catch {}
+          resolve({ success: false, error: detail });
+        });
+      });
+      request.on("error", (error) => resolve({ success: false, error: error.message }));
+      request.on("timeout", () => { request.destroy(); resolve({ success: false, error: "Timeout" }); });
+      request.write(body);
+      request.end();
+    } catch (error) {
+      resolve({ success: false, error: error?.message || "Không thể gửi video Telegram" });
+    }
+  });
+}
+
+function normalizeSupportText(value, maxLength) {
+  return String(value || "").replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, "").trim().slice(0, maxLength);
+}
+
+async function deliverSupportReport(payload) {
+  const telegramConfig = await getSupportTelegramConfig();
+  const isVideo = Boolean(payload.videoBase64);
+  const buffer = Buffer.from(String(isVideo ? payload.videoBase64 : payload.screenshotBase64 || ""), "base64");
+  if (!buffer.length) return { success: false, error: isVideo ? "Không tạo được video màn hình" : "Không tạo được ảnh chụp màn hình" };
+  let lastResult = { success: false, error: "Không thể gửi báo lỗi" };
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    lastResult = isVideo
+      ? await sendTelegramVideo(buffer, payload.fileName || "dby-pos-error.webm", payload.caption, telegramConfig)
+      : await sendTelegramPhoto(buffer, payload.fileName || "dby-pos-error.png", payload.caption, telegramConfig);
+    if (isVideo && !lastResult.success) {
+      lastResult = await sendTelegramSupportDocument(buffer, payload.fileName || "dby-pos-error.webm", payload.caption, telegramConfig);
+    }
+    if (lastResult.success) return lastResult;
+  }
+  return lastResult;
+}
+
+async function flushSupportReportQueue() {
+  const pending = supportReportQueue.dequeueReady();
+  let sent = 0;
+  for (const item of pending) {
+    const result = await deliverSupportReport(item.payload);
+    if (result.success) {
+      supportReportQueue.remove(item._filename);
+      sent += 1;
+    } else {
+      supportReportQueue.markFailure(item._filename, result.error);
+    }
+  }
+  return { sent, pending: supportReportQueue.count() };
+}
+
+ipcMain.handle("support:captureScreenshot", async (event) => {
+  try {
+    if (!isTrustedAppSender(event)) throw new Error("IPC sender không hợp lệ");
+    if (!currentSession) throw new Error("Chưa đăng nhập");
+    const win = require("electron").BrowserWindow.fromWebContents(event.sender);
+    if (!win || win.isDestroyed()) return { success: false, error: "Cửa sổ ứng dụng không còn khả dụng" };
+    const screenshot = await win.webContents.capturePage();
+    return { success: true, data: { dataUrl: `data:image/png;base64,${screenshot.toPNG().toString("base64")}` } };
+  } catch (error) {
+    return { success: false, error: error?.message || "Không thể chụp màn hình" };
+  }
+});
+
+ipcMain.handle("support:getDesktopSource", async (event) => {
+  try {
+    if (!isTrustedAppSender(event)) throw new Error("IPC sender không hợp lệ");
+    if (!currentSession) throw new Error("Chưa đăng nhập");
+    const win = BrowserWindow.fromWebContents(event.sender);
+    if (!win || win.isDestroyed()) return { success: false, error: "Cửa sổ ứng dụng không còn khả dụng" };
+    // Capture the native Electron window instead of the current WebContents
+    // tab. The window source keeps recording while the SPA changes modules.
+    return { success: true, data: { sourceId: win.getMediaSourceId() } };
+  } catch (error) {
+    return { success: false, error: error?.message || "Không thể lấy nguồn quay màn hình" };
+  }
+});
+
+ipcMain.handle("support:reportIssue", async (event, payload = {}) => {
+  try {
+    if (!isTrustedAppSender(event)) throw new Error("IPC sender không hợp lệ");
+    if (!currentSession) throw new Error("Chưa đăng nhập");
+    const win = require("electron").BrowserWindow.fromWebContents(event.sender);
+    if (!win || win.isDestroyed()) return { success: false, error: "Cửa sổ ứng dụng không còn khả dụng" };
+    const description = normalizeSupportText(payload.description, 1200);
+    const moduleName = normalizeSupportText(payload.module || "Không xác định", 120);
+    const route = normalizeSupportText(payload.route || "", 160);
+    const clientError = normalizeSupportText(payload.errorMessage, 800);
+    if (!description && !clientError) return { success: false, error: "Vui lòng nhập mô tả lỗi" };
+
+    const reportId = `RPT-${new Date().toISOString().replace(/[-:TZ.]/g, "").slice(0, 14)}-${crypto.randomBytes(2).toString("hex").toUpperCase()}`;
+    const rawScreenshot = normalizeSupportText(payload.screenshotBase64, 20 * 1024 * 1024);
+    const rawVideo = normalizeSupportText(payload.videoBase64, 20 * 1024 * 1024);
+    const screenshotBase64 = rawVideo
+      ? ""
+      : rawScreenshot.startsWith("data:image/") && rawScreenshot.includes(",")
+      ? rawScreenshot.slice(rawScreenshot.indexOf(",") + 1)
+      : rawScreenshot || (await win.webContents.capturePage()).toPNG().toString("base64");
+    const sessionName = normalizeSupportText(currentSession?.username || payload.employeeName || "Không xác định", 100);
+    const caption = [
+      `🚩 BÁO LỖI ${reportId}`,
+      `Nhân viên: ${sessionName}`,
+      `Màn hình: ${moduleName}${route ? ` (${route})` : ""}`,
+      description ? `\nMô tả:\n${description}` : "",
+      clientError ? `\nLỗi hệ thống:\n${clientError}` : "",
+      `\nThời gian: ${new Date().toLocaleString("vi-VN")}`,
+      `Phiên bản: ${app.getVersion()}`,
+    ].filter(Boolean).join("\n").slice(0, 900);
+    const reportPayload = {
+      screenshotBase64,
+      videoBase64: rawVideo,
+      caption,
+      fileName: rawVideo ? `${reportId}.webm` : `${reportId}.png`,
+    };
+    await flushSupportReportQueue();
+    const result = await deliverSupportReport(reportPayload);
+    if (result.success) return { success: true, data: { reportId, queued: false } };
+    const queuedFile = supportReportQueue.enqueue(reportPayload);
+    return { success: true, data: { reportId, queued: true, queueId: queuedFile }, warning: "Telegram đang lỗi; báo cáo đã được lưu và sẽ tự gửi lại." };
+  } catch (error) {
+    console.error("[SupportReport] Failed:", error);
+    return { success: false, error: error?.message || "Không thể tạo báo lỗi" };
+  }
+});
+
+ipcMain.handle("support:syncQueue", async () => {
+  try {
+    if (!currentSession) throw new Error("Chưa đăng nhập");
+    return { success: true, data: await flushSupportReportQueue() };
+  }
+  catch (error) { return { success: false, error: error?.message || "Không thể đồng bộ báo lỗi" }; }
+});
+
 // Gửi tin nhắn text qua Telegram
 async function sendTelegramMessage(text) {
   return new Promise((resolve) => {
@@ -1669,6 +1970,20 @@ try {
 // SESSION STORE - Backend role enforcement
 // ========================================
 let currentSession = null; // { id, username, role }
+const roleSession = require('./role-session.cjs').createRoleSession({
+  getSession: () => currentSession,
+  setSession: session => { currentSession = session; cacheSessionStatus(null); },
+  loadUser: id => readWithConnectionRetry(() => getPrismaAuth().user.findUnique({ where: { id } })),
+  toClient: user => sanitizeUserForClient(user),
+  onSwitch: ({ action, admin, user }) => {
+    stopMobileDailyEvidenceSession();
+    void logActivity({
+      module: 'users', action: action === 'start' ? 'ROLE_SESSION_START' : 'ROLE_SESSION_STOP',
+      description: `${admin.username} ${action === 'start' ? 'đóng vai' : 'thoát đóng vai'} ${user?.username || ''}; thao tác được lưu thật.`,
+      userName: admin.username, userId: admin.id, recordName: user?.username || '',
+    }).catch(error => console.warn('[RoleSession] Audit:', error.message));
+  },
+});
 const SESSION_STATUS_CACHE_TTL_MS = 10_000;
 const SESSION_STATUS_READ_TIMEOUT_MS = 10_000;
 let sessionStatusCache = { userId: null, status: null, checkedAt: 0 };
@@ -2009,11 +2324,16 @@ ipcMain.handle = (channel, listener) =>
     if (!isTrustedAppSender(event)) {
       throw new Error(`IPC sender không hợp lệ cho channel ${channel}`);
     }
+    return roleSession.run(channel, async () => {
+    // These two handlers validate the preserved Admin login themselves, even
+    // if the selected employee was disabled or now needs a password change.
+    if (channel === 'users:startRolePreview' || channel === 'users:stopRolePreview') return listener(...args);
     // Safety mode protects ordinary staff/manager sessions. An authenticated
     // admin is the explicit break-glass operator for maintenance workflows.
     const isAdminSession = currentSession?.role === "admin";
+    const isRolePreviewSession = roleSession.isActive();
     const blockedOperation =
-      DATA_SAFETY_MODE && !isAdminSession && !DATA_SAFETY_ALLOWED_CHANNELS.has(channel)
+      DATA_SAFETY_MODE && !isAdminSession && !isRolePreviewSession && !DATA_SAFETY_ALLOWED_CHANNELS.has(channel)
       ? getDataSafetyBlockedOperation(channel, args)
       : null;
     if (blockedOperation) {
@@ -2076,6 +2396,7 @@ ipcMain.handle = (channel, listener) =>
       );
     }
     return listener(...args);
+    });
   });
 
 function isPasswordRotationRequired(user) {
@@ -13385,6 +13706,7 @@ const packedComboCheck = require("./packed-combo-check.cjs");
 // Staff assigned to today's end-of-shift check count every combo.
 async function comboCheckActor() {
   const actor = { ...currentSession };
+  actor.adminUsername = roleSession.getOwnerUsername();
   if (actor.role === "staff" && prisma) {
     try { actor.shiftChecker = actor.username === (await readShiftPolicy(prisma)).assignedTo; } catch { actor.shiftChecker = false; }
   }
@@ -13395,6 +13717,15 @@ ipcMain.handle("packedComboCheck:get", async () => {
     requireRole("admin", "manager", "staff");
     if (!prisma) throw new Error("Không kết nối được cơ sở dữ liệu kiện hàng.");
     return { success: true, data: await packedComboCheck.readChecklist(prisma, await comboCheckActor()) };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+ipcMain.handle("packedComboCheck:history", async (_event, filters = {}) => {
+  try {
+    requireRole("admin", "manager", "staff");
+    if (!prisma) throw new Error("Không kết nối được cơ sở dữ liệu kiện hàng.");
+    return { success: true, data: await packedComboCheck.readHistory(prisma, await comboCheckActor(), filters) };
   } catch (error) {
     return { success: false, error: error.message };
   }
@@ -35733,6 +36064,23 @@ async function removeFutureTasksForResignedUser(user, effectiveDate) {
   }
   return updated;
 }
+
+ipcMain.handle("users:startRolePreview", async (_event, userId) => {
+  try {
+    if (!currentSession || currentSession.role !== "admin") throw new Error("Chỉ Admin được đóng vai nhân viên.");
+    return await roleSession.start(Number(userId));
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle("users:stopRolePreview", async () => {
+  try {
+    return await roleSession.stop();
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
 
 ipcMain.handle("users:getAll", async (_event, includeArchived = false) => {
   try {

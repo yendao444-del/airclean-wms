@@ -67,8 +67,10 @@ import { canCreatePackagePacking } from "../lib/packagePackingPermissions";
 import { canRecheckHandlingUnit } from "../lib/handlingUnitCheck";
 import PrepackManagement from "./PrepackManagement";
 import PrepackPlanView from "../components/PrepackPlanView";
+import PackedComboHistory from "../components/PackedComboHistory";
 import ShiftComboCheckRows from "../components/ShiftComboCheckRows";
 import { usePackedComboCheck } from "../lib/hooks/usePackedComboCheck";
+import { COUNT_SHORTAGE_REASONS } from "../lib/packedComboCheck";
 import type { PackedComboChecklist, PackingLot } from "../types/packagePacking";
 import { compareHandlingUnitPickOrder } from "../../electron/handling-unit-pick-order.mjs";
 import sealedSackImage from "../assets/warehouse-sack-sealed.webp";
@@ -534,13 +536,7 @@ const isCompletedCheckTransaction = (item: any) =>
     String(item?.type || ""),
   );
 
-const SHIFT_CHECK_REASONS = [
-  "Xuất hàng chưa ghi nhận",
-  "Trả hàng chưa ghi nhận",
-  "Sai số kiểm đếm trước đó",
-  "Hư hỏng / thất thoát",
-  "Khác",
-];
+const SHIFT_CHECK_REASONS: string[] = [...COUNT_SHORTAGE_REASONS];
 
 // Product groups come from the catalog with this generic category prefix.
 // Keep it in the stored data, but omit it from the SKU browser label.
@@ -874,7 +870,7 @@ let handlingUnitsWorkspaceCache: Pick<
 export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit?: () => void; initialTab?: "units" | "prepack" }) {
   const { user, isRolePreview } = useAuth();
   const isAdmin = user?.role === "admin";
-  const canManageCatalog = !isRolePreview && (isAdmin || isDedicatedReceivingOperator(user?.username));
+  const canManageCatalog = isAdmin || isDedicatedReceivingOperator(user?.username);
   const [activeModuleTab, setActiveModuleTab] = useState<"units" | "prepack" | "targets" | "combo" | "history">(initialTab);
   const moduleContentRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -883,7 +879,7 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
   const [historyScope, setHistoryScope] = useState<"units" | "prepack">(initialTab);
   const [prepackCreateRequest, setPrepackCreateRequest] = useState(0);
   const [prepackWorkOpen, setPrepackWorkOpen] = useState(false);
-  const canCreatePrepack = canCreatePackagePacking(user?.role, isRolePreview);
+  const canCreatePrepack = canCreatePackagePacking(user?.role, false);
   // Daily combo count: badge on its tab and settings for "Cài đặt ca".
   const [comboCheck, setComboCheck] = useState<PackedComboChecklist | null>(null);
   const [comboClock, setComboClock] = useState(() => Date.now());
@@ -2364,7 +2360,7 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
     ? shiftCheckBatchCandidates
     : scopeShiftCandidates(shiftCheckBatchCandidates, shiftCheckFamily);
   const canEditShiftScope = isAdmin || (workspace.shiftCheckPolicy?.scopeEditors || []).includes(String(user?.username || "").trim().toLowerCase());
-  const canPerformUnitCheck = !isRolePreview && (isAdmin || user?.role === 'manager' || (user?.role === 'staff' && user.username === workspace.shiftCheckPolicy?.assignedTo));
+  const canPerformUnitCheck = isAdmin || user?.role === 'manager' || (user?.role === 'staff' && user.username === workspace.shiftCheckPolicy?.assignedTo);
   // Staff and managers count only from the opening time; the server enforces the same rule.
   const shiftCheckOpensAt = workspace.shiftCheckPolicy?.checkOpensAt;
   const [shiftCheckClock, setShiftCheckClock] = useState(() => Date.now());
@@ -2375,15 +2371,15 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
     return () => window.clearTimeout(timer);
   }, [shiftCheckOpensAt]);
   const isShiftCheckWindowOpen = isAdmin || !shiftCheckOpensAt || shiftCheckClock >= Date.parse(shiftCheckOpensAt);
-  // Packed combos are counted in the same end-of-shift checklist as the units.
+  // Besides packages, the evening end-of-shift check holds the day's 5 random
+  // pre-packed combos (any packer). Only that day's checker and managers count
+  // them (same rule as the backend); a miss is fined with the shift.
+  const countsAllCombos = isAdmin || user?.role === "manager" || (user?.role === "staff" && user.username === workspace.shiftCheckPolicy?.assignedTo);
   const comboShift = usePackedComboCheck({
-    enabled: !isRolePreview && Boolean(user?.username),
-    // Managers and the day's end-of-shift checker count every packer's combos (same rule as the backend).
-    isManager: isAdmin || user?.role === "manager" || (user?.role === "staff" && user.username === workspace.shiftCheckPolicy?.assignedTo),
-    username: user?.username || "",
+    enabled: Boolean(user?.username) && countsAllCombos && workspace.shiftCheckPolicy?.currentShift !== "midday",
     refreshToken: workspace.packedInventory,
   });
-  const comboShiftCount = isRolePreview ? 0 : comboShift.rows.length;
+  const comboShiftCount = comboShift.rows.length;
   const shiftCheckClosedMessage = () => message.info(`Chưa đến giờ kiểm cuối ca. Mở kiểm lúc ${new Date(shiftCheckOpensAt || Date.now()).toLocaleTimeString("vi-VN", { hour: "2-digit", minute: "2-digit", timeZone: "Asia/Bangkok" })}.`);
 
   const shiftCheckEnteredCount = shiftCheckBatchCandidates.filter(({ unit }) => {
@@ -2612,7 +2608,7 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
         message.error({ content: <div>{result.sent ? `Đã nộp ${result.sent} combo. ` : ""}Chưa nộp được:<br />{result.errors.map(line => <span key={line}>{line}<br /></span>)}</div>, duration: 8 });
         return;
       }
-      message.success(result.late ? `Đã nộp kiểm ${result.sent} combo (ghi nhận trễ hạn).` : `Đã nộp kiểm ${result.sent} combo đóng sẵn.`);
+      message.success(`Đã nộp kiểm ${result.sent} combo đóng sẵn ngẫu nhiên.`);
       setShowShiftCheckModal(false);
       void loadWorkspace(true);
     } finally {
@@ -3420,7 +3416,7 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
               </button>
             </Popover>
           )}
-          {!isRolePreview && ((workspace.shiftCheckPolicy && isShiftCheckWindowOpen) || comboShiftCount > 0) && (
+          {((workspace.shiftCheckPolicy && isShiftCheckWindowOpen) || comboShiftCount > 0) && (
             <Tooltip title={(canPerformUnitCheck ? allShiftCheckCandidates.length : 0) + comboShiftCount > 0
               ? `${canPerformUnitCheck ? allShiftCheckCandidates.length : 0} kiện và ${comboShiftCount} combo đóng sẵn cần kiểm.`
               : "Xem các lần kiểm cuối ca hôm nay."}>
@@ -3431,7 +3427,7 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
               </Button>
             </Tooltip>
           )}
-          {!isRolePreview && workspace.shiftCheckPolicy && (
+          {workspace.shiftCheckPolicy && (
             <Tooltip title={canEditShiftScope ?"Cài đặt buổi kiểm, phạm vi sản phẩm và mức cần kiểm" : "Cài đặt mức cần kiểm của từng sản phẩm"}>
               <Button size="small" icon={<SettingOutlined />} className="hu-shift-settings-btn" onClick={() => setShowShiftScopeModal(true)}>
                 Cài đặt ca
@@ -3678,7 +3674,7 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
           {activeModuleTab === "targets" ? (
             <PrepackManagement view="report" sourceUnits={workspace.register.map(unit => ({ id: unit.id, skuName: unit.skuName, unitName: unit.unitName, status: unit.status, currentPcs: unit.currentPcs, packageType: unit.packageType }))} />
           ) : (activeModuleTab === "prepack" || (activeModuleTab === "history" && historyScope === "prepack")) ? (
-            activeModuleTab === "history" ? <PrepackManagement view="history" sourceUnits={workspace.register.map(unit => ({ id: unit.id, skuName: unit.skuName, unitName: unit.unitName, status: unit.status, currentPcs: unit.currentPcs, packageType: unit.packageType }))} productSkus={selected ? workspace.catalog.filter(item => item.productGroup === selected.productGroup).map(item => item.sku) : undefined} /> : <PrepackPlanView lots={workspace.packedInventory} catalog={workspace.catalog} canEditPlan={isAdmin && !isRolePreview} canCreate={canCreatePrepack && (isAdmin || user?.role === "manager")} onCreate={() => openPrepackWork(true)} refreshToken={workspace.packedInventory} />
+            activeModuleTab === "history" ? <PackedComboHistory workHistory={<PrepackManagement view="history" sourceUnits={workspace.register.map(unit => ({ id: unit.id, skuName: unit.skuName, unitName: unit.unitName, status: unit.status, currentPcs: unit.currentPcs, packageType: unit.packageType }))} />} /> : <PrepackPlanView lots={workspace.packedInventory} catalog={workspace.catalog} canCount={Boolean(user?.username)} onCounted={() => void loadWorkspace(true)} canEditPlan={isAdmin && !isRolePreview} canCreate={canCreatePrepack && (isAdmin || user?.role === "manager")} onCreate={() => openPrepackWork(true)} refreshToken={workspace.packedInventory} />
           ) : selected ? (
             <>
               <header className="hu-selected-header">
@@ -4894,7 +4890,7 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
               { value: "units", label: `Kiện hàng (${shiftCheckBatchCandidates.length})` },
               { value: "combo", label: `Combo đóng sẵn (${comboShift.summary.total})` },
             ]} />
-          <span>Kiện và combo nộp cùng một lần{comboShift.deadline ? ` · combo hạn ${new Date(comboShift.deadline).toLocaleTimeString("vi-VN", { hour: "2-digit", minute: "2-digit", timeZone: "Asia/Bangkok" })}` : ""}.</span>
+          <span>Kiện và {comboShift.summary.total} combo ngẫu nhiên hôm nay nộp cùng một lần · hạn ca chiều.</span>
         </div>}
         {(!shiftCheckIncludesCombos || (shiftCheckKind !== "combo" && shiftCheckBatchCandidates.length > 0)) && <HandlingUnitShiftChecklist
           items={visibleShiftCheckCandidates}
@@ -4923,7 +4919,7 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
         </div>}
       </Modal>
 
-      {!isRolePreview && (
+      {
         <HandlingUnitShiftScopeModal
           canEditPolicy={canEditShiftScope}
           canEditAdminSettings={isAdmin}
@@ -4940,7 +4936,7 @@ export default function HandlingUnits({ onExit, initialTab = "units" }: { onExit
           onClose={() => setShowShiftScopeModal(false)}
           onSaved={() => void loadWorkspace(true)}
         />
-      )}
+      }
 
       <Modal
         title={

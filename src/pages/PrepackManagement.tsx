@@ -29,10 +29,10 @@ type BasketItem = { key: string; code: string; title: string; components: Array<
 
 export default function PrepackManagement({ embedded = false, view = 'report', createRequest = 0, onCreateHandled = () => {}, onCreateClosed, sourceUnits = [], productSkus }: Props) {
     const { user, actualUser, isRolePreview } = useAuth();
-    const isAdmin = (actualUser || user)?.role === 'admin';
-    const canEditTargets = user?.role === 'admin' && !isRolePreview;
-    const isManager = ['admin', 'manager'].includes((actualUser || user)?.role || '');
-    const canCreate = canCreatePackagePacking(user?.role, isRolePreview);
+    const isAdmin = user?.role === 'admin';
+    const canEditTargets = isAdmin && !isRolePreview;
+    const isManager = ['admin', 'manager'].includes(user?.role || '');
+    const canCreate = canCreatePackagePacking(user?.role, false);
     const [date, setDate] = useState(today);
     const [rows, setRows] = useState<PackingAssignment[]>([]);
     const [employees, setEmployees] = useState<Employee[]>([]);

@@ -72,6 +72,12 @@ function setAppConfig(key, value) {
 // Expose protected methods that allow the renderer process to use
 // the ipcRenderer without exposing the entire object
 contextBridge.exposeInMainWorld('electronAPI', {
+    support: {
+        captureScreenshot: () => ipcRenderer.invoke('support:captureScreenshot'),
+        getDesktopSource: () => ipcRenderer.invoke('support:getDesktopSource'),
+        reportIssue: (data) => ipcRenderer.invoke('support:reportIssue', data),
+        syncQueue: () => ipcRenderer.invoke('support:syncQueue'),
+    },
     mobileScanTest: {
         start: () => rawInvoke('mobileScan:start'),
         stop: () => rawInvoke('mobileScan:stop'),
@@ -132,6 +138,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     },
     packedComboCheck: {
         get: () => ipcRenderer.invoke('packedComboCheck:get'),
+        history: (filters) => ipcRenderer.invoke('packedComboCheck:history', filters),
         saveDraft: (payload) => ipcRenderer.invoke('packedComboCheck:saveDraft', payload),
         submit: (payload) => ipcRenderer.invoke('packedComboCheck:submit', payload),
         saveConfig: (payload) => ipcRenderer.invoke('packedComboCheck:saveConfig', payload),
@@ -533,6 +540,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
         logout: (rememberToken) => ipcRenderer.invoke('users:logout', rememberToken),
         restoreSession: (rememberToken) => ipcRenderer.invoke('users:restoreSession', rememberToken),
         getCurrentSession: () => ipcRenderer.invoke('users:getCurrentSession'),
+        startRolePreview: (userId) => ipcRenderer.invoke('users:startRolePreview', userId),
+        stopRolePreview: () => ipcRenderer.invoke('users:stopRolePreview'),
         heartbeat: () => ipcRenderer.invoke('users:heartbeat'),
         ensureAdmin: () => ipcRenderer.invoke('users:ensureAdmin'),
     },

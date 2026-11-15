@@ -1,6 +1,7 @@
 import React, { lazy, Suspense, Component, ErrorInfo, ReactNode } from 'react';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
 import { PageHeaderProvider } from './contexts/PageHeaderContext';
+import { CrashIssueReportButton } from './components/IssueReportButton';
 
 const AuthenticatedApp = lazy(() => import('./AppContent'));
 const Login = lazy(() => import('./pages/Login'));
@@ -15,7 +16,7 @@ class ErrorBoundary extends Component<{ children: ReactNode }, ErrorBoundaryStat
     static getDerivedStateFromError(error: Error) { return { hasError: true, error }; }
     componentDidCatch(error: Error, info: ErrorInfo) { console.error('❌ App crashed:', error, info.componentStack); }
     render() {
-        if (this.state.hasError) return <div style={{ padding: 48, textAlign: 'center' }}><h3 style={{ color: '#cf1322' }}>Ứng dụng gặp lỗi</h3><p style={{ color: '#666' }}>{this.state.error?.message}</p><button type="button" onClick={() => window.location.reload()}>Thử lại</button></div>;
+        if (this.state.hasError) return <div style={{ padding: 48, textAlign: 'center' }}><h3 style={{ color: '#cf1322' }}>Ứng dụng gặp lỗi</h3><p style={{ color: '#666' }}>{this.state.error?.message}</p><div style={{ display: 'flex', gap: 8, justifyContent: 'center' }}><button type="button" onClick={() => window.location.reload()}>Thử lại</button><CrashIssueReportButton moduleName="Ứng dụng" route={window.location.pathname} errorMessage={this.state.error?.message} initialDescription="Ứng dụng hiển thị màn hình lỗi." /></div></div>;
         return this.props.children;
     }
 }

@@ -206,7 +206,7 @@ export default function PrepackedGoods({ embedded = false, view = 'report', prod
     const { user, actualUser, isRolePreview } = useAuth();
     const isUiTest = import.meta.env.DEV && new URLSearchParams(window.location.search).has('prepackedUiTest');
     // Admins can inspect and test any employee tab.
-    const isAdmin = actualUser?.role === 'admin' || user?.role === 'admin';
+    const isAdmin = user?.role === 'admin';
     const isManager = isAdmin || user?.role === 'manager';
     const [rows, setRows] = useState<PrepackBatch[]>(isUiTest ? getUiTestRows() : []);
     const [prepackHistory, setPrepackHistory] = useState<PrepackHistoryRecord[]>(() => isUiTest
@@ -604,7 +604,6 @@ export default function PrepackedGoods({ embedded = false, view = 'report', prod
     const getEmployeeInitial = (name: string) => name.trim().split(/\s+/).pop()?.charAt(0).toUpperCase() || '?';
     const submitActualReport = async (batchId?: number) => {
         if (submitting) return;
-        if (isRolePreview && !isAdmin) return;
         if (rowsReadyKey !== selectedDateKey || historyReadyKey !== selectedDateKey || loading || historyLoading) {
             return void message.warning('Vui lòng chờ tải đủ chỉ tiêu và lịch sử trước khi gửi báo cáo.');
         }
@@ -883,7 +882,7 @@ export default function PrepackedGoods({ embedded = false, view = 'report', prod
                     quantities={reportedQuantities}
                     hasReport={row => hasSubmittedReportForSelectedDate(row as PrepackBatch) || row.status === 'waiting_acceptance'}
                     reportQuantity={row => Number(selectedHistoryReports.get(row.id)?.reportedQty ?? row.reportedQty ?? 0)}
-                    blocked={(isRolePreview && !isAdmin) || !isSelectedToday}
+                    blocked={!isSelectedToday}
                     submitting={submitting}
                     onChange={(id, quantity) => { const row = selectedPackerRows.find(item => item.id === id); if (!row) return; setReportedQuantities(current => ({ ...current, [id]: quantity })); void saveDraftQuantity(row, quantity); }}
                     onSubmit={id => void submitActualReport(Number(id))}
@@ -922,7 +921,7 @@ export default function PrepackedGoods({ embedded = false, view = 'report', prod
                                             <small className={row.packagingType === 'combo' ? 'prepack-combo-composition' : ''}>{row.packagingType === 'combo' ? formatComboComposition(row) : row.productSku}</small>
                                         </div>
                                         <strong className="prepack-report-target">{row.requestedQty} <small>{row.unit}</small></strong>
-                                         <InputNumber min={0} max={100000} value={Object.prototype.hasOwnProperty.call(reportedQuantities, row.id) ? reportedQuantities[row.id] : (hasReport ? (historyReport?.reportedQty ?? row.reportedQty) : null)} placeholder="Nhập số lượng" disabled={(isRolePreview && !isAdmin) || hasReport} onChange={value => {
+                                         <InputNumber min={0} max={100000} value={Object.prototype.hasOwnProperty.call(reportedQuantities, row.id) ? reportedQuantities[row.id] : (hasReport ? (historyReport?.reportedQty ?? row.reportedQty) : null)} placeholder="Nhập số lượng" disabled={hasReport} onChange={value => {
                                              const nextValue = value === null ? null : Number(value);
                                              setReportedQuantities(current => ({ ...current, [row.id]: nextValue }));
                                              void saveDraftQuantity(row, nextValue);
@@ -933,7 +932,7 @@ export default function PrepackedGoods({ embedded = false, view = 'report', prod
                              </div>;
                         })}
                     </div>
-                    <div className="prepack-report-footer"><span><ClockCircleOutlined /> {historyError ? <>Không thể đối chiếu lịch sử: {historyError} <Button size="small" onClick={() => void loadHistory()}>Thử lại</Button></> : 'Bắt buộc nhập số lượng thực tế, có thể nhập 0. Báo cáo được lưu theo ngày; ảnh và công việc hàng ngày xem ở tab riêng.'}</span><Button type="primary" loading={submitting} disabled={(isRolePreview && !isAdmin) || historyLoading || historyReadyKey !== selectedDateKey || Boolean(historyError) || selectedPackerRows.every(row => hasSubmittedReportForSelectedDate(row)) || selectedPackerRows.some(row => !hasSubmittedReportForSelectedDate(row) && (!Number.isInteger(Object.prototype.hasOwnProperty.call(reportedQuantities, row.id) ? reportedQuantities[row.id] : null) || Number(reportedQuantities[row.id]) < 0))} onClick={() => void submitActualReport()}>Gửi báo cáo đóng gói</Button></div>
+                    <div className="prepack-report-footer"><span><ClockCircleOutlined /> {historyError ? <>Không thể đối chiếu lịch sử: {historyError} <Button size="small" onClick={() => void loadHistory()}>Thử lại</Button></> : 'Bắt buộc nhập số lượng thực tế, có thể nhập 0. Báo cáo được lưu theo ngày; ảnh và công việc hàng ngày xem ở tab riêng.'}</span><Button type="primary" loading={submitting} disabled={historyLoading || historyReadyKey !== selectedDateKey || Boolean(historyError) || selectedPackerRows.every(row => hasSubmittedReportForSelectedDate(row)) || selectedPackerRows.some(row => !hasSubmittedReportForSelectedDate(row) && (!Number.isInteger(Object.prototype.hasOwnProperty.call(reportedQuantities, row.id) ? reportedQuantities[row.id] : null) || Number(reportedQuantities[row.id]) < 0))} onClick={() => void submitActualReport()}>Gửi báo cáo đóng gói</Button></div>
                 </> : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="Nhân viên này chưa có chỉ tiêu đóng gói" />}
             </div>}
 

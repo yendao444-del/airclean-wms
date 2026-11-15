@@ -23,8 +23,8 @@ interface AuthContextType {
     login: (username: string, password: string, rememberMe?: boolean) => Promise<{ success: boolean; error?: string }>;
     logout: () => void;
     updateCurrentUser: (user: AuthUser) => void;
-    startRolePreview: (user: AuthUser) => boolean;
-    stopRolePreview: () => void;
+    startRolePreview: (user: AuthUser) => Promise<boolean>;
+    stopRolePreview: () => Promise<boolean>;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
@@ -162,13 +162,21 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         setActualUser(nextUser);
     };
 
-    const startRolePreview = (nextPreviewUser: AuthUser) => {
+    const startRolePreview = async (nextPreviewUser: AuthUser) => {
         if (actualUser?.role !== 'admin' || nextPreviewUser.role === 'admin') return false;
-        setPreviewUser(nextPreviewUser);
+        const result = await window.electronAPI?.users?.startRolePreview?.(nextPreviewUser.id);
+        if (!result?.success || !result.data) return false;
+        setPreviewUser(result.data as AuthUser);
         return true;
     };
 
-    const stopRolePreview = () => setPreviewUser(null);
+    const stopRolePreview = async () => {
+        if (!previewUser) return true;
+        const result = await window.electronAPI?.users?.stopRolePreview?.();
+        if (!result?.success) return false;
+        setPreviewUser(null);
+        return true;
+    };
 
     return (
         <AuthContext.Provider value={{

@@ -50,12 +50,16 @@ export interface PackedComboCountInput {
 }
 export interface PackedComboCheckRow {
     code: string;
+    /** Pattern key (upper-case SKU totals sorted by SKU), same as the packing plan. */
+    key: string;
     assignmentId: string;
     lotCode: string;
     workDate: string;
     status: PackingLot['status'];
     components: PackingComponent[];
     expectedQuantity: number;
+    /** Bags in the book right now; a single-row count compares against this. */
+    bookQuantity: number;
     expectedUpdatedAt: string | null;
     packerUsername: string;
     packerName: string;
@@ -70,8 +74,31 @@ export interface PackedComboCheckSubmission {
     by: string;
     onBehalf: boolean;
     late: boolean;
+    /** "row" = one pattern counted from the table; missing on old full counts. */
+    mode?: 'row' | 'full';
     count: number;
     variance: number;
+}
+export interface PackedComboHistoryEntry extends Omit<PackedComboCheckSubmission, 'mode'> {
+    date: string;
+    mode?: 'row' | 'full' | 'spot';
+    reference?: string;
+    legacy?: boolean;
+    adminUsername?: string;
+    items: Array<{
+        code: string; key: string; lotCode: string;
+        packerUsername?: string; packerName?: string;
+        components: Array<{ sku: string; quantity: number }>;
+        bookQuantity: number; actualQuantity: number; variance: number;
+        reason: string; note: string;
+    }>;
+}
+/** Full count ("Kiểm combo") every cycleDays days, the whole warehouse on the same days. */
+export interface PackedComboSchedule {
+    cycleDays: number;
+    periodStart: string;
+    nextDue: string;
+    packers: Array<{ packerUsername: string; packerName: string; lastFullCheck: string | null; done: boolean; daysLate: number }>;
 }
 export interface PackedComboChecklist {
     date: string;
@@ -81,6 +108,9 @@ export interface PackedComboChecklist {
     isLate: boolean;
     fineAmount: number;
     settings: PackedComboCheckSettings & { updatedBy?: string; effectiveAt?: string };
+    schedule?: PackedComboSchedule;
+    /** The day's random patterns for the end-of-shift check (codes = PATTERN:<key>). */
+    spot?: { date: string; codes: string[]; stored: boolean; done: boolean; doneAt: string | null; doneBy: string };
     rows: PackedComboCheckRow[];
     submissions: PackedComboCheckSubmission[];
 }

@@ -1,4 +1,4 @@
-import type { PackedComboCheckRow, PackedComboCountInput } from '../types/packagePacking';
+import type { PackedComboCheckRow, PackedComboCountInput, PackedComboSchedule } from '../types/packagePacking';
 
 export type ComboEntry = Omit<PackedComboCountInput, 'code'>;
 export type ComboRowState = 'done' | 'missing' | 'match' | 'extra' | 'needReason' | 'needNote' | 'variance';
@@ -45,4 +45,34 @@ export function formatCountdown(ms: number) {
     const seconds = Math.max(0, Math.floor(ms / 1000));
     const pad = (value: number) => String(value).padStart(2, '0');
     return `${pad(Math.floor(seconds / 3600))}:${pad(Math.floor(seconds % 3600 / 60))}:${pad(seconds % 60)}`;
+}
+
+// Reasons for counting fewer bags (or packages) than the book.
+export const COUNT_SHORTAGE_REASONS = [
+    'Xuất hàng chưa ghi nhận',
+    'Trả hàng chưa ghi nhận',
+    'Sai số kiểm đếm trước đó',
+    'Hư hỏng / thất thoát',
+    'Khác',
+] as const;
+
+const shortDay = (date: string) => date.split('-').reverse().slice(0, 2).join('/');
+
+/** Badge on "Kiểm combo": staff see their own full count, managers how many packers still owe one. */
+export function comboDueBadge(schedule: PackedComboSchedule | undefined, username: string, countsAll: boolean): { label: string; tooltip: string } | null {
+    if (!schedule) return null;
+    const next = `kỳ sau ${shortDay(schedule.nextDue)}`;
+    if (countsAll) {
+        const owing = schedule.packers.filter(item => !item.done);
+        return owing.length
+            ? { label: `${owing.length} người chưa kiểm`, tooltip: `Chưa kiểm combo kỳ này (${schedule.cycleDays} ngày/lần): ${owing.map(item => item.packerName).join(', ')}` }
+            : null;
+    }
+    const own = schedule.packers.find(item => item.packerUsername === username.trim().toLowerCase());
+    if (!own) return null;
+    if (own.done) return null;
+    return {
+        label: own.daysLate ? `Quá hạn ${own.daysLate} ngày` : 'Đến hạn hôm nay',
+        tooltip: `Kiểm combo bắt buộc ${schedule.cycleDays} ngày/lần: nhập số thực tế của tất cả mẫu rồi nộp · ${next}`,
+    };
 }

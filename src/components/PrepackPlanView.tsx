@@ -1,22 +1,28 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Button, Empty, Input, InputNumber, Segmented, Select, Spin, Tag, Tooltip, message } from 'antd';
-import { InboxOutlined, ReloadOutlined, SearchOutlined } from '@ant-design/icons';
+import { CheckOutlined, CloseOutlined, InboxOutlined, ReloadOutlined, SearchOutlined } from '@ant-design/icons';
 import Modal from './HandlingUnitModal';
-import type { PackingLot, PackingPlan, PackingSuggestionResult } from '../types/packagePacking';
+import type { PackedComboChecklist, PackedComboCheckRow, PackingLot, PackingPlan, PackingSuggestionResult } from '../types/packagePacking';
 import { defaultTarget, isMultiBrand, patternKey, patternLabel, planState, type PlanState } from '../lib/packingLabels';
+import { COUNT_SHORTAGE_REASONS } from '../lib/packedComboCheck';
 import './PrepackPlanView.css';
 
 type Employee = { id: number; username: string; fullName: string; isActive?: boolean; role?: string };
 type Props = {
     lots: readonly PackingLot[];
-    catalog?: readonly { sku: string; unitName: string }[];
+    catalog?: readonly { sku: string; unitName: string; variantName?: string }[];
     /** Admin only: change targets and owners. */
     canEditPlan: boolean;
     canCreate: boolean;
     onCreate: () => void;
     /** Changes whenever the workspace reloads. */
     refreshToken?: unknown;
+    /** May enter actual bag counts ("Đã đóng"); the backend limits which patterns. */
+    canCount?: boolean;
+    /** Called after a count changed packed stock (the parent reloads the lots). */
+    onCounted?: () => void;
 };
+type CountAsk = { row: Row; combo: PackedComboCheckRow; actual: number };
 type Row = {
     key: string;
     components: Array<{ sku: string; quantity: number }>;
@@ -40,7 +46,7 @@ const dailyOrders = (value: number) => Math.round(value).toLocaleString('vi-VN')
 const stateLabel = (row: Row) => row.state === 'missing' ? `Thiếu ${number(row.diff)}` : row.state === 'extra' ? `Thừa ${number(row.diff)}` : 'Đủ';
 const COUNTED: PackingLot['status'][] = ['ready', 'submitted'];
 
-export default function PrepackPlanView({ lots, catalog = [], canEditPlan, canCreate, onCreate, refreshToken }: Props) {
+export default function PrepackPlanView({ lots, catalog = [], canEditPlan, canCreate, onCreate, refreshToken, canCount = false, onCounted }: Props) {
     const [suggestions, setSuggestions] = useState<PackingSuggestionResult | null>(null);
     const [plan, setPlan] = useState<PackingPlan>({ patterns: {} });
     const [employees, setEmployees] = useState<Employee[]>([]);
@@ -55,8 +61,26 @@ export default function PrepackPlanView({ lots, catalog = [], canEditPlan, canCr
     const [editTarget, setEditTarget] = useState<number | null>(null);
     const [editOwner, setEditOwner] = useState<string>(UNASSIGNED);
     const [saving, setSaving] = useState(false);
+    // Actual bag counts typed in the "Đã đóng" column, by pattern key.
+    const [combo, setCombo] = useState<PackedComboChecklist | null>(null);
+    const [countDrafts, setCountDrafts] = useState<Record<string, number | null>>({});
+    const [countingKey, setCountingKey] = useState<string | null>(null);
+    // A typed count is only recorded after the packer confirms it.
+    const [pendingCount, setPendingCount] = useState<CountAsk | null>(null);
+    const [shortageReason, setShortageReason] = useState('');
+    const [shortageNote, setShortageNote] = useState('');
+    const counting = useRef(false);
+
+    const loadCombo = useCallback(async () => {
+        if (!canCount) return;
+        try {
+            const result = await window.electronAPI.packedComboCheck.get();
+            if (result.success && result.data) setCombo(result.data);
+        } catch { /* The table still works without counting. */ }
+    }, [canCount]);
 
     const load = useCallback(async () => {
+        void loadCombo();
         try {
             const [suggestionResult, planResult] = await Promise.all([
                 window.electronAPI.packagePacking.suggestions({ days: 30 }),
@@ -72,7 +96,7 @@ export default function PrepackPlanView({ lots, catalog = [], canEditPlan, canCr
         } finally {
             setLoading(false);
         }
-    }, []);
+    }, [loadCombo]);
     useEffect(() => { void load(); }, [load, refreshToken]);
     // Reload when packing work or the plan changes on any desktop (creating work
     // does not touch the packed stock, so the workspace reload alone is not enough).
@@ -216,10 +240,51 @@ export default function PrepackPlanView({ lots, catalog = [], canEditPlan, canCr
     const employeeName = (username: string) => employees.find(e => e.username === username)?.fullName || username;
     const percent = (row: Row) => row.target ? Math.min(100, Math.round(row.packed / row.target * 100)) : row.packed ? 100 : 0;
 
+    // The backend only lists patterns this user may count. An older backend
+    // (no row counts) sends no bookQuantity: then the column stays read-only.
+    const comboByKey = useMemo(() => new Map((combo?.rows || [])
+        .filter(item => typeof item.key === 'string' && Number.isFinite(item.bookQuantity))
+        .map(item => [item.key, item])), [combo]);
+    const clearCountDraft = (key: string) => setCountDrafts(current => { const next = { ...current }; delete next[key]; return next; });
+    const sendCount = async (row: Row, target: PackedComboCheckRow, actual: number, reason = '', note = '') => {
+        if (counting.current) return;
+        counting.current = true;
+        setCountingKey(row.key);
+        try {
+            const result = await window.electronAPI.packedComboCheck.submit({ mode: 'row', idempotencyKey: crypto.randomUUID(), items: [{ code: target.code, actualQuantity: actual, reason, note }] });
+            if (!result.success) throw new Error(result.error || 'Không ghi nhận được số thực tế.');
+            const diff = actual - target.bookQuantity;
+            message.success(`${row.label}: ${number(actual)} túi${diff > 0 ? ` (đóng thêm ${number(diff)})` : diff < 0 ? ` (thiếu ${number(-diff)})` : ' (khớp sổ)'}.`);
+            clearCountDraft(row.key);
+            setPendingCount(null);
+            onCounted?.();
+            await load();
+        } catch (err: any) {
+            message.error(err?.message || 'Không ghi nhận được số thực tế.');
+            void loadCombo();
+        } finally { counting.current = false; setCountingKey(null); }
+    };
+    // Typing never saves: ✓ (or Enter) opens a confirmation showing the difference
+    // with the book; a shortfall also needs a reason there. A count equal to the
+    // book changes nothing, so it is simply cleared.
+    const askConfirm = (row: Row) => {
+        if (counting.current || !Object.prototype.hasOwnProperty.call(countDrafts, row.key)) return;
+        const actual = countDrafts[row.key];
+        const target = comboByKey.get(row.key);
+        if (actual === null || actual === undefined || !target || actual === target.bookQuantity) { clearCountDraft(row.key); return; }
+        setShortageReason('');
+        setShortageNote('');
+        setPendingCount({ row, combo: target, actual });
+    };
+    // Cancel keeps the typed number so it can be corrected.
+    const closeConfirm = () => { if (!counting.current) setPendingCount(null); };
+    const pendingDiff = pendingCount ? pendingCount.actual - pendingCount.combo.bookQuantity : 0;
+    const confirmReady = pendingDiff >= 0 || (!!shortageReason && (shortageReason !== 'Khác' || !!shortageNote.trim()));
+
     return <section className="prepack-plan" aria-label="Tồn đóng gói sẵn">
         <div className="prepack-plan-card">
             <header className="prepack-plan-header">
-                <div><h3><InboxOutlined /> Tồn đóng gói sẵn</h3><small>Mẫu do admin phân công cho từng nhân viên · so với chỉ tiêu 1 ngày bán{canEditPlan ? ' · bấm vào số chỉ tiêu để sửa' : ''}</small></div>
+                <div><h3><InboxOutlined /> Tồn đóng gói sẵn</h3><small>Mẫu do admin phân công cho từng nhân viên · so với chỉ tiêu 1 ngày bán{canCount ? ' · nhập số túi thực tế ở cột Đã đóng rồi bấm ✓ để xác nhận' : ''}{canEditPlan ? ' · bấm vào số chỉ tiêu để sửa' : ''}</small></div>
                 <div className="prepack-plan-actions">
                     {canCreate && <Button type="primary" className="prepack-plan-create" onClick={onCreate}>Tạo đóng gói sẵn</Button>}
                 </div>
@@ -249,7 +314,24 @@ export default function PrepackPlanView({ lots, catalog = [], canEditPlan, canCr
                             <small>SKU: {row.sku}{row.overridden && <Tag className="prepack-plan-tag">chỉ tiêu đã chỉnh</Tag>}</small>
                         </div>
                         <span className="prepack-plan-daily" title={`${dailyOrders(row.perDay)} đơn/ngày trong ${suggestions?.days || 30} ngày`}>{dailyOrders(row.perDay)} đơn</span>
-                        <span className="prepack-plan-packed">{number(row.packed)}</span>
+                        {(() => {
+                            const target = comboByKey.get(row.key);
+                            if (!canCount || !target) return <span className="prepack-plan-packed">{number(row.packed)}</span>;
+                            const typed = Object.prototype.hasOwnProperty.call(countDrafts, row.key);
+                            return <div className="prepack-plan-packed" onClick={event => event.stopPropagation()} onDoubleClick={event => event.stopPropagation()}>
+                                <InputNumber<number> aria-label={`Số túi thực tế ${row.label}`} size="small" min={0} max={100000} precision={0}
+                                    className={typed ? 'is-typed' : undefined} disabled={countingKey === row.key}
+                                    title={`Sổ đang có ${number(target.bookQuantity)} túi · nhập số đếm thực tế rồi Enter`}
+                                    value={typed ? countDrafts[row.key] : row.packed}
+                                    onChange={value => setCountDrafts(current => ({ ...current, [row.key]: value }))}
+                                    onPressEnter={() => askConfirm(row)}
+                                    onKeyDown={event => { if (event.key === 'Escape') clearCountDraft(row.key); }} />
+                                {typed && <>
+                                    <Tooltip title="Xác nhận số này"><Button size="small" type="primary" className="prepack-plan-confirm" icon={<CheckOutlined />} aria-label={`Xác nhận số túi ${row.label}`} disabled={countingKey === row.key} onClick={() => askConfirm(row)} /></Tooltip>
+                                    <Tooltip title="Bỏ số vừa nhập"><Button size="small" type="text" icon={<CloseOutlined />} aria-label={`Bỏ số vừa nhập ${row.label}`} disabled={countingKey === row.key} onClick={() => clearCountDraft(row.key)} /></Tooltip>
+                                </>}
+                            </div>;
+                        })()}
                         {canEditPlan && inlineKey === row.key
                             // Same box as the read-only cell, so the row height never changes while editing.
                             ? <div className="prepack-plan-stat is-clickable is-editing" title={`Enter để lưu · Esc để hủy · mặc định ${number(row.defaultTarget)}`}
@@ -288,6 +370,25 @@ export default function PrepackPlanView({ lots, catalog = [], canEditPlan, canCr
                         <Button disabled={editTarget === null} onClick={() => setEditTarget(null)}>Về mặc định ({number(editing.defaultTarget)})</Button>
                     </div>
                 </label>
+            </div>}
+        </Modal>
+
+        <Modal title="Xác nhận số túi thực tế" open={!!pendingCount} onCancel={closeConfirm} okText="Xác nhận" cancelText="Sửa lại"
+            okButtonProps={{ disabled: !confirmReady }} confirmLoading={countingKey !== null} width={460} destroyOnHidden
+            onOk={() => { if (pendingCount && confirmReady) void sendCount(pendingCount.row, pendingCount.combo, pendingCount.actual, pendingDiff < 0 ? shortageReason : '', pendingDiff < 0 ? shortageNote.trim() : ''); }}>
+            {pendingCount && <div className="prepack-plan-form">
+                <p><strong>{pendingCount.row.label}</strong><br /><small>Sổ đang có {number(pendingCount.combo.bookQuantity)} túi · bạn đếm được <b>{number(pendingCount.actual)}</b> túi.</small></p>
+                <p className={`prepack-plan-count-result ${pendingDiff > 0 ? 'is-extra' : 'is-missing'}`}>{pendingDiff > 0
+                    ? `Ghi nhận đóng thêm ${number(pendingDiff)} túi: hàng được trừ khỏi kiện ngay.`
+                    : `Thiếu ${number(-pendingDiff)} túi so với sổ: chọn lý do.`}</p>
+                {pendingDiff < 0 && <label>Lý do
+                    <Select aria-label="Lý do thiếu" placeholder="Chọn lý do" value={shortageReason || undefined} onChange={value => setShortageReason(value || '')}
+                        options={COUNT_SHORTAGE_REASONS.map(value => ({ value, label: value }))} />
+                </label>}
+                {pendingDiff < 0 && shortageReason === 'Khác' && <label>Ghi chú
+                    <Input aria-label="Ghi chú lý do" placeholder="Ghi chú (bắt buộc)" value={shortageNote} onChange={event => setShortageNote(event.target.value)} />
+                </label>}
+                <small>Kiểm tra lại số trước khi xác nhận; đã ghi nhận thì kho thay đổi ngay.</small>
             </div>}
         </Modal>
 

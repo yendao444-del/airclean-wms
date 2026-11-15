@@ -1,7 +1,8 @@
 import type { PackingAssignment } from '../types/packagePacking';
 
 export function canCreatePackagePacking(role: string | undefined, isRolePreview: boolean): boolean {
-    return !isRolePreview && ['admin', 'manager', 'staff'].includes(role || '');
+    void isRolePreview;
+    return ['admin', 'manager', 'staff'].includes(role || '');
 }
 
 export function canDeletePackingDraft(row: PackingAssignment): boolean {
