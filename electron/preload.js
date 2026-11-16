@@ -367,6 +367,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
         create: (data) => ipcRenderer.invoke('ecommerceExports:create', data),
         update: (id, data) => ipcRenderer.invoke('ecommerceExports:update', id, data),
         completePickup: (id, data) => ipcRenderer.invoke('ecommerceExports:completePickup', id, data),
+        completePickupGroup: (trackingCode, data) => ipcRenderer.invoke('ecommerceExports:completePickupGroup', trackingCode, data),
         resolveMismatch: (id, data) => ipcRenderer.invoke('ecommerceExports:resolveMismatch', id, data),
         saveTelegramSettings: (data) => ipcRenderer.invoke('ecommerceExports:saveTelegramSettings', data),
         nextTelegramOrderCounter: () => ipcRenderer.invoke('ecommerceExports:nextTelegramOrderCounter'),

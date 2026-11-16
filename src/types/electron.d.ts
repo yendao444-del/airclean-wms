@@ -1048,6 +1048,8 @@ export interface ElectronAPI {
     findByScanCode: (code: string) => Promise<{
       success: boolean;
       data?: any | null;
+      /** Every order of a marketplace merged parcel sharing the scanned tracking number. */
+      group?: any[];
       error?: string;
     }>;
     getPackingReadModel?: (filters?: {
@@ -1138,6 +1140,19 @@ export interface ElectronAPI {
       skipped?: boolean;
       reason?: string;
       data?: any;
+      error?: string;
+    }>;
+    completePickupGroup: (
+      trackingCode: string,
+      data: { pickedBy?: string },
+    ) => Promise<{
+      success: boolean;
+      data?: {
+        trackingNumber: string;
+        total: number;
+        completed: any[];
+        alreadyCompleted: any[];
+      };
       error?: string;
     }>;
     resolveMismatch: (

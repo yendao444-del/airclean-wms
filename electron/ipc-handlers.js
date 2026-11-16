@@ -187,6 +187,9 @@ const DATA_SAFETY_ALLOWED_CHANNELS = new Set([
   "ecommerceExports:importSnapshot",
   "ecommerceExports:update",
   "ecommerceExports:completePickup",
+  // Merged marketplace parcels: every order sharing the tracking number is
+  // completed in one transaction under the stock lock, or none is.
+  "ecommerceExports:completePickupGroup",
   "ecommerceExports:resolveMismatch",
   // Deletion is restricted to administrators. Completed records remain
   // immutable so their order and stock history cannot diverge.
@@ -1483,11 +1486,29 @@ ipcMain.handle("support:reportIssue", async (event, payload = {}) => {
       caption,
       fileName: rawVideo ? `${reportId}.webm` : `${reportId}.png`,
     };
+    const supportConfig = await getSupportTelegramConfig();
+    if (!supportConfig.token || !supportConfig.chatId) {
+      // A machine without the BAOCAOLOI bot runtime variables can never
+      // deliver; say so plainly instead of pretending Telegram is just busy.
+      // Keep the report so it is sent once the variables are provisioned.
+      const queuedFile = supportReportQueue.enqueue(reportPayload);
+      console.warn("[SupportReport] DBY_TELEGRAM_BOT_TOKEN/DBY_TELEGRAM_CHAT_ID chưa được cấu hình trên máy này.");
+      return {
+        success: true,
+        data: { reportId, queued: true, queueId: queuedFile, notConfigured: true },
+        warning: `CHƯA GỬI ĐƯỢC báo lỗi ${reportId}: máy này chưa cấu hình bot Telegram báo lỗi (DBY_TELEGRAM_BOT_TOKEN, DBY_TELEGRAM_CHAT_ID). Báo cáo đã lưu trên máy và sẽ tự gửi khi admin cấu hình xong.`,
+      };
+    }
     await flushSupportReportQueue();
     const result = await deliverSupportReport(reportPayload);
     if (result.success) return { success: true, data: { reportId, queued: false } };
     const queuedFile = supportReportQueue.enqueue(reportPayload);
-    return { success: true, data: { reportId, queued: true, queueId: queuedFile }, warning: "Telegram đang lỗi; báo cáo đã được lưu và sẽ tự gửi lại." };
+    console.warn(`[SupportReport] Telegram delivery failed for ${reportId}: ${result.error}`);
+    return {
+      success: true,
+      data: { reportId, queued: true, queueId: queuedFile },
+      warning: `Chưa gửi được báo lỗi ${reportId} lên Telegram (${result.error || "lỗi không xác định"}). Báo cáo đã được lưu và sẽ tự gửi lại.`,
+    };
   } catch (error) {
     console.error("[SupportReport] Failed:", error);
     return { success: false, error: error?.message || "Không thể tạo báo lỗi" };
@@ -24677,11 +24698,21 @@ ipcMain.handle("ecommerceExports:findByScanCode", async (event, rawCode) => {
       fallbackCompletedOrders = completedOrders;
     }
 
+    const serializeScanRecord = (record) => ({
+      ...record,
+      ecommerceExportDate: record.ecommerceExportDate.toISOString(),
+      orderPlacedAt: record.orderPlacedAt?.toISOString() || null,
+      slaDeadlineAt: record.slaDeadlineAt?.toISOString() || null,
+      completedAt: record.completedAt?.toISOString() || null,
+      mismatchAt: record.mismatchAt?.toISOString() || null,
+      updatedAt: record.updatedAt?.toISOString() || null,
+    });
     const orderMatches = candidates.filter(
       (row) =>
         String(row.orderNumber || "").trim() === code ||
         String(row.ecommerceExportCode || "").trim() === code,
     );
+    let pickupGroup = null;
     if (orderMatches.length > 0) {
       candidates = orderMatches;
     } else {
@@ -24690,16 +24721,15 @@ ipcMain.handle("ecommerceExports:findByScanCode", async (event, rawCode) => {
           (normalizeTrackingNumber(row.trackingNumber) ||
             extractTrackingFromNotes(row.notes)) === code,
       );
-      const distinctOrders = new Set(
-        trackingMatches.map((row) =>
-          String(row.orderNumber || row.ecommerceExportCode || row.id),
-        ),
-      );
-      if (distinctOrders.size > 1) {
-        throw new Error(
-          `Mã vận đơn ${code} đang gắn với ${distinctOrders.size} đơn. Hãy đối chiếu và quét theo mã đơn hàng.`,
-        );
+      const byOrder = new Map();
+      for (const row of trackingMatches) {
+        const key = String(row.orderNumber || row.ecommerceExportCode || row.id);
+        if (!byOrder.has(key)) byOrder.set(key, row);
       }
+      // A marketplace merged parcel: several orders share one tracking
+      // number. Return every order so the scanner can hand the parcel over
+      // as a whole instead of rejecting the scan.
+      if (byOrder.size > 1) pickupGroup = [...byOrder.values()];
       candidates = trackingMatches;
     }
 
@@ -24734,11 +24764,8 @@ ipcMain.handle("ecommerceExports:findByScanCode", async (event, rawCode) => {
         : completedOrders.filter(
             (order) => normalizeTrackingNumber(order.trackingNumber) === code,
           );
-      if (trackingOrders.length > 1) {
-        throw new Error(
-          `Mã vận đơn ${code} đang gắn với ${trackingOrders.length} đơn đã gửi. Hãy đối chiếu theo mã đơn hàng.`,
-        );
-      }
+      // Several completed orders on one tracking number is a merged parcel
+      // that was already handed over; report it as already picked up.
       const completedOrder = exactOrder || trackingOrders[0];
       if (!completedOrder) return { success: true, data: null };
       return {
@@ -24761,15 +24788,8 @@ ipcMain.handle("ecommerceExports:findByScanCode", async (event, rawCode) => {
     }
     return {
       success: true,
-      data: {
-        ...record,
-        ecommerceExportDate: record.ecommerceExportDate.toISOString(),
-        orderPlacedAt: record.orderPlacedAt?.toISOString() || null,
-        slaDeadlineAt: record.slaDeadlineAt?.toISOString() || null,
-        completedAt: record.completedAt?.toISOString() || null,
-        mismatchAt: record.mismatchAt?.toISOString() || null,
-        updatedAt: record.updatedAt?.toISOString() || null,
-      },
+      data: serializeScanRecord(record),
+      ...(pickupGroup ? { group: pickupGroup.map(serializeScanRecord) } : {}),
     };
   } catch (error) {
     console.error("Find ecommerce export by scan code error:", error);
@@ -25514,11 +25534,21 @@ async function ensureMarketplaceOrderInTx(
 }
 
 // --- Core logic tach rieng de dung lai khi sync queue ---
-async function execEcommerceExportUpdate(id, data, { snapshotPickup = false, allowMismatchPickup = false } = {}) {
+async function execEcommerceExportUpdate(id, data, options = {}) {
   if (!prisma) throw new Error("Prisma not available");
   const result = await withStockLock(() =>
     prisma.$transaction(
-      async (tx) => {
+      (tx) => applyEcommerceExportUpdateInTx(tx, id, data, options),
+      { timeout: 30000, maxWait: 10000 },
+    ),
+  );
+  return result;
+}
+
+// Shared body of the ecommerce export update. Callers must already hold the
+// stock lock and pass an open transaction so several exports (a marketplace
+// merged parcel) can be completed atomically.
+async function applyEcommerceExportUpdateInTx(tx, id, data, { snapshotPickup = false, allowMismatchPickup = false } = {}) {
         const exportId = Number(id);
         if (!Number.isSafeInteger(exportId) || exportId <= 0) {
           throw new Error("Mã phiếu xuất TMĐT không hợp lệ.");
@@ -25735,12 +25765,147 @@ async function execEcommerceExportUpdate(id, data, { snapshotPickup = false, all
           );
         }
         return { skipped: false, data: newRecord };
+}
+
+// A marketplace (TikTok) may merge several orders of one buyer into a single
+// parcel that shares one tracking number. Completing that parcel must hand
+// over every open order in it atomically: either all are completed or none.
+async function completeEcommercePickupGroup(trackingCode, pickedBy) {
+  if (!prisma) throw new Error("Prisma not available");
+  const code = normalizeTrackingNumber(trackingCode);
+  if (!code || code.length > 200) throw new Error("Mã vận đơn không hợp lệ.");
+  return withStockLock(() =>
+    prisma.$transaction(
+      async (tx) => {
+        const candidates = await tx.ecommerceExport.findMany({
+          where: {
+            OR: [
+              { trackingNumber: code },
+              { trackingNumber: null, notes: { contains: code } },
+              { trackingNumber: "", notes: { contains: code } },
+            ],
+          },
+          select: { id: true, trackingNumber: true, notes: true },
+          orderBy: { id: "asc" },
+          take: 21,
+        });
+        const memberIds = candidates
+          .filter(
+            (row) =>
+              (normalizeTrackingNumber(row.trackingNumber) ||
+                extractTrackingFromNotes(row.notes)) === code,
+          )
+          .map((row) => row.id);
+        if (memberIds.length === 0) {
+          throw new Error(`Không tìm thấy đơn với mã vận đơn ${code}.`);
+        }
+        if (memberIds.length > 20) {
+          throw new Error(`Mã vận đơn ${code} gắn với quá nhiều đơn, cần kiểm tra dữ liệu.`);
+        }
+        await tx.$queryRaw(
+          Prisma.sql`SELECT "id" FROM "EcommerceExport" WHERE "id" IN (${Prisma.join(memberIds)}) ORDER BY "id" FOR UPDATE`,
+        );
+        const members = await tx.ecommerceExport.findMany({
+          where: { id: { in: memberIds } },
+          orderBy: { id: "asc" },
+        });
+        const label = (row) => row.orderNumber || row.ecommerceExportCode || `#${row.id}`;
+        const cancelled = members.filter((row) => row.status === "cancelled");
+        if (cancelled.length > 0) {
+          throw new Error(
+            members.length > 1
+              ? `KIỆN GỘP CÓ ĐƠN HỦY (${cancelled.map(label).join(", ")}) - phải giữ lại để kiểm tra.`
+              : "ĐƠN HỦY - phải giữ lại để kiểm tra.",
+          );
+        }
+        const mismatched = members.filter((row) => row.status === "mismatch");
+        if (mismatched.length > 0) {
+          throw new Error(
+            `KIỆN GỘP CẦN ĐỐI SOÁT (${mismatched.map(label).join(", ")}) - quét theo mã đơn hàng.`,
+          );
+        }
+        const invalid = members.filter(
+          (row) => row.status !== "completed" && !isPickupEligibleStatus(row.status),
+        );
+        if (invalid.length > 0) {
+          throw new Error(
+            `Trạng thái ${invalid[0].status || "không xác định"} không thể pickup (${label(invalid[0])}).`,
+          );
+        }
+        const completed = [];
+        const alreadyCompleted = members.filter((row) => row.status === "completed");
+        for (const row of members) {
+          if (row.status === "completed") continue;
+          const result = await applyEcommerceExportUpdateInTx(
+            tx,
+            row.id,
+            { updatedAt: row.updatedAt, pickedBy },
+            { snapshotPickup: true },
+          );
+          if (result.skipped) alreadyCompleted.push(result.data);
+          else completed.push(result.data);
+        }
+        return { trackingNumber: code, total: members.length, completed, alreadyCompleted };
       },
       { timeout: 30000, maxWait: 10000 },
     ),
   );
-  return result;
 }
+
+ipcMain.handle("ecommerceExports:completePickupGroup", async (_event, trackingCode, data = {}) => {
+  const pickupStartedAt = Date.now();
+  try {
+    requireRole("admin", "manager");
+    const result = await completeEcommercePickupGroup(trackingCode, data?.pickedBy);
+    console.info(
+      `[PickupPerf] completePickupGroup tracking=${result.trackingNumber} total=${result.total} completed=${result.completed.length} dbMs=${Date.now() - pickupStartedAt}`,
+    );
+    for (const record of result.completed) {
+      const items =
+        typeof record.items === "string"
+          ? JSON.parse(record.items || "[]")
+          : record.items || [];
+      emitStockChangedForSkus(
+        items.map((item) => item.variantSku || item.sku),
+        {
+          referenceType: "TMDT",
+          reference:
+            record.orderNumber || record.ecommerceExportCode || `TMDT-${record.id}`,
+        },
+      );
+      void logActivity({
+        module: "export",
+        action: "UPDATE",
+        description:
+          result.total > 1
+            ? `Pickup bàn giao TMDT #${record.id} (kiện gộp ${result.total} đơn, mã vận đơn ${result.trackingNumber})`
+            : `Pickup bàn giao TMDT #${record.id}`,
+        recordId: record.id,
+      });
+    }
+    const serialize = (record) => ({
+      ...record,
+      ecommerceExportDate: record.ecommerceExportDate?.toISOString?.() || record.ecommerceExportDate,
+      orderPlacedAt: record.orderPlacedAt?.toISOString?.() || null,
+      slaDeadlineAt: record.slaDeadlineAt?.toISOString?.() || null,
+      completedAt: record.completedAt?.toISOString?.() || null,
+      mismatchAt: record.mismatchAt?.toISOString?.() || null,
+      updatedAt: record.updatedAt?.toISOString?.() || null,
+    });
+    return {
+      success: true,
+      data: {
+        trackingNumber: result.trackingNumber,
+        total: result.total,
+        completed: result.completed.map(serialize),
+        alreadyCompleted: result.alreadyCompleted.map(serialize),
+      },
+    };
+  } catch (error) {
+    console.error("Complete ecommerce pickup group error:", error);
+    return { success: false, error: error.message };
+  }
+});
 
 ipcMain.handle("ecommerceExports:saveTelegramSettings", async (_event, payload = {}) => {
   try {

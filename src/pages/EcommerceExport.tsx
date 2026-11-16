@@ -1146,6 +1146,8 @@ Thời gian: ${currentTime}`;
 
         // 🚀 O(1) lookup từ Map → fallback .find() nếu map bị lệch (dữ liệu cũ/trùng)
         let foundEcommerceExport: EcommerceExport | undefined;
+        // Số đơn còn chờ trong kiện gộp đã biết trước khi lưu (0/1 = đơn lẻ).
+        let knownGroupSize = 0;
         const ambiguousTracking = ambiguousTrackingKeysRef.current.has(trimmed);
         const recordId = ambiguousTracking ? undefined : trackingMapRef.current.get(trimmed);
         if (recordId !== undefined) {
@@ -1205,6 +1207,30 @@ Thời gian: ${currentTime}`;
                 return;
             }
             foundEcommerceExport = lookup.data || undefined;
+            const groupMembers: EcommerceExport[] = Array.isArray(lookup.group) ? lookup.group : [];
+            if (groupMembers.length > 1) {
+                // Kiện gộp: nhiều đơn TikTok chung một mã vận đơn. Nhân viên chỉ
+                // nghe tiếng, nên quyết định cho cả kiện ngay tại đây.
+                const cancelled = groupMembers.filter(r => r.status === 'cancelled');
+                const mismatched = groupMembers.filter(r => r.status === 'mismatch');
+                const open = groupMembers.filter(r => r.status !== 'completed' && r.status !== 'cancelled');
+                if (cancelled.length > 0) {
+                    playAlert();
+                    const labels = cancelled.map(r => getOrderKey(r)).join(', ');
+                    setScanStatus({ type: 'error', message: `FAIL - KIỆN GỘP CÓ ĐƠN HỦY - ${labels}` });
+                    message.error(`Kiện gộp ${trimmed} có đơn hủy (${labels}) - phải giữ lại để kiểm tra.`);
+                    return;
+                }
+                if (mismatched.length > 0) {
+                    playAlert();
+                    const labels = mismatched.map(r => getOrderKey(r)).join(', ');
+                    setScanStatus({ type: 'error', message: `KIỆN GỘP CẦN ĐỐI SOÁT - ${labels}` });
+                    message.error(`Kiện gộp ${trimmed} có đơn cần đối soát (${labels}) - quét theo mã đơn hàng.`);
+                    return;
+                }
+                foundEcommerceExport = open[0] || groupMembers[0];
+                knownGroupSize = open.length;
+            }
         }
 
         if (foundEcommerceExport) {
@@ -1249,6 +1275,20 @@ Thời gian: ${currentTime}`;
                 const targetId = foundEcommerceExport.id;
                 const orderKey = getOrderKey(foundEcommerceExport);
                 const trackingKey = currentTracking;
+                // Quét bằng mã vận đơn → backend hoàn tất cả kiện (mọi đơn chung mã
+                // vận đơn, kể cả đơn gộp chưa nằm trong danh sách đang tải) trong
+                // một transaction. Quét bằng mã đơn vẫn chỉ xử lý đúng đơn đó.
+                const pickupByTracking = targetId > 0
+                    && foundEcommerceExport.status !== 'mismatch'
+                    && trimmed === trackingKey
+                    && trimmed !== orderKey;
+                let groupCompleted: any[] = [];
+                let groupAlreadyCompleted: any[] = [];
+                const settledIds = () => new Set<number>([
+                    targetId,
+                    ...groupCompleted.map((r: any) => r.id),
+                    ...groupAlreadyCompleted.map((r: any) => r.id),
+                ]);
                 const requestKeys = [trimmed, orderKey, trackingKey].filter(Boolean);
                 for (const key of requestKeys) {
                     inFlightScanKeysRef.current.add(key);
@@ -1269,6 +1309,8 @@ Thời gian: ${currentTime}`;
                 // Match the old local pickup behavior: once the code has been
                 // validated, acknowledge it immediately before the DB commit.
                 playSuccess();
+                // Kiện gộp: "tinh-tinh" để người quét biết đã ghi nhận cả kiện.
+                if (knownGroupSize > 1) setTimeout(playSuccess, 180);
                 console.info(`[PickupPerf] success-sound code=${trimmed} validatedMs=${Math.round(performance.now() - scanStartedAt)}`);
 
                 // Update the visible row before waiting on stock/database work.
@@ -1298,6 +1340,29 @@ Thời gian: ${currentTime}`;
                                     updatedAt: foundEcommerceExport.updatedAt,
                                     pickedBy: pickerName || undefined,
                                 })
+                                : pickupByTracking
+                                ? await (async () => {
+                                    const groupRes = await window.electronAPI.ecommerceExports.completePickupGroup(trackingKey, {
+                                        pickedBy: pickerName || undefined,
+                                    });
+                                    if (!groupRes.success || !groupRes.data) {
+                                        return { success: false, error: groupRes.error || 'Không thể hoàn tất kiện hàng.' };
+                                    }
+                                    groupCompleted = groupRes.data.completed || [];
+                                    groupAlreadyCompleted = groupRes.data.alreadyCompleted || [];
+                                    if (groupCompleted.length === 0) {
+                                        return {
+                                            success: true,
+                                            skipped: true,
+                                            data: { ...(groupAlreadyCompleted[0] || foundEcommerceExport), status: 'completed' },
+                                        };
+                                    }
+                                    return {
+                                        success: true,
+                                        skipped: false,
+                                        data: groupCompleted.find((r: any) => r.id === targetId) || groupCompleted[0],
+                                    };
+                                })()
                                 : await window.electronAPI.ecommerceExports.completePickup(foundEcommerceExport.id, {
                                     updatedAt: foundEcommerceExport.updatedAt,
                                     pickedBy: pickerName || undefined,
@@ -1313,7 +1378,8 @@ Thời gian: ${currentTime}`;
                                 message: `ĐÃ PICKUP - ${foundEcommerceExport.orderNumber || foundEcommerceExport.ecommerceExportCode}`,
                             });
                             message.warning(`Đơn ${foundEcommerceExport.orderNumber || foundEcommerceExport.ecommerceExportCode} đã gửi rồi!`);
-                            const nextRecords = exportsRef.current.filter(r => r.id !== targetId);
+                            const settled = settledIds();
+                            const nextRecords = exportsRef.current.filter(r => !settled.has(r.id));
                             exportsRef.current = nextRecords;
                             rebuildTrackingMap(nextRecords);
                             setEcommerceExports(nextRecords);
@@ -1326,7 +1392,8 @@ Thời gian: ${currentTime}`;
                                 message: `ĐÃ PICKUP - ${foundEcommerceExport.orderNumber || foundEcommerceExport.ecommerceExportCode}`,
                             });
                             message.warning(`Đơn ${foundEcommerceExport.orderNumber || foundEcommerceExport.ecommerceExportCode} đã hoàn tất rồi!`);
-                            const nextRecords = exportsRef.current.filter(r => r.id !== targetId);
+                            const settled = settledIds();
+                            const nextRecords = exportsRef.current.filter(r => !settled.has(r.id));
                             exportsRef.current = nextRecords;
                             rebuildTrackingMap(nextRecords);
                             setEcommerceExports(nextRecords);
@@ -1334,9 +1401,10 @@ Thời gian: ${currentTime}`;
                         }
                         if (!updateRes.success) {
                             playAlert();
+                            const isParcelRule = /^(KIỆN GỘP|ĐƠN HỦY)/.test(String(updateRes.error || ''));
                             setScanStatus({
                                 type: 'error',
-                                message: `LỖI DATABASE: ${updateRes.error}`
+                                message: isParcelRule ? `FAIL - ${updateRes.error}` : `LỖI DATABASE: ${updateRes.error}`
                             });
                             message.error(`Lỗi cập nhật: ${updateRes.error}`);
                             void loadEcommerceExports(true);
@@ -1347,9 +1415,13 @@ Thời gian: ${currentTime}`;
                         const normalizedSaved = savedRecord.ecommerceExportDate
                             ? { ...savedRecord, ecommerceExportDate: typeof savedRecord.ecommerceExportDate === 'string' ? savedRecord.ecommerceExportDate : dayjs(savedRecord.ecommerceExportDate).toISOString() }
                             : completedPayload;
-                        const nextRecords = exportsRef.current.filter(r => r.id !== targetId);
+                        const settled = settledIds();
+                        const nextRecords = exportsRef.current.filter(r => !settled.has(r.id));
                         if (statusFilterRef.current === 'completed' || statusFilterRef.current === 'all') {
                             nextRecords.push(normalizedSaved);
+                            for (const extra of groupCompleted) {
+                                if (extra.id !== normalizedSaved.id) nextRecords.push(extra);
+                            }
                         }
                         exportsRef.current = nextRecords;
                         rebuildTrackingMap(nextRecords);
@@ -1357,14 +1429,28 @@ Thời gian: ${currentTime}`;
 
                         console.log(`Updated status to completed for order #${foundEcommerceExport.id}`);
                         console.info(`[PickupPerf] db-complete code=${trimmed} totalMs=${Math.round(performance.now() - scanStartedAt)}`);
-                        setScanStatus({
-                            type: 'success',
-                            message: `THÀNH CÔNG - ${foundEcommerceExport.orderNumber || foundEcommerceExport.ecommerceExportCode}`
-                        });
-                        message.success(`Đơn ${foundEcommerceExport.orderNumber || foundEcommerceExport.ecommerceExportCode} gửi hàng thành công ✓`);
-                        // Telegram is auxiliary; never hold the scanner lane on
-                        // network latency or rate limits.
-                        void sendTelegramNotification(normalizedSaved);
+                        if (groupCompleted.length > 1) {
+                            // Kiện gộp mà danh sách đang tải chưa thấy đủ: bù tiếng
+                            // "tinh" thứ hai để người quét vẫn nghe ra kiện gộp.
+                            if (knownGroupSize <= 1) playSuccess();
+                            const labels = groupCompleted.map((r: any) => getOrderKey(r)).join(' + ');
+                            setScanStatus({
+                                type: 'success',
+                                message: `THÀNH CÔNG - KIỆN GỘP ${groupCompleted.length} ĐƠN - ${labels}`,
+                            });
+                            message.success(`Kiện gộp ${trackingKey}: ${groupCompleted.length} đơn gửi hàng thành công ✓`);
+                            // Một kiện = một tin Telegram, liệt kê đủ các đơn.
+                            void sendTelegramNotification({ ...normalizedSaved, orderNumber: labels });
+                        } else {
+                            setScanStatus({
+                                type: 'success',
+                                message: `THÀNH CÔNG - ${foundEcommerceExport.orderNumber || foundEcommerceExport.ecommerceExportCode}`
+                            });
+                            message.success(`Đơn ${foundEcommerceExport.orderNumber || foundEcommerceExport.ecommerceExportCode} gửi hàng thành công ✓`);
+                            // Telegram is auxiliary; never hold the scanner lane on
+                            // network latency or rate limits.
+                            void sendTelegramNotification(normalizedSaved);
+                        }
                         scheduleBgSync();
                     } catch (error) {
                         console.error('Error updating stock/status:', error);

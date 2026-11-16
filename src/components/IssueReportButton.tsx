@@ -107,7 +107,9 @@ export default function IssueReportButton({
                 message.error(result.error || 'Không thể gửi báo lỗi.');
                 return;
             }
-            if (result.warning) message.warning(result.warning);
+            // Máy chưa cấu hình bot báo lỗi thì không bao giờ gửi được: báo đỏ, hiện lâu.
+            if (result.warning && (result.data as any)?.notConfigured) message.error(result.warning, 10);
+            else if (result.warning) message.warning(result.warning, 6);
             else message.success(`Đã gửi báo lỗi ${result.data?.reportId || ''}`.trim());
             setOpen(false);
             form.resetFields();
