@@ -2,6 +2,7 @@ import { useState, useEffect, useMemo, useRef } from 'react';
 import {
     Card,
     Button,
+    ConfigProvider,
     Table,
     Modal,
     Form,
@@ -358,7 +359,14 @@ export default function ProductsPage() {
         const companyId = goodsCompanies.find(company =>
             Array.isArray(company.productIds) && company.productIds.map(Number).includes(Number(product.id))
         )?.id;
-        form.setFieldsValue({ ...product, companyId });
+        form.setFieldsValue({
+            ...product,
+            companyId,
+            barcode: product.barcode ?? null,
+            cost: product.cost ?? null,
+            stock: product.stock ?? null,
+            minStock: product.minStock ?? null,
+        });
 
         // Load existing variants
         if (product.variants) {
@@ -620,7 +628,20 @@ export default function ProductsPage() {
                     expectedUpdatedAt: new Date(editingProduct.updatedAt).toISOString(),
                 });
                 if (!result.success || !result.data) {
-                    message.error(result.error || 'Không thể cập nhật');
+                    if (result.conflict) {
+                        Modal.confirm({
+                            title: 'Tải lại dữ liệu sản phẩm?',
+                            content: 'Sản phẩm đã thay đổi hoặc không còn tồn tại. Tải lại sẽ bỏ phần chỉnh sửa chưa lưu.',
+                            okText: 'Tải lại danh sách',
+                            cancelText: 'Quay lại',
+                            onOk: async () => {
+                                setModalVisible(false);
+                                await loadProducts();
+                            },
+                        });
+                    } else {
+                        message.error(result.error || 'Không thể cập nhật');
+                    }
                     return;
                 }
                 const { name, categoryId, category, unit, price, updatedAt } = result.data;
@@ -1613,9 +1634,9 @@ export default function ProductsPage() {
                             <Input placeholder="VD: 5DUNICARE" disabled={!!editingProduct} />
                         </Form.Item>
 
-                        {!isBasicProductEdit && <Form.Item label="Barcode" name="barcode">
-                            <Input placeholder="Mã vạch (nếu có)" />
-                        </Form.Item>}
+                        <Form.Item label="Barcode" name="barcode">
+                            <Input placeholder="Mã vạch (nếu có)" disabled={isBasicProductEdit} />
+                        </Form.Item>
                     </div>
 
                     <Form.Item
@@ -1629,14 +1650,15 @@ export default function ProductsPage() {
                     <Form.Item label={
                         <div style={{ display: 'flex', justifyContent: 'space-between', width: '100%' }}>
                             <span>Danh mục</span>
-                            {!isBasicProductEdit && <Button
+                            <Button
                                 type="link"
                                 size="small"
+                                disabled={isBasicProductEdit}
                                 onClick={() => setCategoryModalVisible(true)}
                                 style={{ padding: 0, height: 'auto' }}
                             >
                                 ⚙️ Quản lý
-                            </Button>}
+                            </Button>
                         </div>
                     } name="categoryId">
                         <Select placeholder="Chọn danh mục" allowClear>
@@ -1656,7 +1678,7 @@ export default function ProductsPage() {
                         <Input placeholder="VD: Cái, Hộp, Kg..." />
                     </Form.Item>
 
-                    {isBasicProductEdit && (
+                    {isBasicProductEdit && variants.length > 0 && (
                         <Form.Item label="Giá bán sản phẩm" name="price">
                             <InputNumber<number>
                                 style={{ width: '100%' }}
@@ -1667,40 +1689,42 @@ export default function ProductsPage() {
                         </Form.Item>
                     )}
 
-                    {!isBasicProductEdit && <Form.Item
+                    <Form.Item
                         label={
                             <div style={{ display: 'flex', justifyContent: 'space-between', width: '100%' }}>
                                 <span>Công ty / thương hiệu hàng hóa</span>
-                                <Button type="link" size="small" onClick={() => setGoodsCompanyModalVisible(true)} style={{ padding: 0, height: 'auto' }}>
+                                <Button type="link" size="small" disabled={isBasicProductEdit} onClick={() => setGoodsCompanyModalVisible(true)} style={{ padding: 0, height: 'auto' }}>
                                     Quản lý
                                 </Button>
                             </div>
                         }
                         name="companyId"
-                        extra="Gán một lần tại danh sách sản phẩm. Khi lập phiếu nhập, công ty sẽ tự điền theo SKU."
+                        extra={isBasicProductEdit ? undefined : 'Gán một lần tại danh sách sản phẩm. Khi lập phiếu nhập, công ty sẽ tự điền theo SKU.'}
                     >
                         <Select
                             placeholder="Chưa gán công ty"
+                            disabled={isBasicProductEdit}
                             allowClear
                             showSearch
                             optionFilterProp="label"
                             options={goodsCompanies.map(company => ({ value: company.id, label: company.name }))}
                             notFoundContent="Chưa có công ty. Hãy tạo công ty/thương hiệu hàng hóa trước."
                         />
-                    </Form.Item>}
+                    </Form.Item>
 
                     {/* Hide price/stock when variants exist - each variant has its own */}
-                    {!isBasicProductEdit && variants.length === 0 && (
+                    {variants.length === 0 && (
                         <>
                             <div className="products-form-pair">
                                 <Form.Item
                                     label="Giá vốn"
                                     name="cost"
-                                    rules={[{ required: true, message: 'Vui lòng nhập giá vốn!' }]}
+                                    rules={isBasicProductEdit ? undefined : [{ required: true, message: 'Vui lòng nhập giá vốn!' }]}
                                 >
                                     <InputNumber
                                         style={{ width: '100%' }}
-                                        placeholder="0"
+                                        placeholder={isBasicProductEdit ? '—' : '0'}
+                                        disabled={isBasicProductEdit}
                                         formatter={(value) => `${value}`.replace(/\B(?=(\d{3})+(?!\d))/g, ',')}
                                         parser={(value) => value!.replace(/\$\s?|(,*)/g, '')}
                                     />
@@ -1710,11 +1734,12 @@ export default function ProductsPage() {
                                     label="Giá bán"
                                     name="price"
                                 >
-                                    <InputNumber
+                                    <InputNumber<number>
                                         style={{ width: '100%' }}
                                         placeholder="0 (không bắt buộc)"
+                                        min={isBasicProductEdit ? 0 : undefined}
                                         formatter={(value) => `${value}`.replace(/\B(?=(\d{3})+(?!\d))/g, ',')}
-                                        parser={(value) => value!.replace(/\$\s?|(,*)/g, '')}
+                                        parser={(value) => value ? Number(value.replace(/,/g, '')) : NaN}
                                     />
                                 </Form.Item>
                             </div>
@@ -1731,27 +1756,28 @@ export default function ProductsPage() {
                                 >
                                     <InputNumber
                                         style={{ width: '100%' }}
-                                        placeholder="0"
+                                        placeholder={isBasicProductEdit ? '—' : '0'}
                                         min={0}
                                         disabled={!!editingProduct}
                                     />
                                 </Form.Item>
 
                                 <Form.Item label="Tồn kho tối thiểu" name="minStock">
-                                    <InputNumber style={{ width: '100%' }} placeholder="10" min={0} />
+                                    <InputNumber style={{ width: '100%' }} placeholder={isBasicProductEdit ? '—' : '10'} min={0} disabled={isBasicProductEdit} />
                                 </Form.Item>
                             </div>
                         </>
                     )}
 
                     {/* Variants Management Section */}
-                    {!isBasicProductEdit && <div style={{ marginTop: 24, padding: 16, background: '#f5f5f5', borderRadius: 8 }}>
+                    <ConfigProvider componentDisabled={isBasicProductEdit || undefined}>
+                    <div style={{ marginTop: 24, padding: 16, background: '#f5f5f5', borderRadius: 8 }}>
                         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
                             <div>
                                 <Title level={5} style={{ margin: 0 }}>🎨 Phân loại sản phẩm (Variants)</Title>
                                 {editingProduct && (
                                     <div style={{ fontSize: 12, color: '#ff4d4f', marginTop: 4 }}>
-                                        ⚠️ Tồn kho chỉ được sửa qua trang Nhập kho hoặc Kiểm kho
+                                        {isBasicProductEdit ? 'Chỉ xem phân loại' : '⚠️ Tồn kho chỉ được sửa qua trang Nhập kho hoặc Kiểm kho'}
                                     </div>
                                 )}
                             </div>
@@ -1776,7 +1802,7 @@ export default function ProductsPage() {
 
                         {variants.length === 0 ? (
                             <div style={{ textAlign: 'center', color: '#8c8c8c', padding: '20px 0' }}>
-                                Sản phẩm chưa có phân loại. Click "+ Thêm màu" để thêm.
+                                {isBasicProductEdit ? 'Sản phẩm chưa có phân loại.' : 'Sản phẩm chưa có phân loại. Click "+ Thêm màu" để thêm.'}
                             </div>
                         ) : (
                             <div className="products-variants-list" style={{ maxHeight: 350, overflowY: 'auto' }}>
@@ -1935,7 +1961,7 @@ export default function ProductsPage() {
                                                 min={0}
                                                 value={variant.stock}
                                                 // 🏷️ Chỉ disable nếu variant có flag isOriginal = true
-                                                disabled={!!variant.isOriginal}
+                                                disabled={isBasicProductEdit || !!variant.isOriginal}
                                                 onChange={(value) => {
                                                     const newVariants = [...variants];
                                                     newVariants[index].stock = value || 0;
@@ -2086,7 +2112,8 @@ export default function ProductsPage() {
                                 ))}
                             </div>
                         )}
-                    </div>}
+                    </div>
+                    </ConfigProvider>
 
                     <Form.Item>
                         <Space style={{ width: '100%', justifyContent: 'flex-end' }}>

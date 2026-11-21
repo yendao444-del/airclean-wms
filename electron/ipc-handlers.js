@@ -4551,7 +4551,7 @@ ipcMain.handle("products:update", async (event, id, data) => {
     console.error("❌ Update product error:", error.code, error.message);
 
     if (isRestrictedEditor && error.code === "P2025") {
-      return { success: false, error: conflictMessage };
+      return { success: false, conflict: true, error: conflictMessage };
     }
 
     if (error.code === "P2002") {
