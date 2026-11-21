@@ -13,6 +13,7 @@ export function usePermissions() {
     const dedicatedPermissions = new Set<Permission>([
         'products.view',
         'products.create',
+        'products.update',
         'purchase.view',
         'purchase.create',
     ]);
@@ -34,7 +35,7 @@ export function usePermissions() {
         // Check CRUD permissions for a module
         canView: (module: string) => isTestAccount || (isDedicatedOperator && ['products', 'purchase'].includes(module)) || canView(role, module),
         canCreate: (module: string) => isTestAccount || (isDedicatedOperator && ['products', 'purchase'].includes(module)) || canCreate(role, module),
-        canUpdate: (module: string) => isTestAccount || canUpdate(role, module),
+        canUpdate: (module: string) => isTestAccount || (isDedicatedOperator && module === 'products') || canUpdate(role, module),
         canDelete: (module: string) => isTestAccount || canDelete(role, module),
 
         // Get accessible menu keys

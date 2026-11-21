@@ -333,7 +333,7 @@ export interface ElectronAPI {
     ) => Promise<{ success: boolean; data?: Product; error?: string }>;
     update: (
       id: number,
-      data: Partial<Product>,
+      data: Partial<Product> & { expectedUpdatedAt?: string },
     ) => Promise<{ success: boolean; data?: Product; error?: string }>;
     delete: (id: number) => Promise<{ success: boolean; error?: string }>;
     getTopSelling?: (args?: {

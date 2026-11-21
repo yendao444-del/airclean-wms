@@ -2201,6 +2201,10 @@ const DATA_SAFETY_MUTABLE_CONFIG_KEYS = new Set([
 ]);
 
 function getDataSafetyBlockedOperation(channel, args) {
+  // This account uses the revision-checked catalog-only write in the handler.
+  if (channel === "products:update" && isDedicatedReceivingOperator()) {
+    return null;
+  }
   if (
     channel === "appConfig:set" &&
     DATA_SAFETY_MUTABLE_CONFIG_KEYS.has(String(args?.[1] || ""))
@@ -4390,10 +4394,52 @@ ipcMain.handle("products:create", async (event, data) => {
 });
 
 ipcMain.handle("products:update", async (event, id, data) => {
+  const actor = currentSession;
+  const isRestrictedEditor = isDedicatedReceivingOperator(actor);
+  const conflictMessage = "Sản phẩm đã được cập nhật từ máy khác hoặc không còn tồn tại. Vui lòng tải lại danh sách rồi sửa lại.";
   try {
-    requireRole("admin", "manager");
+    requireReceivingOperatorRole("admin", "manager");
     if (!prisma) throw new Error("Prisma not available");
     const isAdmin = isAdminSession();
+    if (isRestrictedEditor) {
+      const { name, categoryId, price, unit, expectedUpdatedAt, ...otherFields } = data || {};
+      if (Object.keys(otherFields).length > 0) {
+        throw new Error("Bạn chỉ được sửa tên, danh mục, đơn vị tính và giá bán của sản phẩm.");
+      }
+      const revision = typeof expectedUpdatedAt === "string" ? new Date(expectedUpdatedAt) : null;
+      if (!revision || !Number.isFinite(revision.getTime())) {
+        throw new Error("Phiên bản sản phẩm không hợp lệ. Vui lòng tải lại danh sách sản phẩm.");
+      }
+      if (
+        typeof name !== "string" || !name.trim() ||
+        typeof unit !== "string" || !unit.trim() ||
+        !Number.isFinite(price) || price < 0 ||
+        (categoryId !== null && (!Number.isInteger(categoryId) || categoryId <= 0))
+      ) {
+        throw new Error("Vui lòng kiểm tra tên, đơn vị tính, danh mục và giá bán sản phẩm.");
+      }
+
+      const changes = { name: name.trim(), categoryId, price, unit: unit.trim() };
+      const product = await prisma.product.update({
+        where: { id, updatedAt: revision },
+        data: {
+          ...changes,
+          updatedAt: new Date(Math.max(Date.now(), revision.getTime() + 1)),
+        },
+        include: { category: true },
+      });
+      void logActivity({
+        module: "products",
+        action: "UPDATE",
+        description: `Cập nhật sản phẩm "${product.name}"`,
+        recordId: product.id,
+        recordName: product.name,
+        changes,
+        userName: actor.username,
+        userId: actor.id,
+      });
+      return { success: true, data: sanitizeProductForNonAdmin(product) };
+    }
     if (
       !isAdmin &&
       ["stock", "minStock", "variants"].some((field) =>
@@ -4503,6 +4549,10 @@ ipcMain.handle("products:update", async (event, id, data) => {
     };
   } catch (error) {
     console.error("❌ Update product error:", error.code, error.message);
+
+    if (isRestrictedEditor && error.code === "P2025") {
+      return { success: false, error: conflictMessage };
+    }
 
     if (error.code === "P2002") {
       const field = error.meta?.target?.[0] || "unknown";
