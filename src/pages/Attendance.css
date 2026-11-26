@@ -7539,3 +7539,10 @@ body:has(.role-preview-banner) .ps-modal-detail-mode { max-height: calc(100vh - 
 .att-bonus-tip > div { display: flex; justify-content: space-between; gap: 16px; }
 .att-bonus-tip-total { margin-top: 2px; padding-top: 4px; border-top: 1px solid rgba(255, 255, 255, 0.3); }
 .att-bonus-tip small { opacity: 0.7; }
+
+/* Packing commission assignment dialog: one row per level, name left, rate right. */
+.packing-level-option.ant-radio-wrapper { display: flex; align-items: center; width: 100%; margin: 0; padding: 11px 12px; border-radius: 8px; font-weight: 600; }
+.packing-level-option.ant-radio-wrapper > span:last-child { flex: 1; min-width: 0; }
+.packing-level-option__row { display: flex; align-items: center; justify-content: space-between; gap: 12px; width: 100%; }
+.packing-level-option__name { display: inline-flex; align-items: center; white-space: nowrap; }
+.packing-level-option__dot { display: inline-block; flex: none; width: 9px; height: 9px; border-radius: 50%; margin-right: 8px; }

@@ -28,6 +28,7 @@ const SHIFT_MODES = {
 };
 const packing = require("./package-packing.cjs");
 const packedComboCheck = require("./packed-combo-check.cjs");
+const { isRestDay } = require("./attendance-rewards.js");
 
 function canEditShiftScope(session) {
   return session?.role === "admin" || SHIFT_SCOPE_EDITORS.includes(String(session?.username || "").trim().toLowerCase());
@@ -644,6 +645,9 @@ function buildFines(ledger, data = {}, now = new Date(), inScope = () => true, s
   const fines = [];
   for (const [date, day] of Object.entries(ledger.days)) {
     if (date < EFFECTIVE_DATE || date > today) continue;
+    // Sundays and public holidays are rest days (same calendar as attendance):
+    // unchecked units carry to the next working day and are fined there.
+    if (isRestDay(date)) continue;
     if ((data.lockedPeriods || []).some(period => date >= dayKey(period.start) && date <= dayKey(period.end))) continue;
     const assignedTo = day.assignedTo || assigneeFor(date, ledger);
     const empId = employeeFor(data, assignedTo);

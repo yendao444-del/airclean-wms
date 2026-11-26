@@ -368,19 +368,12 @@ function launchElectron({ devServerUrl, useBuiltRenderer = false }) {
 }
 
 function watchElectronBackend({ devServerUrl, useBuiltRenderer = false }) {
-  const watchedFiles = [
-    'main.js',
-    'preload.js',
-    'ipc-handlers.js',
-    'packing-read-model.js',
-    'update-handlers.js',
-    'offline-queue.js',
-    'tmdt-physical-stock.cjs',
-    'package-packing.cjs',
-    'handling-unit-reconciliation.cjs',
-    'handling-unit-shift-policy.cjs',
-    'handling-unit-pick-order.mjs',
-  ];
+  // Watch every backend module (attendance, fines, packing helpers, ...), not a
+  // hand-maintained list, so any edit under electron/ restarts the main process.
+  const electronDir = path.join(projectRoot, 'electron');
+  const watchedFiles = fs.readdirSync(electronDir, { withFileTypes: true })
+    .filter((entry) => entry.isFile() && /\.(?:js|cjs|mjs)$/i.test(entry.name))
+    .map((entry) => entry.name);
   for (const filename of watchedFiles) {
     const filePath = path.join(projectRoot, 'electron', filename);
     if (!fs.existsSync(filePath)) continue;
@@ -407,7 +400,7 @@ function watchElectronBackend({ devServerUrl, useBuiltRenderer = false }) {
     });
     electronWatchers.push(watcher);
   }
-  console.log('[START] Watching Electron backend/preload files for automatic restart');
+  console.log(`[START] Watching ${electronWatchers.length} Electron backend/preload files for automatic restart`);
 }
 
 function shutdown(exitCode = 0) {

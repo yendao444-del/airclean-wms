@@ -41708,6 +41708,9 @@ ipcMain.handle("attendance:recognize", async (event, { image }) => {
       checkType,
       confidence: result.confidence,
       date: today,
+      // Prisma fills @default(now()) on the workstation, whose clock is
+      // untrusted. Persist the same database instant used for date/session.
+      timestamp: new Date(serverClock.epochMs),
       ...(attendanceLogDeviceColumnsAvailable
         ? {
             deviceId: attendanceDevice?.deviceId || null,

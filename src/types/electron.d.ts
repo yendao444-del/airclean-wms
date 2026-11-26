@@ -1925,7 +1925,7 @@ export interface ElectronAPI {
     ) => Promise<{ success: boolean; data?: any }>;
     getCurrentSession: () => Promise<{ success: boolean; data?: any }>;
     startRolePreview: (userId: number) => Promise<{ success: boolean; data?: any; error?: string }>;
-    stopRolePreview: () => Promise<{ success: boolean; data?: any; error?: string }>;
+    stopRolePreview: () => Promise<{ success: boolean; data?: any; error?: string; loggedOut?: boolean }>;
     ensureAdmin: () => Promise<{ success: boolean; error?: string }>;
     heartbeat: () => Promise<{ success: boolean }>;
   };

@@ -928,6 +928,13 @@ const getPackingLevelOptions = (commission: PackingCommissionConfig) => [
     ...(commission.customLevels || []).map(level => ({ ...level, color: 'cyan', rate: commission.rates[level.key] || 0 })),
 ];
 
+// Rates typed directly in the assignment dialog are stored as ordinary custom
+// levels (so payroll needs no new data shape) under this key prefix, and one
+// level is shared by every product assigned the same rate.
+const PACKING_CUSTOM_RATE_CHOICE = '__custom_rate__';
+const PACKING_CUSTOM_RATE_KEY_PREFIX = 'custom-rate-';
+const isPackingCustomRateLevel = (key: string) => key.startsWith(PACKING_CUSTOM_RATE_KEY_PREFIX);
+
 const getPackingLevelOption = (commission: PackingCommissionConfig, key: string) =>
     getPackingLevelOptions(commission).find(level => level.key === key)
     || { key: 'easy', label: 'Dễ', unit: 'gói', color: 'green', rate: commission.rates.easy };
@@ -4131,6 +4138,7 @@ export default function Attendance() {
     const [packingAssignmentOpen, setPackingAssignmentOpen] = useState(false);
     const [packingAssignmentMode, setPackingAssignmentMode] = useState<'assign' | 'change'>('assign');
     const [pendingPackingLevel, setPendingPackingLevel] = useState<string>('easy');
+    const [pendingPackingCustomRate, setPendingPackingCustomRate] = useState<number | null>(null);
     const [customPackingLevelOpen, setCustomPackingLevelOpen] = useState(false);
     const [customPackingLevelName, setCustomPackingLevelName] = useState('');
     const [customPackingLevelRate, setCustomPackingLevelRate] = useState<number>(100);
@@ -7201,16 +7209,39 @@ export default function Attendance() {
             return;
         }
         const current = normalizePackingCommission(tempConfig.packingCommission);
+        let rates = current.rates;
+        let customLevels = current.customLevels || [];
+        let levelKey = level;
+        let levelLabel = '';
+        if (level === PACKING_CUSTOM_RATE_CHOICE) {
+            const rate = Number(pendingPackingCustomRate);
+            if (pendingPackingCustomRate === null || !Number.isFinite(rate) || rate <= 0) {
+                message.info('Nhập số tiền hoa hồng tùy chỉnh (đ/gói).');
+                return;
+            }
+            // Reuse the level already carrying this exact rate instead of
+            // creating one duplicate level per product.
+            const existing = customLevels.find(item => isPackingCustomRateLevel(item.key) && item.unit === 'gói' && Number(rates[item.key]) === rate);
+            if (existing) {
+                levelKey = existing.key;
+                levelLabel = existing.label;
+            } else {
+                levelKey = `${PACKING_CUSTOM_RATE_KEY_PREFIX}${Date.now()}`;
+                levelLabel = `Tùy chỉnh ${rate.toLocaleString('vi-VN')}đ`;
+                customLevels = [...customLevels, { key: levelKey, label: levelLabel, unit: 'gói' }];
+                rates = { ...rates, [levelKey]: rate };
+            }
+        }
         const skuLevels = { ...current.skuLevels };
         skus.forEach(sku => {
             const key = normalizePackingSku(sku);
-            if (key) skuLevels[key] = level;
+            if (key) skuLevels[key] = levelKey;
         });
-        const saved = await persistPackingCommission({ ...current, skuLevels });
+        const saved = await persistPackingCommission({ ...current, rates, customLevels, skuLevels });
         if (!saved) return;
         setSelectedPackingSkus([]);
         setPackingAssignmentOpen(false);
-        message.success(`${packingAssignmentMode === 'change' ? 'Đã đổi' : 'Đã gán'} ${skus.length} sản phẩm sang mức ${getPackingLevelOption(tempPackingCommission, level).label}.`);
+        message.success(`${packingAssignmentMode === 'change' ? 'Đã đổi' : 'Đã gán'} ${skus.length} sản phẩm sang mức ${levelLabel || getPackingLevelOption(current, levelKey).label}.`);
     };
 
     const openPackingAssignment = (skus: Array<string | number>, mode: 'assign' | 'change') => {
@@ -7220,9 +7251,16 @@ export default function Attendance() {
         }
         setSelectedPackingSkus(skus);
         setPackingAssignmentMode(mode);
-        setPendingPackingLevel(mode === 'change' && skus.length === 1
+        const currentLevel = mode === 'change' && skus.length === 1
             ? getPackingCatalogLevel(packingCatalog.find(item => normalizePackingSku(item.sku) === normalizePackingSku(skus[0])) || { sku: '', productName: '', memberSkus: [] })
-            : 'easy');
+            : 'easy';
+        if (isPackingCustomRateLevel(currentLevel)) {
+            setPendingPackingLevel(PACKING_CUSTOM_RATE_CHOICE);
+            setPendingPackingCustomRate(Number(tempPackingCommission.rates[currentLevel] || 0) || null);
+        } else {
+            setPendingPackingLevel(currentLevel);
+            setPendingPackingCustomRate(null);
+        }
         setPackingAssignmentOpen(true);
     };
 
@@ -12571,11 +12609,37 @@ const openConfigModal = () => {
                 <Text type="secondary" style={{ display: 'block', marginBottom: 14 }}>Áp dụng mức mới cho {selectedPackingSkus.length} sản phẩm đã chọn. Đơn phát sinh trước thời điểm xác nhận vẫn giữ mức cũ.</Text>
                 <Radio.Group value={pendingPackingLevel} onChange={event => setPendingPackingLevel(event.target.value)} style={{ width: '100%' }}>
                     <Space direction="vertical" size={10} style={{ width: '100%' }}>
-                        {getPackingLevelOptions(tempPackingCommission).map(level => (
-                            <Radio key={level.key} value={level.key} style={{ width: '100%', margin: 0, padding: '11px 12px', border: `1px solid ${pendingPackingLevel === level.key ? '#8ad9ae' : '#e5e5e5'}`, borderRadius: 8, color: level.key === 'easy' ? '#079447' : level.key === 'medium' ? '#d48806' : '#cf1322', fontWeight: 600 }}>
-                                <span style={{ display: 'inline-flex', justifyContent: 'space-between', width: 'calc(100% - 24px)' }}><span><span style={{ display: 'inline-block', width: 9, height: 9, borderRadius: '50%', background: level.key === 'easy' ? '#16a05d' : level.key === 'medium' ? '#f0a000' : level.key === 'high' ? '#f04444' : '#13a8a8', marginRight: 8 }} />{level.label}</span><span>{level.rate.toLocaleString('vi-VN')}đ/{level.unit}</span></span>
+                        {getPackingLevelOptions(tempPackingCommission)
+                            // Typed rates are offered through the "Tùy chỉnh" row below.
+                            .filter(level => !isPackingCustomRateLevel(level.key))
+                            .map(level => (
+                            <Radio key={level.key} value={level.key} className="packing-level-option" style={{ border: `1px solid ${pendingPackingLevel === level.key ? '#8ad9ae' : '#e5e5e5'}`, color: level.key === 'easy' ? '#079447' : level.key === 'medium' ? '#d48806' : level.key === 'high' ? '#cf1322' : '#08979c' }}>
+                                <span className="packing-level-option__row"><span className="packing-level-option__name"><span className="packing-level-option__dot" style={{ background: level.key === 'easy' ? '#16a05d' : level.key === 'medium' ? '#f0a000' : level.key === 'high' ? '#f04444' : '#13a8a8' }} />{level.label}</span><span>{level.rate.toLocaleString('vi-VN')}đ/{level.unit}</span></span>
                             </Radio>
                         ))}
+                        <Radio value={PACKING_CUSTOM_RATE_CHOICE} className="packing-level-option" style={{ border: `1px solid ${pendingPackingLevel === PACKING_CUSTOM_RATE_CHOICE ? '#8ad9ae' : '#e5e5e5'}`, color: '#08979c' }}>
+                            <span className="packing-level-option__row">
+                                <span className="packing-level-option__name"><span className="packing-level-option__dot" style={{ background: '#13a8a8' }} />Tùy chỉnh</span>
+                                <InputNumber
+                                    size="small"
+                                    min={1}
+                                    step={10}
+                                    precision={0}
+                                    placeholder="Nhập số"
+                                    value={pendingPackingCustomRate}
+                                    onFocus={() => setPendingPackingLevel(PACKING_CUSTOM_RATE_CHOICE)}
+                                    onChange={value => {
+                                        setPendingPackingCustomRate(value === null ? null : Number(value));
+                                        setPendingPackingLevel(PACKING_CUSTOM_RATE_CHOICE);
+                                    }}
+                                    onPressEnter={() => assignPackingLevel(selectedPackingSkus, PACKING_CUSTOM_RATE_CHOICE)}
+                                    formatter={value => (value === undefined || value === null || String(value) === '' ? '' : Number(value).toLocaleString('vi-VN'))}
+                                    parser={value => Number(String(value || '').replace(/\D/g, '')) || 0}
+                                    addonAfter="đ/gói"
+                                    style={{ width: 150 }}
+                                />
+                            </span>
+                        </Radio>
                     </Space>
                 </Radio.Group>
             </Modal>
@@ -12590,6 +12654,7 @@ const openConfigModal = () => {
                 cancelText="Hủy"
                 width={440}
                 centered
+                zIndex={1100}
             >
                 <Space direction="vertical" size={14} style={{ width: '100%', marginTop: 8 }}>
                     <div>

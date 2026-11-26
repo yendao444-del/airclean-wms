@@ -13,13 +13,24 @@ function createRoleSession({ getSession, setSession, loadUser, toClient, onSwitc
     passwordChangedAt: new Date(user.passwordChangedAt).getTime(),
     mustChangePassword: Boolean(toClient(user).mustChangePassword),
   });
+  // invalidOwner: the Admin login is definitely unusable (log out).
+  // transient: the database could not be read; keep the session and retry.
+  const invalidOwnerError = message => Object.assign(new Error(message), { invalidOwner: true });
   async function validateOwner(session) {
-    if (!session || session.role !== 'admin') throw new Error('Chỉ Admin được đóng vai nhân viên.');
-    const user = await loadUser(session.id);
+    if (!session || session.role !== 'admin') throw invalidOwnerError('Chỉ Admin được đóng vai nhân viên.');
+    let user;
+    try {
+      user = await loadUser(session.id);
+    } catch (error) {
+      throw Object.assign(
+        new Error('Chưa xác minh được phiên Admin do kết nối cơ sở dữ liệu đang bận. Vui lòng thử lại sau ít giây.'),
+        { transient: true, cause: error },
+      );
+    }
     if (!user || user.status !== 'active' || user.role !== 'admin'
       || (session.passwordChangedAt && new Date(user.passwordChangedAt).getTime() !== session.passwordChangedAt)
       || toClient(user).mustChangePassword) {
-      throw new Error('Phiên Admin không còn hợp lệ. Vui lòng đăng nhập lại.');
+      throw invalidOwnerError('Phiên Admin không còn hợp lệ. Vui lòng đăng nhập lại.');
     }
     return user;
   }
@@ -37,10 +48,37 @@ function createRoleSession({ getSession, setSession, loadUser, toClient, onSwitc
     onSwitch({ action: 'start', admin, user });
     return { success: true, data: toClient(user) };
   }
+  // Leaving preview must always succeed. `loggedOut: true` tells the renderer
+  // that no Admin login remains, so it returns to the login screen instead of
+  // keeping a preview banner the backend no longer honours.
   async function stop() {
-    const admin = owner || getSession();
-    const user = await validateOwner(admin);
+    if (!owner) {
+      // The preview was already dropped (backend restart or invalid Admin).
+      const session = getSession();
+      if (session?.role !== 'admin') {
+        setSession(null);
+        return { success: true, data: null, loggedOut: true };
+      }
+      try {
+        return { success: true, data: toClient(await validateOwner(session)) };
+      } catch (error) {
+        if (error.transient) throw error;
+        setSession(null);
+        return { success: true, data: null, loggedOut: true };
+      }
+    }
+    const admin = owner;
     const previous = getSession();
+    let user;
+    try {
+      user = await validateOwner(admin);
+    } catch (error) {
+      if (error.transient) throw error;
+      owner = null;
+      setSession(null);
+      onSwitch({ action: 'stop', admin, user: previous });
+      return { success: true, data: null, loggedOut: true };
+    }
     setSession(sessionFor(user));
     owner = null;
     onSwitch({ action: 'stop', admin, user: previous });
@@ -73,7 +111,11 @@ function createRoleSession({ getSession, setSession, loadUser, toClient, onSwitc
     try {
       if (owner && Date.now() - ownerCheckedAt > 10000) {
         try { await validateOwner(owner); ownerCheckedAt = Date.now(); }
-        catch (error) { owner = null; setSession(null); throw error; }
+        catch (error) {
+          // A busy database must not silently end the Admin login mid-preview.
+          if (!error.transient) { owner = null; setSession(null); }
+          throw error;
+        }
       }
       return await handler();
     } finally {

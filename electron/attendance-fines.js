@@ -9,7 +9,7 @@ const DEFAULT_ATTENDANCE_CONFIG = {
     morningStart: '08:00',
     afternoonStart: '13:30',
 };
-const { calculateAttendanceRewardSummary, resolveEmployeeId, normalizeConfig } = require('./attendance-rewards');
+const { bangkokParts, calculateAttendanceRewardSummary, resolveEmployeeId, normalizeConfig } = require('./attendance-rewards');
 const { validScheduleForSession } = require('./attendance-schedule-fines');
 const { readLateFineSnapshot } = require('./attendance-fine-snapshot');
 const { attendanceLogDateWhere, attendanceRewardLogRange } = require('./attendance-log-scope.cjs');
@@ -324,7 +324,11 @@ function calculateLateAttendanceFinePlan(attendanceData, logs, options = {}) {
             const scheduleConfig = getScheduleConfigAt(config, log.timestamp, employee.type);
             const [startHour, startMinute] = String(isMorning ? scheduleConfig.morningStart : scheduleConfig.afternoonStart).split(':').map(Number);
             const timestamp = new Date(log.timestamp);
-            const lateMinutes = timestamp.getHours() * 60 + timestamp.getMinutes() - (startHour * 60 + startMinute);
+            // Use the fixed UTC+7 wall clock (same as reward streaks), never the
+            // host time zone, which a workstation user can change.
+            const clockParts = bangkokParts(timestamp);
+            if (!clockParts) continue;
+            const lateMinutes = clockParts.minutes - (startHour * 60 + startMinute);
             if (lateMinutes <= Number(scheduleConfig.graceMinutes || 0)) continue;
 
             const level = getFineLevel(lateMinutes);

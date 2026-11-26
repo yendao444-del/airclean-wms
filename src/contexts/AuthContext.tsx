@@ -162,10 +162,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         setActualUser(nextUser);
     };
 
+    // Both calls throw an Error with a user-facing message on failure so the
+    // caller can show it; they never fail silently.
     const startRolePreview = async (nextPreviewUser: AuthUser) => {
         if (actualUser?.role !== 'admin' || nextPreviewUser.role === 'admin') return false;
         const result = await window.electronAPI?.users?.startRolePreview?.(nextPreviewUser.id);
-        if (!result?.success || !result.data) return false;
+        if (!result?.success || !result.data) throw new Error(result?.error || 'Không chuyển được sang tài khoản này.');
         setPreviewUser(result.data as AuthUser);
         return true;
     };
@@ -173,8 +175,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const stopRolePreview = async () => {
         if (!previewUser) return true;
         const result = await window.electronAPI?.users?.stopRolePreview?.();
-        if (!result?.success) return false;
+        if (!result?.success) throw new Error(result?.error || 'Chưa thoát được chế độ xem. Vui lòng thử lại.');
         setPreviewUser(null);
+        // The backend no longer holds an Admin login (lost preview or invalid
+        // Admin): return to the login screen rather than a half-signed-in UI.
+        if (result.loggedOut || !result.data) doLogout();
         return true;
     };
 

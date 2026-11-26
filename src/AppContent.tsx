@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo, useCallback, useRef, lazy, Suspense, Component, ErrorInfo, ReactNode, type ComponentType } from 'react';
-import { Layout, Menu, Button, Typography, ConfigProvider, Space, Tooltip, Avatar } from 'antd';
+import { Layout, Menu, Button, Typography, ConfigProvider, Space, Tooltip, Avatar, message } from 'antd';
 import AntAppProvider from './components/AntAppProvider';
 import {
     BarChartOutlined,
@@ -287,9 +287,30 @@ function AppContent() {
     const staffPreviewAccounts = previewAccounts.filter(account => account.role === 'staff' || account.role === 'viewer');
     const managerTargets = managerPreviewAccounts.length > 0 ? managerPreviewAccounts : [genericManagerPreview];
     const staffTargets = staffPreviewAccounts.length > 0 ? staffPreviewAccounts : [genericStaffPreview];
+    // One switch at a time: the backend waits for in-flight requests (up to
+    // 30s) and rejects overlapping switches, so lock the controls meanwhile.
+    const [rolePreviewSwitching, setRolePreviewSwitching] = useState(false);
+    const runRolePreviewSwitch = async (action: () => Promise<boolean>) => {
+        if (rolePreviewSwitching) return false;
+        setRolePreviewSwitching(true);
+        try {
+            return await action();
+        } catch (error) {
+            const text = error instanceof Error ? error.message : String(error);
+            message.error(text.replace(/^Error invoking remote method '[^']+': (Error: )?/, ''));
+            return false;
+        } finally {
+            setRolePreviewSwitching(false);
+        }
+    };
     const activateRolePreview = async (account: AuthUser) => {
-        const started = await startRolePreview(account);
+        const started = await runRolePreviewSwitch(() => startRolePreview(account));
         if (started) setPreviewMenuOpen(false);
+    };
+    const exitRolePreview = async () => {
+        const stopped = await runRolePreviewSwitch(stopRolePreview);
+        if (stopped) setPreviewMenuOpen(false);
+        return stopped;
     };
     useEffect(() => {
         if (!previewMenuOpen && !profileMenuOpen) return;
@@ -342,7 +363,7 @@ function AppContent() {
     }, [accessibleKeys]);
     const openProfile = async () => {
         setProfileMenuOpen(false);
-        if (isRolePreview) await stopRolePreview();
+        if (isRolePreview && !(await exitRolePreview())) return;
         navigateTo('my-profile');
     };
     const logoutFromProfileMenu = () => {
@@ -808,7 +829,7 @@ function AppContent() {
                                                 {previewAccountsError && <div className="app-popup-status app-popup-status--error">{previewAccountsError}</div>}
                                                 <div className="app-popup-section-label">Quản lý</div>
                                                 {managerTargets.map(account => (
-                                                    <button key={`preview-${account.role}-${account.id}`} type="button" className="app-popup-user" onClick={() => activateRolePreview(account)}>
+                                                    <button key={`preview-${account.role}-${account.id}`} type="button" className="app-popup-user" disabled={rolePreviewSwitching} onClick={() => activateRolePreview(account)}>
                                                         <TeamOutlined />
                                                         <span className="app-popup-user__identity"><strong>{account.fullName || account.username}</strong><small>@{account.username}</small></span>
                                                         {previewUser?.id === account.id && <CheckCircleOutlined className="app-popup-user__selected" />}
@@ -816,7 +837,7 @@ function AppContent() {
                                                 ))}
                                                 <div className="app-popup-section-label">Nhân viên</div>
                                                 {staffTargets.map(account => (
-                                                    <button key={`preview-${account.role}-${account.id}`} type="button" className="app-popup-user" onClick={() => activateRolePreview(account)}>
+                                                    <button key={`preview-${account.role}-${account.id}`} type="button" className="app-popup-user" disabled={rolePreviewSwitching} onClick={() => activateRolePreview(account)}>
                                                         <UserOutlined />
                                                         <span className="app-popup-user__identity"><strong>{account.fullName || account.username}</strong><small>@{account.username}</small></span>
                                                         {previewUser?.id === account.id && <CheckCircleOutlined className="app-popup-user__selected" />}
@@ -825,8 +846,8 @@ function AppContent() {
                                             </>
                                         )}
                                         {isRolePreview && (
-                                            <button type="button" className="app-popup-action app-popup-action--danger" onClick={() => { stopRolePreview(); setPreviewMenuOpen(false); }}>
-                                                <CloseOutlined /> Trở về giao diện Admin
+                                            <button type="button" className="app-popup-action app-popup-action--danger" disabled={rolePreviewSwitching} onClick={() => { void exitRolePreview(); }}>
+                                                <CloseOutlined /> {rolePreviewSwitching ? 'Đang chuyển…' : 'Trở về giao diện Admin'}
                                             </button>
                                         )}
                                     </div>
@@ -886,8 +907,8 @@ function AppContent() {
                             <span className="role-preview-banner__username">@{previewUser.username}</span>
                         </div>
                         <div className="role-preview-banner__notice">Đang chạy đúng quyền nhân viên; thao tác nhập liệu sẽ ghi thật theo tài khoản này.</div>
-                        <Button size="small" icon={<CloseOutlined />} onClick={stopRolePreview}>
-                            Thoát chế độ xem
+                        <Button size="small" icon={<CloseOutlined />} loading={rolePreviewSwitching} onClick={() => { void exitRolePreview(); }}>
+                            {rolePreviewSwitching ? 'Đang thoát…' : 'Thoát chế độ xem'}
                         </Button>
                     </div>
                 )}

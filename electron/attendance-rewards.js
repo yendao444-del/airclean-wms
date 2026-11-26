@@ -397,6 +397,7 @@ function calculateAllAttendanceRewardSummaries({ employees = [], ...input } = {}
 module.exports = {
   DEFAULT_ATTENDANCE_REWARD_CONFIG,
   addDays,
+  bangkokParts,
   calculateAllAttendanceRewardSummaries,
   calculateAttendanceRewardSummary,
   calculateWaiver,
